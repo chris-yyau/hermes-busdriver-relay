@@ -22,9 +22,11 @@ Implemented:
 - `skills/busdriver-relay/references/*.md`
 - `scripts/hermes-busdriver-status`
 - `scripts/hermes-busdriver-lock`
+- `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
 - `tests/contract/test_lock.py`
+- `tests/contract/test_runtime_check.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
 - ADRs and README boundary docs
@@ -43,13 +45,14 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-4 passed
+6 passed
 smoke_ok True
-returncodes [0, 0, 0]
+returncodes [0, 0, 0, 0]
 package_version 1.71.0
 hook_event_count 7
 route_count 7
 repo_dirty False
+runtime_check.mutating_launcher_allowed False
 ```
 
 ## Still intentionally deferred

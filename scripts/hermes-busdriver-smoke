@@ -17,6 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+RUNTIME = ROOT / "scripts" / "hermes-busdriver-runtime-check"
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
@@ -32,7 +33,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK)]))
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME)]))
     checks.append(run([sys.executable, "-m", "pytest", "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
@@ -51,6 +52,24 @@ def main() -> int:
                     "repo_dirty": (status.get("repo") or {}).get("dirty") if status.get("repo") else None,
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-status --pretty for details>"
+            except Exception as e:  # noqa: BLE001
+                checks[-1]["summary_parse_error"] = str(e)
+
+        runtime_cmd = [sys.executable, str(RUNTIME), "--plugin-root", args.plugin_root]
+        if args.repo:
+            runtime_cmd += ["--repo", args.repo]
+        checks.append(run(runtime_cmd, timeout=60))
+        if checks[-1]["ok"]:
+            try:
+                runtime = json.loads(checks[-1]["stdout"])
+                eq = runtime.get("runtime_equivalence") or {}
+                checks[-1]["summary"] = {
+                    "inside_claude_code_hook_invocation": eq.get("inside_claude_code_hook_invocation"),
+                    "hook_manifest_available": eq.get("hook_manifest_available"),
+                    "gate_hooks_declared": eq.get("gate_hooks_declared"),
+                    "mutating_launcher_allowed": eq.get("mutating_launcher_allowed"),
+                }
+                checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-runtime-check --pretty for details>"
             except Exception as e:  # noqa: BLE001
                 checks[-1]["summary_parse_error"] = str(e)
 

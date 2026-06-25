@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Read-only H13 hook-runtime equivalence checker for Hermes Busdriver Relay.
+
+This script does NOT execute Busdriver gates and does NOT mutate repos. It reports
+whether the current process appears to be running as a Claude Code hook
+invocation, and whether Hermes may treat a shell-launched Busdriver script as
+gate-safe. The expected answer for normal Hermes terminal execution is NO.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import select
+import sys
+from pathlib import Path
+from typing import Any
+
+SCHEMA = "hermes-busdriver-runtime-check/v0"
+HOOK_RUNTIME_KEYS = {
+    "hook_event_name",
+    "hookEventName",
+    "tool_name",
+    "toolName",
+    "tool_input",
+    "toolInput",
+    "transcript_path",
+    "transcriptPath",
+    "session_id",
+    "cwd",
+}
+GATED_HOOK_DESCRIPTIONS = ("[GATE]", "[GUARD]", "Block git hook-bypass")
+
+
+def read_json(path: Path) -> tuple[Any | None, str | None]:
+    try:
+        return json.loads(path.read_text()), None
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)
+
+
+def resolve_plugin_root(arg: str | None) -> Path:
+    candidates = []
+    if arg:
+        candidates.append(Path(arg).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return candidates[0].resolve()
+
+
+def maybe_read_stdin(max_bytes: int = 131072) -> tuple[str, bool]:
+    if sys.stdin.isatty():
+        return "", False
+    try:
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+    except Exception:
+        readable = [sys.stdin]
+    if not readable:
+        return "", False
+    data = sys.stdin.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    return data, bool(data)
+
+
+def hook_input_status(stdin_text: str, stdin_present: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"stdin_present": stdin_present, "json": False, "keys": [], "looks_like_claude_hook_input": False}
+    if not stdin_present:
+        return out
+    try:
+        data = json.loads(stdin_text)
+    except Exception as e:  # noqa: BLE001
+        out["parse_error"] = str(e)
+        return out
+    if isinstance(data, dict):
+        keys = sorted(str(k) for k in data.keys())
+        out.update({"json": True, "keys": keys, "looks_like_claude_hook_input": bool(HOOK_RUNTIME_KEYS.intersection(keys))})
+        if isinstance(data.get("hookSpecificOutput"), dict):
+            out["looks_like_claude_hook_input"] = True
+    return out
+
+
+def manifest_status(root: Path) -> dict[str, Any]:
+    path = root / "hooks/hooks.json"
+    data, err = read_json(path)
+    events: dict[str, Any] = {}
+    gated_hooks = []
+    if isinstance(data, dict) and isinstance(data.get("hooks"), dict):
+        for event, entries in data["hooks"].items():
+            info = {"entries": len(entries) if isinstance(entries, list) else 0, "gated_descriptions": []}
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    desc = str(entry.get("description", ""))
+                    if any(token in desc for token in GATED_HOOK_DESCRIPTIONS):
+                        info["gated_descriptions"].append(desc)
+                        gated_hooks.append({"event": event, "matcher": entry.get("matcher"), "description": desc})
+            events[event] = info
+    return {"path": str(path), "exists": path.exists(), "parse_error": err, "events": events, "gated_hooks": gated_hooks}
+
+
+def selected_env() -> dict[str, Any]:
+    names = [
+        "CLAUDE_PLUGIN_ROOT",
+        "BUSDRIVER_PLUGIN_ROOT",
+        "BUSDRIVER_STATE_DIR",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDECODE",
+        "HERMES_HOME",
+        "HERMES_PROFILE",
+    ]
+    return {name: {"set": name in os.environ, "value": os.environ.get(name) if name in {"BUSDRIVER_STATE_DIR", "HERMES_PROFILE"} else None} for name in names}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Read-only Busdriver hook-runtime equivalence checker")
+    ap.add_argument("--plugin-root", help="Busdriver plugin/source root")
+    ap.add_argument("--repo", help="Repo/worktree path for context only")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    root = resolve_plugin_root(args.plugin_root)
+    stdin_text, stdin_present = maybe_read_stdin()
+    hook_input = hook_input_status(stdin_text, stdin_present)
+    manifest = manifest_status(root)
+
+    inside_hook_invocation = bool(hook_input.get("looks_like_claude_hook_input"))
+    has_manifest = manifest["exists"] and not manifest.get("parse_error")
+    has_gate_hooks = bool(manifest.get("gated_hooks"))
+
+    result = {
+        "schema": SCHEMA,
+        "read_only": True,
+        "plugin_root": str(root),
+        "repo": str(Path(args.repo).expanduser().resolve()) if args.repo else None,
+        "current_process": {
+            "stdin_is_tty": sys.stdin.isatty(),
+            "env": selected_env(),
+        },
+        "hook_input": hook_input,
+        "hook_manifest": manifest,
+        "runtime_equivalence": {
+            "inside_claude_code_hook_invocation": inside_hook_invocation,
+            "hook_manifest_available": has_manifest,
+            "gate_hooks_declared": has_gate_hooks,
+            "hermes_shell_is_claude_hook_runtime": False,
+            "claude_hooks_will_intercept_inner_shell_commands": False,
+            "mutating_launcher_allowed": False,
+            "reason": "Claude Code hooks are harness-level tool interceptors. A normal Hermes-launched shell process can read Busdriver scripts but does not itself become the Claude Code PreToolUse/PostToolUse runtime, and inner commands inside that process are not intercepted by Claude Code hooks.",
+            "allowed_now": ["read-only status", "route/gate inventory", "marker summary", "Hermes-owned locks", "smoke tests"],
+            "blocked_until_one_of": [
+                "launcher enters the same Claude Code/Busdriver hook runtime",
+                "launcher explicitly invokes Busdriver-equivalent gate checks and validates their decisions",
+                "launcher refuses every gated operation and returns blocked status",
+                "launcher is constrained to local-only non-finalizing work with no push/PR/merge/deploy/commit path",
+            ],
+        },
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

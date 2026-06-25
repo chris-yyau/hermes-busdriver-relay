@@ -192,6 +192,7 @@ Known seams:
 - `scripts/codex/codex-goal-dispatch.sh`: mutating primitive candidate, not v1-authorized as gate-safe.
 - `scripts/codex/goal-result.schema.json`: Codex self-report schema, not full final result envelope.
 - `scripts/lib/ultra-oracle.sh`: advisory shell adapter; requires data-boundary and standalone checks.
+- `scripts/hermes-busdriver-runtime-check`: Hermes-owned read-only H13 checker; normal result blocks mutating launcher (`mutating_launcher_allowed=false`).
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence

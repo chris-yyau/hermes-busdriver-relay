@@ -72,3 +72,16 @@ When pulling Busdriver source after PR #240/#241, remember source worktrees may 
 1.71.0 also added routing/domain surface that Hermes should discover JIT instead of hardcoding: `vue-reviewer`, `php-reviewer`, `vue-patterns`, `kubernetes-patterns`, `config-gc`, `skill-scout`, and `agent-self-evaluation`. Always read `skills/orchestrator/domain-supplements.md` and `skills/orchestrator/tasks-catalog.md` live before deciding a route.
 
 `finishing-a-development-branch` now explicitly requires linked worktree detection and human-confirmed cleanup. Hermes must not auto-remove worktrees, especially harness-managed `.claude/worktrees/*` / `${BUSDRIVER_STATE_DIR}/worktrees/*` worktrees.
+
+## H13 runtime-check lesson
+
+`hermes-busdriver-runtime-check` is a read-only checker, not a gate runner. Its normal Hermes result should be:
+
+```text
+hook_manifest_available=true
+gate_hooks_declared=true
+inside_claude_code_hook_invocation=false
+mutating_launcher_allowed=false
+```
+
+That is a PASS for the relay boundary: Hermes can see Busdriver hooks but is not inside the Claude Code hook runtime. Do not interpret this as permission to launch mutating work; it proves the opposite until a future v2 supplies a real runtime-equivalence mechanism.

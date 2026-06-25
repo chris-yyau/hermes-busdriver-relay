@@ -32,6 +32,7 @@ skills/busdriver-relay/SKILL.md            Hermes skill source
 skills/busdriver-relay/references/         Skill reference notes
 scripts/hermes-busdriver-status            Read-only status probe
 scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
+scripts/hermes-busdriver-runtime-check     H13 hook-runtime equivalence checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Smoke/contract tests
 ```
@@ -58,6 +59,17 @@ scripts/hermes-busdriver-lock release --repo /path/to/repo --operation repo-muta
 ```
 
 Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo.
+
+### Hook-runtime equivalence check
+
+```bash
+scripts/hermes-busdriver-runtime-check \
+  --plugin-root /path/to/busdriver \
+  --repo /path/to/repo \
+  --pretty
+```
+
+This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result until a future v2 proves hook-runtime equivalence.
 
 ### Safe smoke checks
 
