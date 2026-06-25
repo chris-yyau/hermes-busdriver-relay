@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Hermes / Busdriver runtime state (never commit)
+.hermes/
+.claude/
+.opencode/
+*.local
+*.local.*
+*.secret*
+*.token*
+*.key
+
+# Logs / run output
+logs/
+runs/
+*.log
+*.out
+*.err
+*.rc
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

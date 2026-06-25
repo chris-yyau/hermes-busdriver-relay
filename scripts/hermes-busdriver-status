@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Read-only Hermes ↔ Busdriver status probe.
+
+This command intentionally does not write to Busdriver, Claude, Hermes, or the
+project repo. It is a Phase-0/status helper, not a launcher.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+KEY_ENTRYPOINTS = [
+    "hooks/hooks.json",
+    "skills/orchestrator/SKILL.md",
+    "skills/orchestrator/tasks-catalog.md",
+    "skills/orchestrator/domain-supplements.md",
+    "skills/orchestrator/references/hooks-reference.md",
+    "skills/orchestrator/references/gate-recovery.md",
+    "skills/supplements/MANIFEST.md",
+    "scripts/lib/resolve-cli.sh",
+    "scripts/codex/codex-goal-dispatch.sh",
+    "scripts/codex/goal-result.schema.json",
+    "scripts/lib/ultra-oracle.sh",
+    "scripts/doctor.js",
+]
+
+MIN_GATE_SCRIPTS = [
+    "hooks/gate-scripts/careful-guard.sh",
+    "hooks/gate-scripts/pre-commit-gate.sh",
+    "hooks/gate-scripts/pre-pr-gate.sh",
+    "hooks/gate-scripts/pre-merge-gate.sh",
+    "hooks/gate-scripts/pre-implementation-gate.sh",
+    "hooks/gate-scripts/freeze-guard.sh",
+    "hooks/gate-scripts/check-design-document.sh",
+    "hooks/gate-scripts/load-orchestrator.sh",
+    "scripts/hooks/block-no-verify.js",
+]
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 10) -> dict[str, Any]:
+    try:
+        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+        return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
+    except FileNotFoundError as e:
+        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(e)}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "returncode": 124, "stdout": "", "stderr": f"timeout after {timeout}s"}
+
+
+def read_json(path: Path) -> tuple[Any | None, str | None]:
+    try:
+        return json.loads(path.read_text()), None
+    except Exception as e:  # noqa: BLE001 - status probe should report parse errors
+        return None, str(e)
+
+
+def resolve_plugin_root(arg: str | None) -> Path:
+    candidates = []
+    if arg:
+        candidates.append(Path(arg).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return candidates[0].resolve()
+
+
+def package_status(root: Path) -> dict[str, Any]:
+    pkg = root / "package.json"
+    data, err = read_json(pkg)
+    return {
+        "path": str(pkg),
+        "exists": pkg.exists(),
+        "parse_error": err,
+        "name": data.get("name") if isinstance(data, dict) else None,
+        "version": data.get("version") if isinstance(data, dict) else None,
+    }
+
+
+def user_config_status(state_dir: str) -> dict[str, Any]:
+    cfg = Path.home() / state_dir / "busdriver.json"
+    data, err = read_json(cfg)
+    routes = data.get("routes", {}) if isinstance(data, dict) else {}
+    return {
+        "path": str(cfg),
+        "exists": cfg.exists(),
+        "parse_error": err,
+        "route_keys": sorted(routes.keys()) if isinstance(routes, dict) else [],
+        "ultra_oracle_enabled_keys": sorted((data.get("ultraOracle") or {}).keys()) if isinstance(data, dict) else [],
+    }
+
+
+def hook_inventory(root: Path) -> dict[str, Any]:
+    path = root / "hooks/hooks.json"
+    data, err = read_json(path)
+    inv: dict[str, Any] = {"path": str(path), "exists": path.exists(), "parse_error": err, "events": {}, "commands": []}
+    if not isinstance(data, dict):
+        return inv
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return inv
+    commands: list[str] = []
+    for event, entries in hooks.items():
+        event_info = {"entries": 0, "matchers": [], "descriptions": []}
+        if isinstance(entries, list):
+            event_info["entries"] = len(entries)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if "matcher" in entry:
+                    event_info["matchers"].append(entry.get("matcher"))
+                if "description" in entry:
+                    event_info["descriptions"].append(entry.get("description"))
+                for h in entry.get("hooks", []) or []:
+                    if isinstance(h, dict) and h.get("command"):
+                        commands.append(h["command"])
+        inv["events"][event] = event_info
+    inv["commands"] = commands
+    return inv
+
+
+def file_presence(root: Path, rels: list[str]) -> dict[str, bool]:
+    return {rel: (root / rel).exists() for rel in rels}
+
+
+def extract_script_refs(commands: list[str]) -> list[str]:
+    refs = set()
+    for cmd in commands:
+        # Conservative extraction of Busdriver-relative script paths from hook command strings.
+        for m in re.finditer(r"(?:(?:hooks|scripts|skills)/[^\"'\s;]+)", cmd):
+            refs.add(m.group(0))
+    return sorted(refs)
+
+
+def git_status(repo: str | None) -> dict[str, Any] | None:
+    if not repo:
+        return None
+    path = Path(repo).expanduser().resolve()
+    root_result = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if not root_result["ok"]:
+        return {"path": str(path), "is_git_repo": False, "error": root_result["stderr"] or root_result["stdout"]}
+    root = Path(root_result["stdout"])
+    branch = run(["git", "branch", "--show-current"], cwd=root)
+    status = run(["git", "status", "--porcelain=v1"], cwd=root)
+    head = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
+    git_dir = run(["git", "rev-parse", "--git-dir"], cwd=root)
+    git_dir_path = (root / git_dir["stdout"]).resolve() if git_dir["ok"] and not Path(git_dir["stdout"]).is_absolute() else Path(git_dir["stdout"]) if git_dir["ok"] else None
+    states = {}
+    if git_dir_path:
+        states = {
+            "merge_head": (git_dir_path / "MERGE_HEAD").exists(),
+            "rebase_apply": (git_dir_path / "rebase-apply").exists(),
+            "rebase_merge": (git_dir_path / "rebase-merge").exists(),
+            "cherry_pick_head": (git_dir_path / "CHERRY_PICK_HEAD").exists(),
+        }
+    lines = status["stdout"].splitlines() if status["stdout"] else []
+    return {
+        "path": str(path),
+        "is_git_repo": True,
+        "root": str(root),
+        "branch": branch["stdout"],
+        "head": head["stdout"],
+        "dirty": bool(lines),
+        "porcelain": lines,
+        "states": states,
+    }
+
+
+def resolve_cli(root: Path) -> dict[str, Any]:
+    script = root / "scripts/lib/resolve-cli.sh"
+    if not script.exists():
+        return {"ok": False, "error": "missing scripts/lib/resolve-cli.sh"}
+    res = run(["bash", str(script), "--json"], cwd=root, timeout=20)
+    if not res["ok"]:
+        return res
+    try:
+        return {"ok": True, "data": json.loads(res["stdout"])}
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"invalid json: {e}", "raw": res["stdout"]}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Read-only Hermes ↔ Busdriver status probe")
+    ap.add_argument("--plugin-root", help="Busdriver plugin root (default: env or ~/.claude/plugins/marketplaces/busdriver)")
+    ap.add_argument("--state-dir", default=os.environ.get("BUSDRIVER_STATE_DIR", ".claude"), help="Busdriver state dir name (default: .claude)")
+    ap.add_argument("--repo", help="Project repo/worktree to inspect read-only")
+    ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = ap.parse_args()
+
+    root = resolve_plugin_root(args.plugin_root)
+    hooks = hook_inventory(root)
+    hook_refs = extract_script_refs(hooks.get("commands", []))
+    out = {
+        "status_schema": "hermes-busdriver-status/v0",
+        "read_only": True,
+        "plugin_root": {"path": str(root), "exists": root.exists()},
+        "state_dir": args.state_dir,
+        "package": package_status(root),
+        "user_config": user_config_status(args.state_dir),
+        "hooks": hooks,
+        "hook_script_refs": {rel: (root / rel).exists() for rel in hook_refs},
+        "key_entrypoints": file_presence(root, KEY_ENTRYPOINTS),
+        "minimum_gate_scripts": file_presence(root, MIN_GATE_SCRIPTS),
+        "resolve_cli": resolve_cli(root),
+        "repo": git_status(args.repo),
+    }
+    json.dump(out, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
