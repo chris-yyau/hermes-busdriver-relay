@@ -35,6 +35,7 @@ scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
+scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
 ```
@@ -111,6 +112,17 @@ Supported `--agent` values: `codex`, `opencode`, `droid`, `agy`, `grok`, `noop`,
 
 A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
 
+### Optional real-agent smoke
+
+```bash
+scripts/hermes-busdriver-agent-smoke \
+  --plugin-root /path/to/busdriver \
+  --agent codex \
+  --pretty
+```
+
+This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+
 ### Safe smoke checks
 
 ```bash
@@ -129,7 +141,8 @@ Allowed now:
 3. maintain Hermes-owned single-flight lock/status scaffolding;
 4. maintain safe smoke/contract tests;
 5. run `hermes-busdriver-gate` preflight/postflight around draft-mode agents;
-6. document decisions in ADRs.
+6. run `hermes-busdriver-agent-draft` and optional `hermes-busdriver-agent-smoke` for draft implementation/adapters;
+7. document decisions in ADRs.
 
 Not allowed yet:
 
