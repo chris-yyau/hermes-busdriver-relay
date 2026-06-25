@@ -70,10 +70,6 @@ real_codex_smoke.ok True
 real_codex_smoke.status needs_busdriver_review
 real_codex_smoke.changed_files [src/codex_smoke.txt]
 real_codex_smoke.verifier file=True
-real_opencode_smoke.ok True
-real_opencode_smoke.status needs_busdriver_review
-real_opencode_smoke.changed_files [src/opencode_smoke.txt]
-real_opencode_smoke.commit_allowed False
 ```
 
 ## Still intentionally deferred
@@ -81,7 +77,7 @@ real_opencode_smoke.commit_allowed False
 These are not missing work; they are blocked by design until stronger equivalent finalization gates exist:
 
 - `hermes-busdriver-codex-goal` with commit authority
-- repo-mutating Codex/OpenCode/Droid/Agy/Grok launcher finalization
+- repo-mutating Codex (others temporarily deferred) launcher finalization
 - `.claude/hermes/jobs` queue
 - commit / PR / merge / deploy automation
 - direct MCP/plugin routing
@@ -94,7 +90,7 @@ Hermes may use this repo for:
 1. Busdriver-aware intake and route recognition;
 2. Phase 0 status discovery;
 3. read-only route/gate/marker/lock reporting;
-4. preflight/postflight gates around Hermes-launched draft agents such as Codex/OpenCode/Droid/Agy/Grok;
+4. preflight/postflight gates around Hermes-launched draft agents such as Codex (others temporarily deferred);
 5. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
 6. future v2 work to add agent adapters and commit/PR-capable equivalent gates.
 

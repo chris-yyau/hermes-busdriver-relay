@@ -21,7 +21,7 @@ hermes-busdriver-lock acquire --operation agent-draft
   → JSON report
 ```
 
-The launcher supports named agents (`codex`, `opencode`, `droid`, `agy`, `grok`, `noop`) plus a `custom` shell command mode for tests and advanced/manual adapters.
+Temporarily focused on Codex only. The launcher supports `codex` + `noop`/`custom` (for tests). Other agents (opencode, droid, agy, grok) are deferred.
 
 ## Safety Contract
 
@@ -65,6 +65,5 @@ The PATH guard is defense in depth, not a complete sandbox. An agent that delibe
 
 `hermes-busdriver-agent-smoke` is an opt-in smoke runner for real model-backed adapters. It creates a throwaway git repo and calls `hermes-busdriver-agent-draft` with the selected agent. It is not part of the default contract suite because it can consume provider quota/tokens.
 
-The Codex and OpenCode adapters have been verified against temporary repos: Codex added `src/codex_smoke.txt`, OpenCode added `src/opencode_smoke.txt`, postflight reported only the scoped file, the verifier passed, HEAD remained unchanged, and the final status was `needs_busdriver_review`.
+The Codex adapter has been verified with real smoke (opencode and others temporarily deferred).
 
-OpenCode requires one extra environment detail: `hermes-busdriver-agent-draft` exports `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` to the agent process. Without this, the user's OpenCode Busdriver plugin may fall back to `~/.config/opencode` and fail closed on missing gate scripts.

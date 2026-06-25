@@ -169,7 +169,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["codex", "opencode", "droid", "agy", "grok", "noop", "custom"], default="custom")
+    ap.add_argument("--agent", choices=["codex", "noop", "custom"], default="codex", help="Temporarily only codex is supported for active Hermes draft work. noop/custom for tests.")
     ap.add_argument("--agent-cmd", help="Custom shell command for tests/advanced use. Prompt is available via HERMES_AGENT_PROMPT_FILE.")
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")

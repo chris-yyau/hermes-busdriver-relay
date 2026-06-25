@@ -108,7 +108,7 @@ scripts/hermes-busdriver-agent-draft \
   --pretty
 ```
 
-Supported `--agent` values: `codex`, `opencode`, `droid`, `agy`, `grok`, `noop`, `custom`.
+Currently only `--agent codex` is supported (others temporarily deferred). `noop` and `custom` are for tests.
 
 A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
 

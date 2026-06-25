@@ -68,7 +68,7 @@ def summarize_report(data: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--agent", default="codex", choices=["codex", "opencode", "droid", "agy", "grok", "custom"])
+    ap.add_argument("--agent", default="codex", choices=["codex", "custom"])
     ap.add_argument("--agent-cmd", help="Required when --agent custom")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--keep-repo", action="store_true", help="Do not delete the throwaway repo")
