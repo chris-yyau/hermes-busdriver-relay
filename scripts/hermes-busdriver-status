@@ -7,9 +7,11 @@ project repo. It is a Phase-0/status helper, not a launcher.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +30,35 @@ KEY_ENTRYPOINTS = [
     "scripts/codex/goal-result.schema.json",
     "scripts/lib/ultra-oracle.sh",
     "scripts/doctor.js",
+]
+
+DEFAULT_ROLE_ROUTES = {
+    "litmus.reviewer": ["codex", "droid"],
+    "blueprint-review.reviewer_1": ["agy", "droid"],
+    "blueprint-review.reviewer_2": ["codex", "droid"],
+    "blueprint-review.reviewer_3": ["grok", "droid"],
+    "council.pragmatist": ["agy", "droid"],
+    "council.critic": ["codex", "droid"],
+    "council.researcher": ["grok", "droid"],
+}
+
+MARKER_FILES = [
+    "design-review-needed.local.md",
+    "skip-design-review.local",
+    "skip-litmus.local",
+    "litmus-passed.local",
+    "pr-review-passed.local",
+    "pr-codex-lead.local.json",
+    "pr-backstop-verdict.local.json",
+    "reviewed-commits.local",
+    "bypass-log.jsonl",
+    ".merge-bypass-pending.local",
+    ".gate-block-count.local",
+    ".impl-gate-block-count.local",
+    "freeze-scope.local",
+    "litmus-state.md",
+    "litmus-iteration-history.local.jsonl",
+    "builtin-review-prompt-path.local",
 ]
 
 MIN_GATE_SCRIPTS = [
@@ -86,8 +117,8 @@ def package_status(root: Path) -> dict[str, Any]:
     }
 
 
-def user_config_status(state_dir: str) -> dict[str, Any]:
-    cfg = Path.home() / state_dir / "busdriver.json"
+def user_config_status(state_dir: str, user_config: str | None = None) -> dict[str, Any]:
+    cfg = Path(user_config).expanduser() if user_config else Path.home() / state_dir / "busdriver.json"
     data, err = read_json(cfg)
     routes = data.get("routes", {}) if isinstance(data, dict) else {}
     return {
@@ -130,6 +161,89 @@ def hook_inventory(root: Path) -> dict[str, Any]:
 
 def file_presence(root: Path, rels: list[str]) -> dict[str, bool]:
     return {rel: (root / rel).exists() for rel in rels}
+
+
+def sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def critical_file_hashes(root: Path, hook_refs: list[str]) -> dict[str, Any]:
+    rels = sorted(set(KEY_ENTRYPOINTS + MIN_GATE_SCRIPTS + hook_refs))
+    out: dict[str, Any] = {}
+    for rel in rels:
+        path = root / rel
+        if path.is_file():
+            st = path.stat()
+            out[rel] = {"exists": True, "sha256": sha256_file(path), "size": st.st_size, "mtime": int(st.st_mtime)}
+        else:
+            out[rel] = {"exists": path.exists(), "sha256": None, "size": None, "mtime": None}
+    return out
+
+
+def effective_routes(user_cfg: dict[str, Any], resolved_cli: dict[str, Any]) -> dict[str, Any]:
+    routes = user_cfg.get("routes", {}) if isinstance(user_cfg, dict) else {}
+    clis = ((resolved_cli.get("data") or {}).get("clis") or {}) if resolved_cli.get("ok") else {}
+    result: dict[str, Any] = {}
+    for role, default_route in DEFAULT_ROLE_ROUTES.items():
+        configured = routes.get(role, default_route) if isinstance(routes, dict) else default_route
+        if isinstance(configured, str):
+            route = [configured]
+        elif isinstance(configured, list):
+            route = [str(x) for x in configured]
+        else:
+            route = list(default_route)
+        resolved = None
+        unavailable = []
+        for cli in route:
+            info = clis.get(cli)
+            if info and info.get("available") is True:
+                resolved = cli
+                break
+            unavailable.append(cli)
+        result[role] = {
+            "route": route,
+            "source": "user" if isinstance(routes, dict) and role in routes else "default",
+            "resolved": resolved,
+            "available": resolved is not None,
+            "unavailable_before_resolution": unavailable if resolved else route,
+        }
+    return result
+
+
+def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[str, Any] | None:
+    if not repo_status or not repo_status.get("is_git_repo") or not repo_status.get("root"):
+        return None
+    root = Path(repo_status["root"])
+    state = root / state_dir
+    markers: dict[str, Any] = {"state_dir": str(state), "exists": state.exists(), "files": {}}
+    now = time.time()
+    for name in MARKER_FILES:
+        path = state / name
+        if path.exists():
+            st = path.stat()
+            entry: dict[str, Any] = {
+                "exists": True,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "age_sec": int(now - st.st_mtime),
+            }
+            if st.st_size <= 4096 and path.is_file() and name not in {"bypass-log.jsonl"}:
+                try:
+                    first = path.read_text(errors="replace").splitlines()[:3]
+                    entry["preview_lines"] = first
+                except OSError:
+                    entry["preview_lines"] = []
+            markers["files"][name] = entry
+        else:
+            markers["files"][name] = {"exists": False}
+    markers["active_count"] = sum(1 for v in markers["files"].values() if v.get("exists"))
+    return markers
 
 
 def extract_script_refs(commands: list[str]) -> list[str]:
@@ -192,6 +306,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Read-only Hermes ↔ Busdriver status probe")
     ap.add_argument("--plugin-root", help="Busdriver plugin root (default: env or ~/.claude/plugins/marketplaces/busdriver)")
     ap.add_argument("--state-dir", default=os.environ.get("BUSDRIVER_STATE_DIR", ".claude"), help="Busdriver state dir name (default: .claude)")
+    ap.add_argument("--user-config", help="Busdriver user config path (default: ~/<state-dir>/busdriver.json)")
     ap.add_argument("--repo", help="Project repo/worktree to inspect read-only")
     ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = ap.parse_args()
@@ -199,19 +314,28 @@ def main() -> int:
     root = resolve_plugin_root(args.plugin_root)
     hooks = hook_inventory(root)
     hook_refs = extract_script_refs(hooks.get("commands", []))
+    repo = git_status(args.repo)
+    resolver = resolve_cli(root)
+    cfg_status = user_config_status(args.state_dir, args.user_config)
+    cfg_data, _cfg_err = read_json(Path(cfg_status["path"]))
+    if not isinstance(cfg_data, dict):
+        cfg_data = {}
     out = {
         "status_schema": "hermes-busdriver-status/v0",
         "read_only": True,
         "plugin_root": {"path": str(root), "exists": root.exists()},
         "state_dir": args.state_dir,
         "package": package_status(root),
-        "user_config": user_config_status(args.state_dir),
+        "user_config": cfg_status,
         "hooks": hooks,
         "hook_script_refs": {rel: (root / rel).exists() for rel in hook_refs},
         "key_entrypoints": file_presence(root, KEY_ENTRYPOINTS),
         "minimum_gate_scripts": file_presence(root, MIN_GATE_SCRIPTS),
-        "resolve_cli": resolve_cli(root),
-        "repo": git_status(args.repo),
+        "critical_file_hashes": critical_file_hashes(root, hook_refs),
+        "resolve_cli": resolver,
+        "effective_routes": effective_routes(cfg_data, resolver),
+        "repo": repo,
+        "active_markers": active_markers(repo, args.state_dir),
     }
     json.dump(out, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
     sys.stdout.write("\n")
