@@ -195,6 +195,7 @@ Known seams:
 - `scripts/lib/ultra-oracle.sh`: advisory shell adapter; requires data-boundary and standalone checks.
 - `scripts/hermes-busdriver-runtime-check`: Hermes-owned read-only H13 checker; normal result blocks mutating launcher (`mutating_launcher_allowed=false`).
 - `scripts/hermes-busdriver-gate`: Hermes-owned equivalent preflight/postflight gate runner for draft-mode agents; normal pass allows `agent_implementation_draft_allowed=true` while keeping commit/push/PR/merge false.
+- `scripts/hermes-busdriver-agent-draft`: Generic launcher that acquires the Hermes lock, runs gate preflight, executes Codex/OpenCode/Droid/Agy/Grok/custom in draft mode under a best-effort PATH guard, runs postflight, and returns `needs_busdriver_review`.
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence
@@ -220,6 +221,8 @@ hermes-busdriver-gate preflight
 ```
 
 The v1 gate runner checks repo identity, dirty tree, Busdriver hook visibility, active blocking markers, `.git/hooks` tamper, gitignored file tamper, scope include/exclude, and optional verifier commands. A passing v1 gate allows working-tree draft implementation only. It does not allow commit, push, PR, merge, deploy, or Busdriver marker writes.
+
+Use `hermes-busdriver-agent-draft` for the actual executable wrapper. It performs lock acquire/release, runs the gate pattern, launches a selected agent (`codex`, `opencode`, `droid`, `agy`, `grok`, `custom`, or `noop`), and saves run artifacts under Hermes-owned state.
 
 Use this pattern to continue implementation when Claude Code quota is exhausted while preserving Busdriver as the canonical finalization authority.
 
@@ -305,7 +308,8 @@ Allowed now:
 2. Hermes-owned lock/status scaffolding;
 3. H1-H13 smoke/contract tests;
 4. `hermes-busdriver-gate` preflight/postflight around scoped draft-mode agents;
-5. advisory/user-facing routing that tells the user when finalization still needs Claude Code / Busdriver or stronger equivalent gates.
+5. `hermes-busdriver-agent-draft` for lock+gate+agent draft runs that return `needs_busdriver_review`;
+6. advisory/user-facing routing that tells the user when finalization still needs Claude Code / Busdriver or stronger equivalent gates.
 
 Not allowed yet:
 

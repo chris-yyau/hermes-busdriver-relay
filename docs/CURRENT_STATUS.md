@@ -24,11 +24,13 @@ Implemented:
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-gate`
+- `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
 - `tests/contract/test_lock.py`
 - `tests/contract/test_runtime_check.py`
 - `tests/contract/test_gate.py`
+- `tests/contract/test_agent_draft.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
 - ADRs and README boundary docs
@@ -47,7 +49,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-12 passed
+16 passed
 smoke_ok True
 returncodes [0, 0, 0, 0, 0]
 package_version 1.71.0
@@ -59,6 +61,9 @@ gate.agent_implementation_draft_allowed True
 gate.commit_allowed False
 gate.push_allowed False
 gate.pr_allowed False
+agent_draft_noop.ok True
+agent_draft_noop.status needs_busdriver_review
+agent_draft_noop.commit_allowed False
 ```
 
 ## Still intentionally deferred

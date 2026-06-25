@@ -34,6 +34,7 @@ scripts/hermes-busdriver-status            Read-only status probe
 scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
+scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
 ```
@@ -92,6 +93,23 @@ scripts/hermes-busdriver-gate postflight \
 ```
 
 The gate runner is the first Hermes-side equivalent gate layer. Passing v1 gates allows agent implementation draft work only. It explicitly keeps `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` false.
+
+### Draft agent launcher
+
+```bash
+scripts/hermes-busdriver-agent-draft \
+  --plugin-root /path/to/busdriver \
+  --repo /path/to/repo \
+  --agent codex \
+  --prompt-file /path/to/task.md \
+  --scope-include 'src/**' \
+  --verifier 'tests=pytest -q' \
+  --pretty
+```
+
+Supported `--agent` values: `codex`, `opencode`, `droid`, `agy`, `grok`, `noop`, `custom`.
+
+A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
 
 ### Safe smoke checks
 

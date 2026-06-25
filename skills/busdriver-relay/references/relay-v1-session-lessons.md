@@ -97,3 +97,5 @@ hermes-busdriver-gate preflight
 ```
 
 This can wrap Codex/OpenCode/Droid/Agy/Grok and allows draft working-tree changes only. `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` stay false until stronger finalization gates exist.
+
+`hermes-busdriver-agent-draft` is the first executable wrapper for this pattern. It acquires a Hermes `agent-draft` lock, runs gate preflight, runs the selected agent/custom command under a best-effort PATH guard, runs gate postflight, releases the lock, and returns `status=needs_busdriver_review` on success. The PATH guard blocks common `git`/`gh` finalization commands, but it is not a full sandbox; postflight still needs to catch local commits, scope violations, hooks tamper, and ignored-file tamper.

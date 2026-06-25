@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Run a Hermes-launched coding agent in Busdriver draft mode.
+
+Pattern:
+  lock acquire -> gate preflight -> guarded agent command -> gate postflight -> lock release -> report
+
+This is not a finalizing launcher. It may allow an agent to modify the working
+ tree, but commit/push/PR/merge/deploy remain blocked by policy and by a best-
+effort PATH guard.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+GATE = ROOT / "scripts" / "hermes-busdriver-gate"
+LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+SCHEMA = "hermes-busdriver-agent-draft/v0"
+
+BLOCKED_GIT = {"commit", "push", "merge", "rebase", "reset", "tag"}
+BLOCKED_GH_PATTERNS = {
+    ("pr", "create"),
+    ("pr", "merge"),
+    ("pr", "close"),
+    ("release", "create"),
+    ("release", "upload"),
+    ("release", "delete"),
+    ("repo", "delete"),
+    ("issue", "create"),
+    ("issue", "comment"),
+}
+
+
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True, capture_output=True, timeout=timeout)
+
+
+def git_root(repo: Path) -> Path:
+    cp = run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"])
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "not_a_git_repo", "stderr": cp.stderr.strip()}))
+    return Path(cp.stdout.strip())
+
+
+def state_root(arg: str | None) -> Path:
+    return Path(arg or os.environ.get("HERMES_BUSDRIVER_RELAY_STATE", Path.home() / ".hermes" / "busdriver-relay")).expanduser().resolve()
+
+
+def timestamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def tail(text: str, n: int = 8000) -> str:
+    return text[-n:]
+
+
+def load_prompt(args: argparse.Namespace) -> str:
+    parts: list[str] = []
+    if args.prompt_file:
+        parts.append(Path(args.prompt_file).expanduser().read_text())
+    if args.prompt:
+        parts.append(args.prompt)
+    prompt = "\n\n".join(p.strip() for p in parts if p.strip())
+    if not prompt and not args.agent_cmd:
+        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "prompt_required"}))
+    return prompt
+
+
+def build_guard_bin(run_dir: Path) -> Path:
+    guard = run_dir / "guard-bin"
+    guard.mkdir(parents=True, exist_ok=True)
+
+    real_git = shutil.which("git") or "/usr/bin/git"
+    real_gh = shutil.which("gh") or "/usr/bin/gh"
+
+    (guard / "git").write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  commit|push|merge|rebase|reset|tag) echo '[hermes-busdriver-agent-draft] blocked git '$1 >&2; exit 126;;\n"
+        "esac\n"
+        f"exec {shlex.quote(real_git)} \"$@\"\n"
+    )
+    (guard / "gh").write_text(
+        "#!/bin/sh\n"
+        "case \"$1 $2\" in\n"
+        "  'pr create'|'pr merge'|'pr close'|'release create'|'release upload'|'release delete'|'repo delete'|'issue create'|'issue comment') echo '[hermes-busdriver-agent-draft] blocked gh '$1' '$2 >&2; exit 126;;\n"
+        "esac\n"
+        f"exec {shlex.quote(real_gh)} \"$@\"\n"
+    )
+    (guard / "git").chmod(0o755)
+    (guard / "gh").chmod(0o755)
+    return guard
+
+
+def gate_preflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
+    cmd = [sys.executable, str(GATE), "preflight", "--plugin-root", args.plugin_root, "--repo", args.repo, "--baseline-file", str(baseline)]
+    for p in args.scope_include or []:
+        cmd += ["--scope-include", p]
+    for p in args.scope_exclude or []:
+        cmd += ["--scope-exclude", p]
+    if args.allow_dirty:
+        cmd.append("--allow-dirty")
+    cp = run(cmd, timeout=120)
+    data = json.loads(cp.stdout) if cp.stdout.strip() else {"ok": False, "stdout": cp.stdout, "stderr": cp.stderr}
+    data["returncode"] = cp.returncode
+    return data
+
+
+def gate_postflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
+    cmd = [sys.executable, str(GATE), "postflight", "--repo", args.repo, "--baseline-file", str(baseline)]
+    for p in args.scope_include or []:
+        cmd += ["--scope-include", p]
+    for p in args.scope_exclude or []:
+        cmd += ["--scope-exclude", p]
+    for v in args.verifier or []:
+        cmd += ["--verifier", v]
+    cp = run(cmd, timeout=args.postflight_timeout)
+    data = json.loads(cp.stdout) if cp.stdout.strip() else {"ok": False, "stdout": cp.stdout, "stderr": cp.stderr}
+    data["returncode"] = cp.returncode
+    return data
+
+
+def acquire_lock(args: argparse.Namespace) -> dict[str, Any]:
+    cmd = [sys.executable, str(LOCK), "acquire", "--repo", args.repo, "--operation", "agent-draft", "--ttl-seconds", str(args.lock_ttl_seconds)]
+    if args.state_dir:
+        cmd += ["--state-dir", args.state_dir]
+    cp = run(cmd, timeout=20)
+    data = json.loads(cp.stdout) if cp.stdout.strip() else {"acquired": False, "stdout": cp.stdout, "stderr": cp.stderr}
+    data["returncode"] = cp.returncode
+    return data
+
+
+def release_lock(args: argparse.Namespace, token: str) -> dict[str, Any]:
+    cmd = [sys.executable, str(LOCK), "release", "--repo", args.repo, "--operation", "agent-draft", "--token", token]
+    if args.state_dir:
+        cmd += ["--state-dir", args.state_dir]
+    cp = run(cmd, timeout=20)
+    data = json.loads(cp.stdout) if cp.stdout.strip() else {"released": False, "stdout": cp.stdout, "stderr": cp.stderr}
+    data["returncode"] = cp.returncode
+    return data
+
+
+def agent_command(args: argparse.Namespace, prompt_path: Path) -> list[str]:
+    if args.agent_cmd:
+        return ["bash", "-c", args.agent_cmd]
+    prompt_ref = f"Follow the instructions in {prompt_path}. Work in draft mode only. Do not run git commit, git push, gh pr create, gh pr merge, deploy, release, or write Busdriver PASS/skip markers. Return a concise summary of files changed, tests run, and blockers."
+    if args.agent == "codex":
+        return ["codex", "exec", prompt_ref]
+    if args.agent == "opencode":
+        return ["opencode", "run", prompt_ref]
+    if args.agent in {"droid", "agy", "grok"}:
+        return [args.agent, prompt_ref]
+    if args.agent == "noop":
+        return ["bash", "-lc", "echo HERMES_AGENT_DRAFT_NOOP"]
+    raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"unsupported_agent:{args.agent}"}))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--plugin-root", required=True)
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--agent", choices=["codex", "opencode", "droid", "agy", "grok", "noop", "custom"], default="custom")
+    ap.add_argument("--agent-cmd", help="Custom shell command for tests/advanced use. Prompt is available via HERMES_AGENT_PROMPT_FILE.")
+    ap.add_argument("--prompt")
+    ap.add_argument("--prompt-file")
+    ap.add_argument("--scope-include", action="append")
+    ap.add_argument("--scope-exclude", action="append")
+    ap.add_argument("--verifier", action="append")
+    ap.add_argument("--baseline-file")
+    ap.add_argument("--state-dir")
+    ap.add_argument("--allow-dirty", action="store_true")
+    ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--postflight-timeout", type=int, default=600)
+    ap.add_argument("--lock-ttl-seconds", type=int, default=6 * 60 * 60)
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    repo = git_root(Path(args.repo).expanduser())
+    state = state_root(args.state_dir)
+    run_dir = state / "agent-runs" / f"{timestamp()}-{args.agent}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    baseline = Path(args.baseline_file).expanduser() if args.baseline_file else run_dir / "baseline.json"
+    prompt = load_prompt(args)
+    prompt_path = run_dir / "prompt.md"
+    prompt_path.write_text(prompt + "\n")
+    guard_bin = build_guard_bin(run_dir)
+
+    report: dict[str, Any] = {
+        "schema": SCHEMA,
+        "ok": False,
+        "status": "started",
+        "repo": str(repo),
+        "agent": args.agent,
+        "run_dir": str(run_dir),
+        "baseline_file": str(baseline),
+        "prompt_file": str(prompt_path),
+    }
+
+    lock: dict[str, Any] | None = None
+    token = ""
+    try:
+        lock = acquire_lock(args)
+        report["lock_acquire"] = lock
+        if not lock.get("acquired"):
+            report.update({"status": "blocked", "reason": "lock_not_acquired"})
+            print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
+            return 2
+        token = lock.get("token") or ""
+
+        pre = gate_preflight(args, baseline)
+        report["preflight"] = pre
+        if not pre.get("ok") or not (pre.get("decision") or {}).get("agent_implementation_draft_allowed"):
+            report.update({"status": "blocked", "reason": "preflight_failed"})
+            print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
+            return 2
+
+        cmd = agent_command(args, prompt_path)
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(guard_bin) + os.pathsep + env.get("PATH", ""),
+            "HERMES_AGENT_DRAFT": "1",
+            "HERMES_AGENT_PROMPT_FILE": str(prompt_path),
+            "HERMES_AGENT_RUN_DIR": str(run_dir),
+            "HERMES_AGENT_REPO": str(repo),
+        })
+        env["HERMES_AGENT_PROMPT"] = prompt[:32000]
+        (run_dir / "agent-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
+        agent = run(cmd, cwd=repo, env=env, timeout=args.timeout)
+        (run_dir / "agent.stdout").write_text(agent.stdout)
+        (run_dir / "agent.stderr").write_text(agent.stderr)
+        report["agent_result"] = {
+            "cmd": cmd,
+            "returncode": agent.returncode,
+            "ok": agent.returncode == 0,
+            "stdout_tail": tail(agent.stdout),
+            "stderr_tail": tail(agent.stderr),
+        }
+
+        post = gate_postflight(args, baseline)
+        report["postflight"] = post
+        report["ok"] = bool(agent.returncode == 0 and post.get("ok"))
+        report["status"] = "needs_busdriver_review" if report["ok"] else "blocked"
+        report["decision"] = post.get("decision")
+        print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
+        return 0 if report["ok"] else 2
+    finally:
+        if token:
+            rel = release_lock(args, token)
+            report["lock_release"] = rel
+            (run_dir / "final-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

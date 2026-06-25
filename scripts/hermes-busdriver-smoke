@@ -19,6 +19,7 @@ STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 RUNTIME = ROOT / "scripts" / "hermes-busdriver-runtime-check"
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
+AGENT_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
@@ -34,7 +35,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE)]))
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT)]))
     checks.append(run([sys.executable, "-m", "pytest", "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
