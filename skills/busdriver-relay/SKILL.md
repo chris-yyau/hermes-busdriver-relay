@@ -167,8 +167,10 @@ Phase reads:
 | Debugging | `systematic-debugging`, optional `diagnose` |
 | TDD | `test-driven-development`, `tdd-workflow` |
 | Verification | `verification-before-completion`, `verification-loop` |
-| Code review | `requesting-code-review`, `receiving-code-review`, domain reviewers |
-| Finishing | `finishing-a-development-branch` |
+| Code review | `requesting-code-review`, `receiving-code-review`, domain reviewers; read `orchestrator/domain-supplements.md` live for newly added reviewers such as `vue-reviewer` / `php-reviewer` |
+| Domain patterns | `orchestrator/domain-supplements.md`, domain skills such as `vue-patterns`, `kubernetes-patterns`, plus domain rule directories |
+| Config/skill maintenance | `config-gc`, `skill-scout`, `agent-self-evaluation` when the user asks to audit/adopt/evaluate setup or skills |
+| Finishing | `finishing-a-development-branch`; linked worktree cleanup must be detected and human-confirmed, never automatic |
 | PR feedback/merge | `pr-grind`, `scripts/relevant-check-status.sh`, `scripts/ack-ledger.sh` |
 | Codex handoff | `codex-goal-handover`, `scripts/codex/*` |
 | MCP/plugin health | `mcp-health-check`, hook manifest, config/status scripts |

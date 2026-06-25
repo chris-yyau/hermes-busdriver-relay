@@ -45,6 +45,7 @@ def make_fake_busdriver(root: Path) -> None:
         "scripts/codex/codex-goal-dispatch.sh",
         "scripts/codex/goal-result.schema.json",
         "scripts/lib/ultra-oracle.sh",
+        "scripts/lib/ultra-oracle-config.sh",
         "scripts/doctor.js",
         "skills/orchestrator/SKILL.md",
         "skills/orchestrator/tasks-catalog.md",

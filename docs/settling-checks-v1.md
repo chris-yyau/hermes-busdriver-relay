@@ -16,9 +16,9 @@ Relay v1 is **read-only + lock/status only**. It does not launch Codex, commit, 
 | H4 scope containment | Deferred | Requires mutating launcher. |
 | H5 gate bypass check | Pass by absence | Relay v1 has no commit/PR/merge/deploy code path. |
 | H6 read-only status check | Implemented | `tests/contract/test_status_probe.py` snapshots fake Busdriver tree before/after. |
-| H7 drift invalidation | Partial | Status reports critical file hashes; no launcher exists to disable yet. |
+| H7 drift invalidation | Partial | Status reports critical file hashes, including `ultra-oracle` scripts/config; no launcher exists to disable yet. |
 | H8 state-dir/plugin-root portability | Partial | Status accepts `--plugin-root`, `--state-dir`, `--user-config`; live smoke uses real Busdriver. |
-| H9 marker freshness | Status-only | Status reports active markers with mtime/age/preview; does not validate freshness as approval. |
+| H9 marker freshness | Status-only | Status reports active markers with mtime/age/preview, including `skip-ultra-oracle.local` and `ultra-oracle/`; does not validate freshness as approval. |
 | H10 concurrency | Implemented scaffolding | `hermes-busdriver-lock` acquire/status/release under Hermes-owned state. |
 | H11 external side effects | Pass by absence | Relay v1 performs no external mutation. |
 | H12 sensitive payload | Pass by absence | Relay v1 sends no advisory/model payload. |

@@ -29,6 +29,7 @@ KEY_ENTRYPOINTS = [
     "scripts/codex/codex-goal-dispatch.sh",
     "scripts/codex/goal-result.schema.json",
     "scripts/lib/ultra-oracle.sh",
+    "scripts/lib/ultra-oracle-config.sh",
     "scripts/doctor.js",
 ]
 
@@ -46,6 +47,7 @@ MARKER_FILES = [
     "design-review-needed.local.md",
     "skip-design-review.local",
     "skip-litmus.local",
+    "skip-ultra-oracle.local",
     "litmus-passed.local",
     "pr-review-passed.local",
     "pr-codex-lead.local.json",
@@ -59,6 +61,7 @@ MARKER_FILES = [
     "litmus-state.md",
     "litmus-iteration-history.local.jsonl",
     "builtin-review-prompt-path.local",
+    "ultra-oracle",
 ]
 
 MIN_GATE_SCRIPTS = [
