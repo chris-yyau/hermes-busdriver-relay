@@ -182,7 +182,8 @@ Classify before use:
 | Class | Meaning | Hermes v1 action |
 |---|---|---|
 | Standalone read-only shell seam | Safe status/read outside Claude runtime | Allowed after Phase 0. |
-| Standalone mutating shell seam | Can change repo/external state outside Claude runtime | Not allowed until hook-runtime equivalence + settling checks pass. |
+| Standalone mutating shell seam | Can change repo/external state outside Claude runtime | Not allowed until hook-runtime equivalence or equivalent finalization gates pass. |
+| Draft agent implementation seam | Agent may modify working tree but cannot finalize | Allowed only inside `hermes-busdriver-gate preflight → agent → postflight`; result remains draft. |
 | Requires Claude Code session | Skill/agent/command/hook behavior | Route to user/Claude side unless explicitly approved later. |
 | Requires MCP/plugin | Exists only through Claude/MCP/plugin | Do not synthesize/call; route to Busdriver/Claude. |
 
@@ -193,6 +194,7 @@ Known seams:
 - `scripts/codex/goal-result.schema.json`: Codex self-report schema, not full final result envelope.
 - `scripts/lib/ultra-oracle.sh`: advisory shell adapter; requires data-boundary and standalone checks.
 - `scripts/hermes-busdriver-runtime-check`: Hermes-owned read-only H13 checker; normal result blocks mutating launcher (`mutating_launcher_allowed=false`).
+- `scripts/hermes-busdriver-gate`: Hermes-owned equivalent preflight/postflight gate runner for draft-mode agents; normal pass allows `agent_implementation_draft_allowed=true` while keeping commit/push/PR/merge false.
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence
@@ -205,6 +207,21 @@ Before Hermes can use any repo-changing launcher, the launcher must prove one of
 4. it is constrained to local-only work and cannot push/PR/merge/deploy/finalize.
 
 Without this proof, Hermes may use the launcher only for read-only/non-mutating work.
+
+## Hermes Equivalent Gate Runner
+
+When Claude Code quota is unavailable, Hermes may independently call coding agents such as Codex, OpenCode, Droid, Agy, or Grok only through the draft gate pattern:
+
+```text
+hermes-busdriver-gate preflight
+  → scoped agent implementation draft
+  → hermes-busdriver-gate postflight
+  → report / review / later finalization gate
+```
+
+The v1 gate runner checks repo identity, dirty tree, Busdriver hook visibility, active blocking markers, `.git/hooks` tamper, gitignored file tamper, scope include/exclude, and optional verifier commands. A passing v1 gate allows working-tree draft implementation only. It does not allow commit, push, PR, merge, deploy, or Busdriver marker writes.
+
+Use this pattern to continue implementation when Claude Code quota is exhausted while preserving Busdriver as the canonical finalization authority.
 
 ## Direct Command Ban
 
@@ -287,11 +304,12 @@ Allowed now:
 1. read-only `hermes-busdriver-status --json`;
 2. Hermes-owned lock/status scaffolding;
 3. H1-H13 smoke/contract tests;
-4. advisory/user-facing routing that tells the user when to continue in Claude Code / Busdriver.
+4. `hermes-busdriver-gate` preflight/postflight around scoped draft-mode agents;
+5. advisory/user-facing routing that tells the user when finalization still needs Claude Code / Busdriver or stronger equivalent gates.
 
 Not allowed yet:
 
-- mutating `hermes-busdriver-codex-goal` launcher;
+- mutating `hermes-busdriver-codex-goal` finalizing launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
 - commit/PR/merge/deploy automation;

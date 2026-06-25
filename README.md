@@ -32,9 +32,10 @@ skills/busdriver-relay/SKILL.md            Hermes skill source
 skills/busdriver-relay/references/         Skill reference notes
 scripts/hermes-busdriver-status            Read-only status probe
 scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
-scripts/hermes-busdriver-runtime-check     H13 hook-runtime equivalence checker
+scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
+scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-smoke             Safe smoke runner
-tests/contract/                            Smoke/contract tests
+tests/contract/                            Contract tests
 ```
 
 ## Commands
@@ -71,6 +72,27 @@ scripts/hermes-busdriver-runtime-check \
 
 This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result until a future v2 proves hook-runtime equivalence.
 
+### Equivalent gate runner
+
+```bash
+BASELINE="$HOME/.hermes/busdriver-relay/gates/example.baseline.json"
+
+scripts/hermes-busdriver-gate preflight \
+  --plugin-root /path/to/busdriver \
+  --repo /path/to/repo \
+  --baseline-file "$BASELINE" \
+  --scope-include 'src/**'
+
+# Run Codex/OpenCode/Droid/Agy/Grok in draft mode here.
+
+scripts/hermes-busdriver-gate postflight \
+  --repo /path/to/repo \
+  --baseline-file "$BASELINE" \
+  --verifier 'tests=pytest -q'
+```
+
+The gate runner is the first Hermes-side equivalent gate layer. Passing v1 gates allows agent implementation draft work only. It explicitly keeps `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` false.
+
 ### Safe smoke checks
 
 ```bash
@@ -88,7 +110,8 @@ Allowed now:
 2. maintain read-only `hermes-busdriver-status`;
 3. maintain Hermes-owned single-flight lock/status scaffolding;
 4. maintain safe smoke/contract tests;
-5. document decisions in ADRs.
+5. run `hermes-busdriver-gate` preflight/postflight around draft-mode agents;
+6. document decisions in ADRs.
 
 Not allowed yet:
 

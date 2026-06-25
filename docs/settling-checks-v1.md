@@ -22,7 +22,7 @@ Relay v1 is **read-only + lock/status only**. It does not launch Codex, commit, 
 | H10 concurrency | Implemented scaffolding | `hermes-busdriver-lock` acquire/status/release under Hermes-owned state. |
 | H11 external side effects | Pass by absence | Relay v1 performs no external mutation. |
 | H12 sensitive payload | Pass by absence | Relay v1 sends no advisory/model payload. |
-| H13 hook-runtime equivalence | Checker implemented; mutating launcher still deferred | `hermes-busdriver-runtime-check` reports manifest/gate visibility but `mutating_launcher_allowed=false` for normal Hermes shell. |
+| H13 hook-runtime equivalence | Equivalent gate runner started; mutating finalization still deferred | `hermes-busdriver-runtime-check` reports no hook runtime; `hermes-busdriver-gate` provides explicit preflight/postflight checks for draft agents only. |
 
 ## Commands
 

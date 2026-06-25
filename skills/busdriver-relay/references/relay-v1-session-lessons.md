@@ -84,4 +84,16 @@ inside_claude_code_hook_invocation=false
 mutating_launcher_allowed=false
 ```
 
-That is a PASS for the relay boundary: Hermes can see Busdriver hooks but is not inside the Claude Code hook runtime. Do not interpret this as permission to launch mutating work; it proves the opposite until a future v2 supplies a real runtime-equivalence mechanism.
+That is a PASS for the relay boundary: Hermes can see Busdriver hooks but is not inside the Claude Code hook runtime. Do not interpret this as permission to launch mutating finalization work; it proves the opposite until a future v2 supplies a real runtime-equivalence mechanism.
+
+## Equivalent gate-runner lesson
+
+When the user wants Hermes to continue implementation without Claude Code quota, do not wait for Claude hooks. Add explicit Hermes-side equivalent gates instead. The first generic seam is:
+
+```text
+hermes-busdriver-gate preflight
+  → scoped agent implementation draft
+  → hermes-busdriver-gate postflight
+```
+
+This can wrap Codex/OpenCode/Droid/Agy/Grok and allows draft working-tree changes only. `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` stay false until stronger finalization gates exist.

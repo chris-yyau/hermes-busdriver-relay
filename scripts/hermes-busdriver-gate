@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Hermes-side Busdriver-equivalent gate runner.
+
+This is the generic guard layer for Hermes-launched agents (Codex, OpenCode,
+Droid, Agy, Grok, etc.). It does not pretend to be Claude Code's hook runtime;
+instead it performs explicit preflight/postflight checks and reports what kind
+of agent work is allowed.
+
+v1 capabilities:
+- preflight: Busdriver visibility, clean repo, branch/worktree identity, hooks
+  baseline, ignored-file baseline, active marker summary, optional scope config.
+- postflight: changed-file detection, scope include/exclude check, .git/hooks
+  tamper check, ignored-file tamper check, optional verifier commands.
+
+Deliberate boundary:
+- agent_implementation_draft may be allowed when checks pass;
+- commit/push/PR/merge/deploy remain false in this first equivalent-gate layer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+GATE_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"}
+MARKER_NAMES = [
+    "freeze.local",
+    "careful.local",
+    "skip-litmus.local",
+    "skip-ultra-oracle.local",
+    "litmus-passed.local",
+    "pr-review-passed.local",
+    "design-review-needed.local.md",
+    "blueprint-review-passed.local",
+]
+
+
+def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=check)
+
+
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args])
+
+
+def sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_rel(path: Path, root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except Exception:
+        return str(path)
+
+
+def repo_root(repo: Path) -> Path:
+    cp = git(repo, "rev-parse", "--show-toplevel")
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "not_a_git_repo", "stderr": cp.stderr.strip()}))
+    return Path(cp.stdout.strip())
+
+
+def git_status(repo: Path) -> dict[str, Any]:
+    root = repo_root(repo)
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    head = git(root, "rev-parse", "HEAD").stdout.strip()
+    short = git(root, "status", "--porcelain=v1").stdout.splitlines()
+    merge_state = any((root / ".git" / name).exists() for name in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"])
+    return {
+        "root": str(root),
+        "branch": branch,
+        "head": head,
+        "dirty": bool(short),
+        "dirty_entries": short,
+        "merge_state": merge_state,
+    }
+
+
+def load_hooks(plugin_root: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    path = plugin_root / "hooks" / "hooks.json"
+    if not path.exists():
+        return None, []
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None, []
+    events: list[str] = []
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        events = [k for k in hooks.keys() if isinstance(k, str)]
+    elif isinstance(hooks, list):
+        for item in hooks:
+            if isinstance(item, dict):
+                ev = item.get("event") or item.get("matcher") or item.get("hookEventName")
+                if isinstance(ev, str):
+                    events.append(ev)
+    return data, sorted(set(events))
+
+
+def package_version(plugin_root: Path) -> str | None:
+    p = plugin_root / "package.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text()).get("version")
+    except Exception:
+        return None
+
+
+def active_markers(repo: Path) -> dict[str, Any]:
+    state_dirs = [repo / ".claude", repo / ".opencode"]
+    found: dict[str, Any] = {}
+    for state_dir in state_dirs:
+        if not state_dir.exists():
+            continue
+        for name in MARKER_NAMES:
+            p = state_dir / name
+            if p.exists():
+                found[f"{state_dir.name}/{name}"] = {
+                    "path": str(p),
+                    "size": p.stat().st_size,
+                    "mtime": p.stat().st_mtime,
+                }
+    return found
+
+
+def list_git_hooks(repo: Path) -> dict[str, str]:
+    root = repo_root(repo)
+    hooks_dir = root / ".git" / "hooks"
+    out: dict[str, str] = {}
+    if not hooks_dir.exists():
+        return out
+    for p in sorted(hooks_dir.rglob("*")):
+        if p.is_file() and not p.name.endswith(".sample"):
+            out[safe_rel(p, root)] = sha256_path(p)
+    return out
+
+
+def list_ignored_files(repo: Path, limit: int = 500) -> dict[str, str]:
+    root = repo_root(repo)
+    cp = git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
+    out: dict[str, str] = {}
+    if cp.returncode != 0 or not cp.stdout:
+        return out
+    for raw in cp.stdout.split("\0"):
+        if not raw:
+            continue
+        p = root / raw
+        if p.is_file():
+            out[raw] = sha256_path(p)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def default_baseline_path(repo: Path) -> Path:
+    root = repo_root(repo)
+    key = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
+    base = Path.home() / ".hermes" / "busdriver-relay" / "gates"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{key}.baseline.json"
+
+
+def normalize_patterns(values: list[str] | None) -> list[str]:
+    return [v for v in (values or []) if v]
+
+
+def changed_files(repo: Path) -> list[str]:
+    root = repo_root(repo)
+    paths: set[str] = set()
+    for args in [("diff", "--name-only", "HEAD"), ("diff", "--cached", "--name-only", "HEAD"), ("ls-files", "--others", "--exclude-standard")]:
+        cp = git(root, *args)
+        if cp.returncode == 0:
+            paths.update(line for line in cp.stdout.splitlines() if line)
+    return sorted(paths)
+
+
+def path_in_scope(path: str, include: list[str], exclude: list[str]) -> bool:
+    inc = include or ["**"]
+    return any(fnmatch.fnmatchcase(path, pat) for pat in inc) and not any(fnmatch.fnmatchcase(path, pat) for pat in exclude)
+
+
+def run_verifiers(repo: Path, verifiers: list[str]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    root = repo_root(repo)
+    for item in verifiers:
+        if "=" in item:
+            name, cmd = item.split("=", 1)
+        else:
+            name, cmd = "verifier", item
+        cp = run(["bash", "-lc", cmd], cwd=root)
+        results.append({
+            "name": name,
+            "cmd": cmd,
+            "returncode": cp.returncode,
+            "ok": cp.returncode == 0,
+            "stdout_tail": cp.stdout[-4000:],
+            "stderr_tail": cp.stderr[-4000:],
+        })
+    return results
+
+
+def decision(ok: bool, phase: str) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "status": "pass" if ok else "blocked",
+        "agent_implementation_draft_allowed": bool(ok),
+        "commit_allowed": False,
+        "push_allowed": False,
+        "pr_allowed": False,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "reason": "Equivalent gate v1 allows draft implementation only; repo-changing finalization remains blocked.",
+    }
+
+
+def cmd_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    repo = repo_root(Path(args.repo).expanduser())
+    plugin_root = Path(args.plugin_root).expanduser().resolve()
+    status = git_status(repo)
+    hooks, events = load_hooks(plugin_root)
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: Any = None) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    add("plugin_root_exists", plugin_root.exists(), str(plugin_root))
+    add("hook_manifest_available", hooks is not None, str(plugin_root / "hooks" / "hooks.json"))
+    add("gate_hooks_declared", bool(set(events) & GATE_EVENTS), events)
+    add("repo_is_git", True, str(repo))
+    add("repo_clean", (not status["dirty"]) or args.allow_dirty, status["dirty_entries"])
+    add("no_merge_rebase_cherry_pick", not status["merge_state"], status["merge_state"])
+
+    markers = active_markers(repo)
+    blocking_markers = {k: v for k, v in markers.items() if any(x in k for x in ["freeze", "careful"])}
+    add("no_blocking_freeze_or_careful_marker", not blocking_markers, blocking_markers)
+
+    baseline = {
+        "schema_version": 1,
+        "created_at_epoch": time.time(),
+        "repo": status,
+        "plugin_root": str(plugin_root),
+        "busdriver_version": package_version(plugin_root),
+        "scope": {"include": normalize_patterns(args.scope_include), "exclude": normalize_patterns(args.scope_exclude)},
+        "hooks_baseline": list_git_hooks(repo),
+        "ignored_baseline": list_ignored_files(repo, args.ignored_limit),
+        "markers": markers,
+    }
+    baseline_path = Path(args.baseline_file).expanduser() if args.baseline_file else default_baseline_path(repo)
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
+
+    ok = all(c["ok"] for c in checks)
+    return {
+        "ok": ok,
+        "phase": "preflight",
+        "repo": status,
+        "busdriver": {"plugin_root": str(plugin_root), "version": package_version(plugin_root), "hook_events": events},
+        "checks": checks,
+        "baseline_file": str(baseline_path),
+        "markers": markers,
+        "decision": decision(ok, "preflight"),
+    }
+
+
+def load_baseline(path: str | None, repo: Path) -> dict[str, Any]:
+    p = Path(path).expanduser() if path else default_baseline_path(repo)
+    if not p.exists():
+        raise SystemExit(json.dumps({"ok": False, "error": "baseline_missing", "baseline_file": str(p)}))
+    return json.loads(p.read_text())
+
+
+def cmd_postflight(args: argparse.Namespace) -> dict[str, Any]:
+    repo = repo_root(Path(args.repo).expanduser())
+    baseline = load_baseline(args.baseline_file, repo)
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: Any = None) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    status = git_status(repo)
+    add("same_repo_root", status["root"] == baseline.get("repo", {}).get("root"), {"current": status["root"], "baseline": baseline.get("repo", {}).get("root")})
+    add("same_head_as_baseline", status["head"] == baseline.get("repo", {}).get("head"), {"current": status["head"], "baseline": baseline.get("repo", {}).get("head")})
+
+    files = changed_files(repo)
+    include = normalize_patterns(args.scope_include) or baseline.get("scope", {}).get("include", [])
+    exclude = normalize_patterns(args.scope_exclude) or baseline.get("scope", {}).get("exclude", [])
+    out_of_scope = [p for p in files if not path_in_scope(p, include, exclude)]
+    add("changed_files_within_scope", not out_of_scope, {"out_of_scope": out_of_scope, "include": include, "exclude": exclude})
+
+    current_hooks = list_git_hooks(repo)
+    baseline_hooks = baseline.get("hooks_baseline", {})
+    hook_added = sorted(set(current_hooks) - set(baseline_hooks))
+    hook_changed = sorted(k for k in set(current_hooks) & set(baseline_hooks) if current_hooks[k] != baseline_hooks[k])
+    hook_removed = sorted(set(baseline_hooks) - set(current_hooks))
+    add("git_hooks_untampered", not (hook_added or hook_changed or hook_removed), {"added": hook_added, "changed": hook_changed, "removed": hook_removed})
+
+    current_ignored = list_ignored_files(repo, args.ignored_limit)
+    baseline_ignored = baseline.get("ignored_baseline", {})
+    ignored_added = sorted(set(current_ignored) - set(baseline_ignored))
+    ignored_changed = sorted(k for k in set(current_ignored) & set(baseline_ignored) if current_ignored[k] != baseline_ignored[k])
+    # Existing ignored files disappearing is less dangerous; report but don't block unless strict flag set later.
+    add("no_new_or_changed_ignored_files", not (ignored_added or ignored_changed), {"added": ignored_added, "changed": ignored_changed})
+
+    verifier_results = run_verifiers(repo, args.verifier or [])
+    add("verifiers_pass", all(v["ok"] for v in verifier_results), verifier_results)
+
+    ok = all(c["ok"] for c in checks)
+    return {
+        "ok": ok,
+        "phase": "postflight",
+        "repo": status,
+        "changed_files": files,
+        "checks": checks,
+        "verifiers": verifier_results,
+        "decision": decision(ok, "postflight"),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    pre = sub.add_parser("preflight")
+    pre.add_argument("--plugin-root", required=True)
+    pre.add_argument("--repo", required=True)
+    pre.add_argument("--baseline-file")
+    pre.add_argument("--scope-include", action="append")
+    pre.add_argument("--scope-exclude", action="append")
+    pre.add_argument("--allow-dirty", action="store_true")
+    pre.add_argument("--ignored-limit", type=int, default=500)
+    pre.add_argument("--pretty", action="store_true")
+
+    post = sub.add_parser("postflight")
+    post.add_argument("--repo", required=True)
+    post.add_argument("--baseline-file")
+    post.add_argument("--scope-include", action="append")
+    post.add_argument("--scope-exclude", action="append")
+    post.add_argument("--verifier", action="append", help="NAME=COMMAND or COMMAND. May be repeated.")
+    post.add_argument("--ignored-limit", type=int, default=500)
+    post.add_argument("--pretty", action="store_true")
+
+    args = ap.parse_args()
+    result = cmd_preflight(args) if args.command == "preflight" else cmd_postflight(args)
+    print(json.dumps(result, indent=2 if getattr(args, "pretty", False) else None, sort_keys=True))
+    return 0 if result.get("ok") else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
