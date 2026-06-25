@@ -51,7 +51,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-17 passed
+18 passed
 smoke_ok True
 returncodes [0, 0, 0, 0, 0]
 package_version 1.71.0
@@ -70,6 +70,10 @@ real_codex_smoke.ok True
 real_codex_smoke.status needs_busdriver_review
 real_codex_smoke.changed_files [src/codex_smoke.txt]
 real_codex_smoke.verifier file=True
+real_opencode_smoke.ok True
+real_opencode_smoke.status needs_busdriver_review
+real_opencode_smoke.changed_files [src/opencode_smoke.txt]
+real_opencode_smoke.commit_allowed False
 ```
 
 ## Still intentionally deferred

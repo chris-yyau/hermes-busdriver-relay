@@ -232,6 +232,8 @@ def main() -> int:
             "HERMES_AGENT_PROMPT_FILE": str(prompt_path),
             "HERMES_AGENT_RUN_DIR": str(run_dir),
             "HERMES_AGENT_REPO": str(repo),
+            "BUSDRIVER_PLUGIN_ROOT": args.plugin_root,
+            "BUSDRIVER_STATE_DIR": env.get("BUSDRIVER_STATE_DIR", ".opencode"),
         })
         env["HERMES_AGENT_PROMPT"] = prompt[:32000]
         (run_dir / "agent-command.json").write_text(json.dumps(cmd, indent=2) + "\n")

@@ -120,6 +120,29 @@ def test_agent_draft_blocks_out_of_scope_change(tmp_path: Path):
     assert "README.md" in scope["detail"]["out_of_scope"]
 
 
+def test_agent_draft_exports_busdriver_env(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    plugin = fake_busdriver(tmp_path)
+    state = tmp_path / "state"
+
+    cp, data = run_draft(
+        "--plugin-root", str(plugin),
+        "--repo", str(repo),
+        "--state-dir", str(state),
+        "--agent", "custom",
+        "--agent-cmd", "python3 - <<'PY'\nimport os\nfrom pathlib import Path\nPath('src/env.txt').write_text(os.environ['BUSDRIVER_PLUGIN_ROOT'] + '\\n' + os.environ['BUSDRIVER_STATE_DIR'] + '\\n')\nPY",
+        "--prompt", "write env",
+        "--scope-include", "src/env.txt",
+        "--verifier", f"env=grep -qx {plugin} src/env.txt && grep -qx .opencode src/env.txt",
+    )
+
+    assert cp.returncode == 0
+    assert data["ok"] is True
+    assert (repo / "src" / "env.txt").read_text().splitlines() == [str(plugin), ".opencode"]
+
+
 def test_agent_draft_respects_existing_lock(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

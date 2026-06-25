@@ -121,7 +121,9 @@ scripts/hermes-busdriver-agent-smoke \
   --pretty
 ```
 
-This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex and OpenCode adapters have been verified with this pattern against temp repos: Codex created `src/codex_smoke.txt`, OpenCode created `src/opencode_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+
+OpenCode note: `hermes-busdriver-agent-draft` exports `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` so the user's OpenCode Busdriver plugin resolves the live Busdriver gate scripts instead of falling back to `~/.config/opencode`.
 
 ### Safe smoke checks
 
