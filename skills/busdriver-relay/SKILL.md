@@ -1,6 +1,6 @@
 ---
 name: busdriver-relay
-description: Use when Hermes needs to relay work into the user's Busdriver/Claude Code workflow: idea intake, brainstorm→plan→grill, status checks, gate awareness, Codex handoff decisions, or Hermes↔Busdriver integration. Treat Busdriver as the canonical workflow/gate/runtime authority and Hermes as a thin intake/status/notifier unless a launcher has proven hook-runtime equivalence.
+description: "Use when Hermes needs to relay work into the user's Busdriver/Claude Code workflow: idea intake, brainstorm→plan→grill, status checks, gate awareness, Codex handoff decisions, or Hermes↔Busdriver integration. Treat Busdriver as the canonical workflow/gate/runtime authority and Hermes as a thin intake/status/notifier unless a launcher has proven hook-runtime equivalence."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -308,6 +308,14 @@ A private GitHub repo for this integration is recommended, but it should contain
 - documentation and ADRs.
 
 It should not vendor Busdriver, Claude plugins, MCP configs, secrets, or private marker/state files. Treat Busdriver as an external source-of-truth path discovered at runtime.
+
+Naming rule: avoid Hermes-side names that imply Busdriver authority, especially `orchestrator`, because Busdriver already has its own orchestrator. Prefer names like `relay` that imply handoff/status rather than ownership or gate enforcement.
+
+Session-specific scaffold details live in `references/initial-relay-repo-scaffold.md`.
+
+## Session Reference
+
+For implementation details and pitfalls discovered while building the first private relay repo/status tooling, see `references/relay-v1-session-lessons.md`. Use it when updating `busdriver.json`, maintaining `hermes-busdriver-status`, changing the relay name, or adding locks/smoke checks.
 
 ## Verification Checklist
 

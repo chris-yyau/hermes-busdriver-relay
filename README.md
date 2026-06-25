@@ -25,9 +25,14 @@ Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Herm
 
 ```text
 ADRs/                                      Lightweight architecture decisions
+docs/CURRENT_STATUS.md                     Current completion/verification state
 docs/hermes-busdriver-integration-contract-v2.md
+docs/settling-checks-v1.md                 H1-H13 v1 status map
 skills/busdriver-relay/SKILL.md            Hermes skill source
+skills/busdriver-relay/references/         Skill reference notes
 scripts/hermes-busdriver-status            Read-only status probe
+scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
+scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Smoke/contract tests
 ```
 
