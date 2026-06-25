@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Run the safe Hermes Busdriver Relay v1 smoke checks.
+
+This smoke runner is intentionally non-mutating for Busdriver and target repos.
+It may run pytest inside this relay repository, which can create local pytest
+cache files ignored by git.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+STATUS = ROOT / "scripts" / "hermes-busdriver-status"
+LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+
+
+def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
+    p = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+    return {"cmd": cmd, "returncode": p.returncode, "ok": p.returncode == 0, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Safe v1 smoke checks for Hermes Busdriver Relay")
+    ap.add_argument("--plugin-root", help="Busdriver plugin root for live status probe")
+    ap.add_argument("--repo", help="Target repo/worktree for read-only status probe")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    checks = []
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK)]))
+    checks.append(run([sys.executable, "-m", "pytest", "tests/contract", "-q"], timeout=180))
+
+    if args.plugin_root:
+        cmd = [sys.executable, str(STATUS), "--plugin-root", args.plugin_root]
+        if args.repo:
+            cmd += ["--repo", args.repo]
+        checks.append(run(cmd, timeout=60))
+        if checks[-1]["ok"]:
+            try:
+                status = json.loads(checks[-1]["stdout"])
+                checks[-1]["summary"] = {
+                    "package_version": (status.get("package") or {}).get("version"),
+                    "hook_event_count": len((status.get("hooks") or {}).get("events") or {}),
+                    "route_count": len(status.get("effective_routes") or {}),
+                    "active_marker_count": (status.get("active_markers") or {}).get("active_count"),
+                    "repo_dirty": (status.get("repo") or {}).get("dirty") if status.get("repo") else None,
+                }
+                checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-status --pretty for details>"
+            except Exception as e:  # noqa: BLE001
+                checks[-1]["summary_parse_error"] = str(e)
+
+    ok = all(c["ok"] for c in checks)
+    result = {"schema": "hermes-busdriver-smoke/v0", "ok": ok, "checks": checks}
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

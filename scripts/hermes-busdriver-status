@@ -289,6 +289,38 @@ def git_status(repo: str | None) -> dict[str, Any] | None:
     }
 
 
+def relay_state_root(arg: str | None = None) -> Path:
+    if arg:
+        return Path(arg).expanduser().resolve()
+    return Path(os.environ.get("HERMES_BUSDRIVER_RELAY_STATE", Path.home() / ".hermes" / "busdriver-relay")).expanduser().resolve()
+
+
+def relay_lock_summary(repo_status: dict[str, Any] | None, operation: str, relay_state_dir: str | None) -> dict[str, Any]:
+    root = relay_state_root(relay_state_dir)
+    locks_root = root / "locks"
+    locks = []
+    active_for_repo = []
+    repo_root = repo_status.get("root") if repo_status else None
+    for path in sorted(locks_root.glob("*.lock")) if locks_root.exists() else []:
+        try:
+            payload = json.loads((path / "lock.json").read_text())
+        except Exception:
+            payload = {"parse_error": True}
+        payload["path"] = str(path)
+        locks.append(payload)
+        lock_repo = ((payload.get("repo") or {}) if isinstance(payload, dict) else {}).get("root")
+        lock_operation = payload.get("operation") if isinstance(payload, dict) else None
+        if repo_root and lock_repo == repo_root and lock_operation == operation:
+            active_for_repo.append(payload)
+    return {
+        "state_dir": str(root),
+        "operation": operation,
+        "count": len(locks),
+        "active_for_repo": active_for_repo,
+        "active_for_repo_count": len(active_for_repo),
+    }
+
+
 def resolve_cli(root: Path) -> dict[str, Any]:
     script = root / "scripts/lib/resolve-cli.sh"
     if not script.exists():
@@ -308,6 +340,8 @@ def main() -> int:
     ap.add_argument("--state-dir", default=os.environ.get("BUSDRIVER_STATE_DIR", ".claude"), help="Busdriver state dir name (default: .claude)")
     ap.add_argument("--user-config", help="Busdriver user config path (default: ~/<state-dir>/busdriver.json)")
     ap.add_argument("--repo", help="Project repo/worktree to inspect read-only")
+    ap.add_argument("--relay-state-dir", help="Hermes Busdriver Relay state dir for lock summary")
+    ap.add_argument("--operation", default="repo-mutation", help="Operation class for lock summary")
     ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = ap.parse_args()
 
@@ -336,6 +370,7 @@ def main() -> int:
         "effective_routes": effective_routes(cfg_data, resolver),
         "repo": repo,
         "active_markers": active_markers(repo, args.state_dir),
+        "relay_locks": relay_lock_summary(repo, args.operation, args.relay_state_dir),
     }
     json.dump(out, sys.stdout, indent=2 if args.pretty else None, sort_keys=True)
     sys.stdout.write("\n")

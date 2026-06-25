@@ -31,22 +31,47 @@ scripts/hermes-busdriver-status            Read-only status probe
 tests/contract/                            Smoke/contract tests
 ```
 
-## Quick status probe
+## Commands
+
+### Read-only status
 
 ```bash
-scripts/hermes-busdriver-status --repo /path/to/repo --pretty
+scripts/hermes-busdriver-status \
+  --plugin-root /path/to/busdriver \
+  --repo /path/to/repo \
+  --pretty
 ```
 
-The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health and repo dirty state, but it never writes `.claude/`, `.opencode/`, or the target repo.
+The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health, effective routes, critical file hashes, active marker summaries, relay lock state, and repo dirty state. It never writes `.claude/`, `.opencode/`, Busdriver, or the target repo.
 
-## First allowed slice
+### Hermes-owned single-flight lock
+
+```bash
+scripts/hermes-busdriver-lock acquire --repo /path/to/repo --operation repo-mutation
+scripts/hermes-busdriver-lock status --pretty
+scripts/hermes-busdriver-lock release --repo /path/to/repo --operation repo-mutation --token <token>
+```
+
+Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo.
+
+### Safe smoke checks
+
+```bash
+scripts/hermes-busdriver-smoke \
+  --plugin-root /path/to/busdriver \
+  --repo /path/to/repo \
+  --pretty
+```
+
+## Relay v1 scope
 
 Allowed now:
 
 1. maintain `busdriver-relay` skill;
 2. maintain read-only `hermes-busdriver-status`;
-3. add H1-H13 contract tests;
-4. document decisions in ADRs.
+3. maintain Hermes-owned single-flight lock/status scaffolding;
+4. maintain safe smoke/contract tests;
+5. document decisions in ADRs.
 
 Not allowed yet:
 
@@ -54,4 +79,5 @@ Not allowed yet:
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
 - commit/PR/merge/deploy automation;
-- direct MCP/plugin routing.
+- direct MCP/plugin routing;
+- claims that Hermes shell execution is Busdriver-gate-safe.

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Hermes-owned single-flight lock for Busdriver relay operations.
+
+The lock lives under ~/.hermes/busdriver-relay/locks by default. It never writes
+into the target repo, Busdriver plugin root, .claude, or .opencode.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+SCHEMA = "hermes-busdriver-lock/v0"
+DEFAULT_TTL_SECONDS = 6 * 60 * 60
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 5) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def canonical_repo(repo: str | None) -> dict[str, Any]:
+    path = Path(repo or os.getcwd()).expanduser().resolve()
+    proc = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if proc and proc.returncode == 0 and proc.stdout.strip():
+        root = Path(proc.stdout.strip()).resolve()
+        branch_proc = run(["git", "branch", "--show-current"], cwd=root)
+        branch = branch_proc.stdout.strip() if branch_proc and branch_proc.returncode == 0 else ""
+        return {"input": str(path), "is_git_repo": True, "root": str(root), "worktree": str(root), "branch": branch}
+    return {"input": str(path), "is_git_repo": False, "root": str(path), "worktree": str(path), "branch": ""}
+
+
+def state_root(arg: str | None) -> Path:
+    if arg:
+        return Path(arg).expanduser().resolve()
+    return Path(os.environ.get("HERMES_BUSDRIVER_RELAY_STATE", Path.home() / ".hermes" / "busdriver-relay")).expanduser().resolve()
+
+
+def lock_key(repo_info: dict[str, Any], operation: str) -> str:
+    material = json.dumps({"root": repo_info["root"], "worktree": repo_info["worktree"], "branch": repo_info.get("branch", ""), "operation": operation}, sort_keys=True)
+    return hashlib.sha256(material.encode()).hexdigest()[:24]
+
+
+def lock_dir(root: Path, repo_info: dict[str, Any], operation: str) -> Path:
+    return root / "locks" / f"{lock_key(repo_info, operation)}.lock"
+
+
+def read_lock(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads((path / "lock.json").read_text())
+    except Exception:
+        return None
+
+
+def is_stale(lock: dict[str, Any] | None, ttl: int) -> bool:
+    if not lock:
+        return True
+    created = lock.get("created_at_epoch")
+    if not isinstance(created, (int, float)):
+        return True
+    lock_ttl = lock.get("ttl_seconds")
+    effective_ttl = lock_ttl if isinstance(lock_ttl, int) and lock_ttl >= 0 else ttl
+    return time.time() - created > effective_ttl
+
+
+def acquire(args: argparse.Namespace) -> int:
+    repo = canonical_repo(args.repo)
+    root = state_root(args.state_dir)
+    path = lock_dir(root, repo, args.operation)
+    root.joinpath("locks").mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        existing = read_lock(path)
+        if is_stale(existing, args.ttl_seconds):
+            shutil.rmtree(path)
+        else:
+            print(json.dumps({"schema": SCHEMA, "acquired": False, "reason": "lock-active", "lock": existing, "path": str(path)}, sort_keys=True))
+            return 2
+
+    token = str(uuid.uuid4())
+    payload = {
+        "schema": SCHEMA,
+        "token": token,
+        "created_at_epoch": int(time.time()),
+        "ttl_seconds": args.ttl_seconds,
+        "operation": args.operation,
+        "repo": repo,
+        "owner_pid": os.getpid(),
+        "note": args.note or "",
+    }
+    try:
+        path.mkdir()
+        (path / "lock.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except FileExistsError:
+        existing = read_lock(path)
+        print(json.dumps({"schema": SCHEMA, "acquired": False, "reason": "lock-race", "lock": existing, "path": str(path)}, sort_keys=True))
+        return 2
+
+    print(json.dumps({"schema": SCHEMA, "acquired": True, "token": token, "path": str(path), "lock": payload}, sort_keys=True))
+    return 0
+
+
+def release(args: argparse.Namespace) -> int:
+    repo = canonical_repo(args.repo)
+    root = state_root(args.state_dir)
+    path = lock_dir(root, repo, args.operation)
+    existing = read_lock(path)
+    if not path.exists() or not existing:
+        print(json.dumps({"schema": SCHEMA, "released": False, "reason": "not-found", "path": str(path)}, sort_keys=True))
+        return 1
+    if not args.force and existing.get("token") != args.token:
+        print(json.dumps({"schema": SCHEMA, "released": False, "reason": "token-mismatch", "path": str(path)}, sort_keys=True))
+        return 3
+    shutil.rmtree(path)
+    print(json.dumps({"schema": SCHEMA, "released": True, "path": str(path)}, sort_keys=True))
+    return 0
+
+
+def status(args: argparse.Namespace) -> int:
+    root = state_root(args.state_dir)
+    locks_root = root / "locks"
+    locks = []
+    if locks_root.exists():
+        for path in sorted(locks_root.glob("*.lock")):
+            payload = read_lock(path)
+            if payload:
+                payload = dict(payload)
+                payload["path"] = str(path)
+                payload["stale"] = is_stale(payload, args.ttl_seconds)
+                locks.append(payload)
+            else:
+                locks.append({"path": str(path), "stale": True, "parse_error": True})
+    print(json.dumps({"schema": SCHEMA, "state_dir": str(root), "locks": locks, "count": len(locks)}, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Hermes-owned Busdriver relay single-flight lock")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--repo", help="Repo/worktree path (default: cwd)")
+        p.add_argument("--operation", default="repo-mutation", help="Operation class for lock key")
+        p.add_argument("--state-dir", help="Hermes relay state dir (default: ~/.hermes/busdriver-relay)")
+        p.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
+
+    p_acq = sub.add_parser("acquire")
+    common(p_acq)
+    p_acq.add_argument("--note", default="")
+    p_acq.set_defaults(func=acquire)
+
+    p_rel = sub.add_parser("release")
+    common(p_rel)
+    p_rel.add_argument("--token", default="")
+    p_rel.add_argument("--force", action="store_true")
+    p_rel.set_defaults(func=release)
+
+    p_stat = sub.add_parser("status")
+    p_stat.add_argument("--state-dir", help="Hermes relay state dir (default: ~/.hermes/busdriver-relay)")
+    p_stat.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
+    p_stat.add_argument("--pretty", action="store_true")
+    p_stat.set_defaults(func=status)
+
+    args = ap.parse_args()
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
