@@ -1,11 +1,11 @@
 # Hermes ↔ Busdriver Integration Contract v2
 
-**Status:** Patched after Ultra Council review — suitable as source material for a *read-only* Hermes `busdriver-orchestrator` skill, but **not** yet authorization for repo-changing launcher automation.  
+**Status:** Patched after Ultra Council review — suitable as source material for the Hermes `busdriver-relay` skill and read-only/narrow draft tooling, but **not** authorization for finalizing repo-changing launcher automation.  
 **Observed snapshot:** Busdriver `1.71.0` at `/Users/vfrvndtt/.claude/plugins/marketplaces/busdriver` on 2026-06-25. Observed paths/counts are diagnostic only; durable instructions must use symbolic runtime variables.
 
 ## 0. Executive Position
 
-Hermes should be a **Busdriver-aware intake orchestrator + read-only status/notifier + narrow launcher only after proof**, not a clone of Claude Code or Busdriver.
+Hermes should be a **Busdriver-aware relay/intake layer + read-only status/notifier + narrow draft launcher only after proof**, not a clone of Claude Code or Busdriver.
 
 ```text
 User / Telegram / Cron
@@ -401,7 +401,7 @@ H13 — hook-runtime equivalence: launcher either triggers gates, invokes equiva
 
 Allowed now, after this contract:
 
-1. author a minimal Hermes `busdriver-orchestrator` skill from v2 sections 0–20;
+1. maintain the Hermes `busdriver-relay` skill from v2 sections 0–20;
 2. implement `hermes-busdriver-status --json` read-only;
 3. implement Hermes-owned single-flight lock/status scaffolding;
 4. run H1–H13 as smoke/contract tests.

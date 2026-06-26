@@ -156,10 +156,6 @@ def agent_command(args: argparse.Namespace, prompt_path: Path) -> list[str]:
     prompt_ref = f"Follow the instructions in {prompt_path}. Work in draft mode only. Do not run git commit, git push, gh pr create, gh pr merge, deploy, release, or write Busdriver PASS/skip markers. Return a concise summary of files changed, tests run, and blockers."
     if args.agent == "codex":
         return ["codex", "exec", prompt_ref]
-    if args.agent == "opencode":
-        return ["opencode", "run", prompt_ref]
-    if args.agent in {"droid", "agy", "grok"}:
-        return [args.agent, prompt_ref]
     if args.agent == "noop":
         return ["bash", "-lc", "echo HERMES_AGENT_DRAFT_NOOP"]
     raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"unsupported_agent:{args.agent}"}))
@@ -184,6 +180,8 @@ def main() -> int:
     ap.add_argument("--lock-ttl-seconds", type=int, default=6 * 60 * 60)
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
+    if args.agent == "custom" and not args.agent_cmd:
+        ap.error("--agent-cmd is required when --agent custom")
 
     repo = git_root(Path(args.repo).expanduser())
     state = state_root(args.state_dir)
@@ -233,7 +231,7 @@ def main() -> int:
             "HERMES_AGENT_RUN_DIR": str(run_dir),
             "HERMES_AGENT_REPO": str(repo),
             "BUSDRIVER_PLUGIN_ROOT": args.plugin_root,
-            "BUSDRIVER_STATE_DIR": env.get("BUSDRIVER_STATE_DIR", ".opencode"),
+            "BUSDRIVER_STATE_DIR": env.get("BUSDRIVER_STATE_DIR", ".claude"),
         })
         env["HERMES_AGENT_PROMPT"] = prompt[:32000]
         (run_dir / "agent-command.json").write_text(json.dumps(cmd, indent=2) + "\n")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,19 @@ def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
     return {"cmd": cmd, "returncode": p.returncode, "ok": p.returncode == 0, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
 
 
+def pytest_cmd() -> list[str]:
+    probe = subprocess.run([sys.executable, "-c", "import pytest"], text=True, capture_output=True)
+    if probe.returncode == 0:
+        return [sys.executable, "-m", "pytest"]
+    pytest_bin = shutil.which("pytest")
+    if pytest_bin:
+        return [pytest_bin]
+    uvx = shutil.which("uvx")
+    if uvx:
+        return [uvx, "--from", "pytest", "pytest"]
+    return [sys.executable, "-m", "pytest"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Safe v1 smoke checks for Hermes Busdriver Relay")
     ap.add_argument("--plugin-root", help="Busdriver plugin root for live status probe")
@@ -37,7 +51,7 @@ def main() -> int:
 
     checks = []
     checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE)]))
-    checks.append(run([sys.executable, "-m", "pytest", "tests/contract", "-q"], timeout=180))
+    checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
         cmd = [sys.executable, str(STATUS), "--plugin-root", args.plugin_root]

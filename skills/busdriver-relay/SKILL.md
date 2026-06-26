@@ -7,7 +7,7 @@ license: MIT
 metadata:
   hermes:
     tags: [busdriver, claude-code, codex, orchestration, gates, hermes-integration]
-    related_skills: [hermes-agent, claude-code, codex, github-repo-management]
+    related_skills: [hermes-agent, claude-code, codex, github-repo-management, claude-mem-log]
 ---
 
 # Busdriver Relay
@@ -29,21 +29,24 @@ Critical safety fact: Busdriver's most important gates are Claude Code hook-runt
 ## When to Use
 
 Use this skill when the user:
-
 - asks whether Hermes can follow Busdriver pipelines;
 - gives a coding/product idea and expects brainstorm → plan → grill behavior;
 - asks about syncing Claude/Busdriver setup into Hermes;
-- asks Hermes to launch/coordinate Codex through Busdriver;
+- asks Hermes to launch/coordinate **Codex** (currently the only active agent) through Busdriver;
 - asks for Busdriver status, routes, gates, MCP/plugin boundaries, or update strategy;
 - asks to build Hermes-side Busdriver adapter/status/cron tooling.
 
-Do **not** use this skill to:
+**Current User Scope Policy (embedded preference):** Hermes must temporarily limit active agent support to **Codex only**. Other agents (OpenCode, Droid, Agy, Grok) are explicitly deferred. Do not implement, document, or smoke-test support for them without fresh user confirmation. This prevents duplication with existing agent-side Busdriver integrations (e.g. OpenCode plugin) and keeps the relay thin. The generic gate and launcher infrastructure may exist for future use, but the active surface (CLI choices, smoke, docs, examples) must be Codex-only until the user explicitly says otherwise.
 
+**Hermes Profile vs Skill Clarification (user preference):** `busdriver-relay` is a thin relay **skill**, not a Hermes profile. It runs under the user's main/default Hermes profile. No new "coding profile" is required for relay work. Treat it as an additional capability loaded into the existing profile (similar to other autonomous-ai-agents skills). Only create a dedicated profile if the user explicitly needs complete isolation (separate config, memory, plugins, model routing) for the relay layer. When asked "is busdriver relay the main profile?", answer clearly: no — it is a skill layer on top of the main profile.
+
+Do **not** use this skill to:
 - directly mutate repos, commit, push, create PRs, merge, deploy, or publish;
 - recreate Busdriver's MCP/plugin graph inside Hermes;
 - copy all Busdriver skills into Hermes;
 - write or forge Busdriver PASS/bypass/review markers;
-- call raw `codex exec` for repo-changing work.
+- call raw `codex exec` for repo-changing work;
+- expand to additional agents (OpenCode etc.) while the Codex-only policy is active.
 
 ## Phase 0 — Mandatory Runtime Discovery
 
@@ -104,6 +107,7 @@ Phase 0 runtime discovery
   → Phase 4 execution
   → Phase 5 verification / review
   → Phase 6 finishing / PR / merge
+  → claude-mem push (via claude-mem-log) for Hermes coding work visibility in Claude Code
 ```
 
 Routing examples:
@@ -170,7 +174,7 @@ Phase reads:
 | Code review | `requesting-code-review`, `receiving-code-review`, domain reviewers; read `orchestrator/domain-supplements.md` live for newly added reviewers such as `vue-reviewer` / `php-reviewer` |
 | Domain patterns | `orchestrator/domain-supplements.md`, domain skills such as `vue-patterns`, `kubernetes-patterns`, plus domain rule directories |
 | Config/skill maintenance | `config-gc`, `skill-scout`, `agent-self-evaluation` when the user asks to audit/adopt/evaluate setup or skills |
-| Finishing | `finishing-a-development-branch`; linked worktree cleanup must be detected and human-confirmed, never automatic |
+| Finishing | `finishing-a-development-branch`; linked worktree cleanup must be detected and human-confirmed, never automatic; after Hermes coding via this relay, proactively push summary to claude-mem using claude-mem-log. |
 | PR feedback/merge | `pr-grind`, `scripts/relevant-check-status.sh`, `scripts/ack-ledger.sh` |
 | Codex handoff | `codex-goal-handover`, `scripts/codex/*` |
 | MCP/plugin health | `mcp-health-check`, hook manifest, config/status scripts |
@@ -183,7 +187,7 @@ Classify before use:
 |---|---|---|
 | Standalone read-only shell seam | Safe status/read outside Claude runtime | Allowed after Phase 0. |
 | Standalone mutating shell seam | Can change repo/external state outside Claude runtime | Not allowed until hook-runtime equivalence or equivalent finalization gates pass. |
-| Draft agent implementation seam | Agent may modify working tree but cannot finalize | Allowed only inside `hermes-busdriver-gate preflight → agent → postflight`; result remains draft. |
+| Draft agent implementation seam | Agent may modify working tree but cannot finalize | Allowed only inside `hermes-busdriver-gate preflight → agent → postflight`; result remains draft. Currently restricted to Codex. |
 | Requires Claude Code session | Skill/agent/command/hook behavior | Route to user/Claude side unless explicitly approved later. |
 | Requires MCP/plugin | Exists only through Claude/MCP/plugin | Do not synthesize/call; route to Busdriver/Claude. |
 
@@ -195,14 +199,13 @@ Known seams:
 - `scripts/lib/ultra-oracle.sh`: advisory shell adapter; requires data-boundary and standalone checks.
 - `scripts/hermes-busdriver-runtime-check`: Hermes-owned read-only H13 checker; normal result blocks mutating launcher (`mutating_launcher_allowed=false`).
 - `scripts/hermes-busdriver-gate`: Hermes-owned equivalent preflight/postflight gate runner for draft-mode agents; normal pass allows `agent_implementation_draft_allowed=true` while keeping commit/push/PR/merge false.
-- `scripts/hermes-busdriver-agent-draft`: Generic launcher that acquires the Hermes lock, runs gate preflight, executes Codex (others temporarily deferred) / custom in draft mode under a best-effort PATH guard, runs postflight, and returns `needs_busdriver_review`.
-- `scripts/hermes-busdriver-agent-smoke`: Optional real-agent adapter smoke; creates a throwaway repo and may consume provider quota/tokens. Codex and OpenCode have been verified with it.
+- `scripts/hermes-busdriver-agent-draft`: Launcher that acquires the Hermes lock, runs gate preflight, executes **Codex** (active surface) or custom/noop test commands in draft mode under a best-effort PATH guard, runs postflight, and returns `needs_busdriver_review`.
+- `scripts/hermes-busdriver-agent-smoke`: Optional real-agent adapter smoke; creates a throwaway repo and may consume provider quota/tokens. Codex has been verified with it; other agents are deferred.
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence
 
 Before Hermes can use any repo-changing launcher, the launcher must prove one of:
-
 1. it enters the same Claude Code / Busdriver hook runtime;
 2. it explicitly invokes Busdriver-equivalent gate checks;
 3. it refuses gated operations and returns blocked status;
@@ -212,7 +215,7 @@ Without this proof, Hermes may use the launcher only for read-only/non-mutating 
 
 ## Hermes Equivalent Gate Runner
 
-When Claude Code quota is unavailable, Hermes may independently call coding agents such as Codex, OpenCode, Droid, Agy, or Grok only through the draft gate pattern:
+When Claude Code quota is unavailable, Hermes may independently call coding agents **(currently Codex only)** only through the draft gate pattern:
 
 ```text
 hermes-busdriver-gate preflight
@@ -223,7 +226,9 @@ hermes-busdriver-gate preflight
 
 The v1 gate runner checks repo identity, dirty tree, Busdriver hook visibility, active blocking markers, `.git/hooks` tamper, gitignored file tamper, scope include/exclude, and optional verifier commands. A passing v1 gate allows working-tree draft implementation only. It does not allow commit, push, PR, merge, deploy, or Busdriver marker writes.
 
-Use `hermes-busdriver-agent-draft` for the actual executable wrapper. It performs lock acquire/release, runs the gate pattern, launches a selected agent (`codex`, `opencode`, `droid`, `agy`, `grok`, `custom`, or `noop`), and saves run artifacts under Hermes-owned state. Use `hermes-busdriver-agent-smoke --agent codex` (others temporarily deferred) only as an opt-in real adapter smoke because it consumes provider quota/tokens. OpenCode/Droid/Agy/Grok support is temporarily paused; only Codex is active for now.
+Use `hermes-busdriver-agent-draft` for the actual executable wrapper. It performs lock acquire/release, runs the gate pattern, launches Codex (or noop/custom for tests), and saves run artifacts under Hermes-owned state. Use `hermes-busdriver-agent-smoke --agent codex` only as an opt-in real adapter smoke because it consumes provider quota/tokens.
+
+**Scope rule:** Although the underlying launcher code is written generically, respect the active Codex-only policy. Do not enable, default to, or document other agents (opencode, droid, agy, grok) until the user lifts the temporary restriction. This avoids duplicating work already present in OpenCode's Busdriver plugin and keeps the Hermes relay focused.
 
 Use this pattern to continue implementation when Claude Code quota is exhausted while preserving Busdriver as the canonical finalization authority.
 
@@ -232,7 +237,6 @@ Use this pattern to continue implementation when Claude Code quota is exhausted 
 Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher.
 
 Forbidden direct operations include:
-
 - `git commit`, `git push`, `git reset`, `git rebase`, `git merge`, destructive checkout;
 - `gh pr create`, `gh pr merge`, GitHub issue/comment mutation;
 - raw `codex exec` for repo-changing work;
@@ -276,7 +280,6 @@ Until settled, `codex-goal-dispatch.sh + goal-result.schema.json` is an experime
 ## MCP / Plugin Boundary
 
 Hermes must not:
-
 - directly call Busdriver MCP servers;
 - synthesize `mcp__*` tool names;
 - infer MCP schemas;
@@ -286,6 +289,21 @@ Hermes must not:
 - call third-party CLIs on Busdriver's behalf unless explicitly approved as a Busdriver seam.
 
 If a capability exists only through Busdriver/Claude/MCP/plugin, route it to Busdriver/Claude side and report status/results.
+
+**claude-mem MCP Integration (when granted by user):** When the user explicitly grants access to claude-mem MCP, treat it as a shared memory surface with the Claude/OpenCode side. Use it to query observations, sessions, and context for busdriver-relay work (in addition to Hermes native memory). This enables cross-agent continuity without duplicating Busdriver state. The MCP provides `claude_mem_search`-style access and a chroma backend at `~/.claude-mem/chroma`. Prefer it for historical project memory that should be visible to both Hermes and Claude Code sessions.
+
+**Hermes-side access:** Confirm with `hermes mcp list` (expect `claude-mem ✓ enabled`). Hermes can directly invoke claude-mem tools for queries even when using a different external memory provider (e.g. hindsight or honcho). This is query-on-demand via tools, not automatic full ingestion into the Hermes provider.
+
+**Pushing Hermes work into claude-mem (explicit write after coding):**
+**busdriver-relay integration (proactive):** When using busdriver-relay for coding work, at the end of execution or finishing phases (or when user signals completion with 'finish' / 'done' / '這段結束了'), proactively load and use the related claude-mem-log skill. Summarize Hermes work (hindsight for narrative, files touched, decisions), push as observation with agent_type='hermes'. This makes Hermes coding visible to Claude Code automatically at task boundaries. claude-mem is populated by Claude Code hooks + explicit writes. Hermes coding (terminal, edits, decisions) does **not** automatically appear. When the user wants Claude Code to see Hermes actions ("要的", "push to claude-mem", "讓 claude code 記得 Hermes 做了什麼"):
+
+- At natural task boundaries (end of a coding block), summarize the work (Hindsight recall can help).
+- Log a structured observation (type: change | discovery | decision, agent_type="hermes").
+- Full recipe, schema notes, discovery of memory_session_id, and Python insert pattern: see `references/claude-mem-push.md`.
+
+Example trigger: after Hermes completes edits or a design decision relevant to the Claude-side project, explicitly log so it surfaces in Claude Code observations.
+
+**User command style (direct action preference):** When the user says variants of "你拿key去呀", "你去改呀", "just go fix the .env on M5", or "I already filled the key in Hermes", immediately perform the remote edit (SSH + sed / python write / restart) without leaving placeholders or re-explaining separation. Repeated "I need the actual key" or placeholder explanations after such commands cause frustration. Pull from Hermes config (e.g. custom_providers ZenMux key) and apply directly. This pattern applies to remote Honcho .env, config updates, and similar relay actions.
 
 ## External Side Effects and Data Egress
 
@@ -304,28 +322,26 @@ Fail closed for repo-changing work if Busdriver root/config/version, `hooks/hook
 ## Allowed First Slice
 
 Allowed now:
-
 1. read-only `hermes-busdriver-status --json`;
 2. Hermes-owned lock/status scaffolding;
 3. H1-H13 smoke/contract tests;
-4. `hermes-busdriver-gate` preflight/postflight around scoped draft-mode agents;
-5. `hermes-busdriver-agent-draft` for lock+gate+agent draft runs that return `needs_busdriver_review`;
-6. opt-in `hermes-busdriver-agent-smoke` for real adapter smoke tests such as Codex;
+4. `hermes-busdriver-gate` preflight/postflight around scoped draft-mode agents (Codex focus);
+5. `hermes-busdriver-agent-draft` for lock+gate+Codex draft runs that return `needs_busdriver_review`;
+6. opt-in `hermes-busdriver-agent-smoke` for real Codex adapter smoke tests;
 7. advisory/user-facing routing that tells the user when finalization still needs Claude Code / Busdriver or stronger equivalent gates.
 
 Not allowed yet:
-
 - mutating `hermes-busdriver-codex-goal` finalizing launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
 - commit/PR/merge/deploy automation;
 - direct MCP/plugin routing;
-- claim that Hermes-launched work is gate-safe without hook-runtime equivalence.
+- claim that Hermes-launched work is gate-safe without hook-runtime equivalence;
+- activating support for non-Codex agents.
 
 ## Repo Guidance
 
 A private GitHub repo for this integration is recommended, but it should contain only Hermes-owned adapter artifacts:
-
 - the Hermes `busdriver-relay` skill;
 - read-only status scripts;
 - lock/status scaffolding;
@@ -342,6 +358,8 @@ Session-specific scaffold details live in `references/initial-relay-repo-scaffol
 
 For implementation details and pitfalls discovered while building the first private relay repo/status tooling, see `references/relay-v1-session-lessons.md`. Use it when updating `busdriver.json`, maintaining `hermes-busdriver-status`, changing the relay name, or adding locks/smoke checks.
 
+See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns after coding) and `references/user-preferences-profiles-mcp-agents.md` (direct remote action preference, three-memory-system coordination).
+
 ## Verification Checklist
 
 - [ ] JIT-read current Busdriver source before nontrivial routing.
@@ -355,3 +373,4 @@ For implementation details and pitfalls discovered while building the first priv
 - [ ] Sensitive payloads minimized before external/advisory routes.
 - [ ] Single-flight lock used for any future repo-changing operation.
 - [ ] Success claims backed by fresh tool evidence.
+- [ ] Respect current Codex-only active agent scope policy.
