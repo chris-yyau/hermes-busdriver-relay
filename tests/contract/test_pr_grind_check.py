@@ -78,6 +78,30 @@ def test_waits_when_relevant_checks_are_pending(tmp_path: Path):
     assert data["checks"]["pending"] == 1
 
 
+def test_unstable_merge_state_with_pending_checks_waits(tmp_path: Path):
+    data = run_check(
+        tmp_path,
+        checks="unit\tpending\t1m\turl\n",
+        comments=[],
+        view_extra={"mergeStateStatus": "UNSTABLE"},
+    )
+
+    assert data["status"] == "wait"
+    assert data["clean"] is False
+
+
+def test_unstable_merge_state_with_passed_checks_still_waits(tmp_path: Path):
+    data = run_check(
+        tmp_path,
+        checks="unit\tpass\t1m\turl\n",
+        comments=[],
+        view_extra={"mergeStateStatus": "UNSTABLE"},
+    )
+
+    assert data["status"] == "wait"
+    assert data["clean"] is False
+
+
 def test_needs_fix_for_actionable_comment_on_current_head(tmp_path: Path):
     data = run_check(
         tmp_path,

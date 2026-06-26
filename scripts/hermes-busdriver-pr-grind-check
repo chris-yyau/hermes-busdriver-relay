@@ -328,7 +328,7 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
     if mergeable and mergeable not in {"MERGEABLE", "UNKNOWN"}:
         blockers.append(f"mergeable={mergeable}")
     merge_state = view.get("mergeStateStatus")
-    if merge_state and merge_state not in {"CLEAN", "HAS_HOOKS", "UNKNOWN"}:
+    if merge_state and merge_state not in {"CLEAN", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"}:
         blockers.append(f"mergeStateStatus={merge_state}")
     review_decision = view.get("reviewDecision")
     if review_decision in {"CHANGES_REQUESTED", "REVIEW_REQUIRED"}:
@@ -339,7 +339,7 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
         return "needs_fix", blockers
     if comments:
         return "needs_fix", blockers
-    if checks["pending"] > 0 or mergeable == "UNKNOWN":
+    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state == "UNSTABLE":
         return "wait", blockers
     if checks["kept"] == 0:
         return "blocked", ["no_relevant_checks"]
