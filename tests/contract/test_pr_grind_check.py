@@ -1025,7 +1025,7 @@ def test_push_events_head_time_filters_head_and_branch():
 
 
 
-def test_same_head_fresh_view_recollects_feedback(tmp_path: Path, monkeypatch):
+def test_same_head_fresh_view_collects_feedback_once_after_refresh(tmp_path: Path, monkeypatch):
     ns = runpy.run_path(str(CHECK))
     calls = []
     view = {"number": 7, "url": "https://example.test/pull/7", "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefOid": "abc123def456", "baseRefName": "main", "headRefName": "feature"}
@@ -1035,7 +1035,7 @@ def test_same_head_fresh_view_recollects_feedback(tmp_path: Path, monkeypatch):
 
     def fake_collect(args, repo, current_view, head):
         calls.append(current_view)
-        return [] if len(calls) == 1 else [{"id": 99, "source": "review_comment", "body_preview": "new same-head feedback"}]
+        return [{"id": 99, "source": "review_comment", "body_preview": "new same-head feedback"}]
 
     ns["main"].__globals__["load_view"] = fake_load_view
     parse_calls = []
@@ -1057,6 +1057,28 @@ def test_same_head_fresh_view_recollects_feedback(tmp_path: Path, monkeypatch):
 def test_same_head_recollect_rechecks_head_after_feedback_collection(tmp_path: Path, monkeypatch, capsys):
     ns = runpy.run_path(str(CHECK))
     heads = ["abc123def456", "abc123def456", "def456abc789"]
+
+    def fake_load_view(args, repo):
+        head = heads.pop(0)
+        return {"number": 7, "url": "https://example.test/pull/7", "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefOid": head, "baseRefName": "main", "headRefName": "feature"}
+
+    ns["main"].__globals__["load_view"] = fake_load_view
+    ns["main"].__globals__["load_checks"] = lambda args, repo: "unit\tpass\t1m\turl\n"
+    ns["main"].__globals__["resolve_relevant_script"] = lambda args: None
+    ns["main"].__globals__["parse_relevant_counts"] = lambda script, repo, checks, advisory: {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "failed_rows": [], "pending_rows": [], "source": "test", "relevance_unavailable": False}
+    ns["main"].__globals__["collect_actionable_feedback"] = lambda args, repo, view, head: []
+    monkeypatch.setattr(sys, "argv", [str(CHECK), "--repo", str(tmp_path), "--pr", "7"] )
+    assert ns["main"]() == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "blocked"
+    assert data["decision"]["reason"] == "head_changed"
+
+
+
+
+def test_same_head_rechecks_head_after_final_feedback_refresh(tmp_path: Path, monkeypatch, capsys):
+    ns = runpy.run_path(str(CHECK))
+    heads = ["abc123def456", "abc123def456", "abc123def456", "def456abc789"]
 
     def fake_load_view(args, repo):
         head = heads.pop(0)
