@@ -209,16 +209,17 @@ Before Hermes can use any launcher for repo-changing work, the launcher must pro
 
 If this cannot be proven, Hermes may use the launcher only for read-only or non-mutating operations.
 
-For v1, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`.
+For v1 draft launchers, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`. The later `busdriver-relay` skill supersedes this contract for one operator-level case: when the user explicitly asks Hermes to complete the whole delivery, Hermes may run branch/commit/push/PR/merge only through Hermes Delivery Mode with pr-grind-equivalent checks. Deploy/release/publish and raw repo-mutating `codex exec` remain forbidden.
 
 ## 10. Direct Command Ban
 
-Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher.
+Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher or the `busdriver-relay` skill's explicit Hermes Delivery Mode.
 
 Forbidden direct operations include at minimum:
 
-- `git commit`, `git push`, `git reset`, `git rebase`, `git merge`, destructive checkout;
-- `gh pr create`, `gh pr merge`, GitHub issue/comment mutation;
+- destructive `git reset`, `git rebase`, `git merge`, destructive checkout, or bypass/force operations;
+- `git commit`, `git push`, `gh pr create`, or `gh pr merge` outside explicit Hermes Delivery Mode;
+- GitHub issue/comment mutation unless the user explicitly requested that specific comment/issue side effect;
 - raw `codex exec` for repo-changing work;
 - direct Claude Code plugin commands;
 - direct MCP mutation calls;
@@ -411,7 +412,7 @@ Not allowed yet:
 - repo-changing `hermes-busdriver-codex-goal` launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation;
+- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
 - direct MCP/plugin routing;
 - any claim that Hermes-launched work is gate-safe without H13 proof.
 

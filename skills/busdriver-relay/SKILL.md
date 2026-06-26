@@ -22,6 +22,7 @@ The durable split:
 Hermes = recognition, Phase 0 discovery, JIT source reads, read-only status, user interaction, notification
 Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, coding execution, commits, PRs, merges
 Codex = worker only through Busdriver-approved handoff paths, never raw for repo-changing work
+Hermes Delivery Mode = user-explicit operator path for branch/commit/PR/merge only after pr-grind-equivalent checks pass
 ```
 
 Critical safety fact: Busdriver's most important gates are Claude Code hook-runtime behavior. A normal Hermes shell running a Busdriver script does not automatically fire Claude Code `PreToolUse`/`PostToolUse` hooks. Never assume “script exists” or “dispatcher ran” means “gate fired.”
@@ -41,7 +42,8 @@ Use this skill when the user:
 **Hermes Profile vs Skill Clarification (user preference):** `busdriver-relay` is a thin relay **skill**, not a Hermes profile. It runs under the user's main/default Hermes profile. No new "coding profile" is required for relay work. Treat it as an additional capability loaded into the existing profile (similar to other autonomous-ai-agents skills). Only create a dedicated profile if the user explicitly needs complete isolation (separate config, memory, plugins, model routing) for the relay layer. When asked "is busdriver relay the main profile?", answer clearly: no — it is a skill layer on top of the main profile.
 
 Do **not** use this skill to:
-- directly mutate repos, commit, push, create PRs, merge, deploy, or publish;
+- directly mutate repos, commit, push, create PRs, or merge outside explicit Hermes Delivery Mode;
+- deploy, release, publish, or mutate external systems;
 - recreate Busdriver's MCP/plugin graph inside Hermes;
 - copy all Busdriver skills into Hermes;
 - write or forge Busdriver PASS/bypass/review markers;
@@ -193,7 +195,7 @@ Default relay draft mode still cannot finalize. But when the user explicitly tel
    - fix and push additional commits if feedback is actionable;
    - bail to the user on policy gaps, design/scope questions, failing required checks, max-wait exhaustion, or unclear reviewer state.
 4. Merge only after the PR is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind.
-5. After merge, sync the PR base branch discovered from PR status (not hard-coded `main`), verify the final state, and push a claude-mem summary.
+5. After merge, sync the PR base branch discovered from PR status (not hard-coded `main`), verify the final state, and push a claude-mem summary only when claude-mem access is configured/approved; otherwise report the summary in Hermes and rely on Hindsight.
 
 This does not grant commit/PR/merge authority to draft agent launchers. It is an operator-level Hermes delivery path used only when the user explicitly asks Hermes to finish the whole job. Until a dedicated script/gate exists, these are mandatory operator steps: if any check/review/comment state cannot be verified clean, Hermes must bail instead of merging.
 
@@ -258,7 +260,8 @@ Delivery Mode is the only narrow exception for ordinary Git/GitHub finalization 
 
 Forbidden direct operations include:
 - destructive `git reset`, `git rebase`, `git merge`, destructive checkout, or bypass/force operations;
-- `git commit`, `git push`, `gh pr create`, `gh pr merge`, or GitHub issue/comment mutation outside explicit Delivery Mode;
+- `git commit`, `git push`, `gh pr create`, or `gh pr merge` outside explicit Delivery Mode;
+- GitHub issue/comment mutation unless the user explicitly requested that specific comment/issue side effect;
 - raw `codex exec` for repo-changing work;
 - direct Claude Code plugin commands;
 - direct MCP mutation calls;
@@ -385,7 +388,7 @@ See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns afte
 - [ ] JIT-read current Busdriver source before nontrivial routing.
 - [ ] Phase 0 discovery completed before repo-changing decisions.
 - [ ] `hooks/hooks.json` used as dynamic gate inventory.
-- [ ] No repo-mutating direct git/gh/codex/deploy commands run by Hermes.
+- [ ] No repo-mutating direct git/gh/codex/deploy commands run by Hermes outside explicit Delivery Mode; Delivery Mode requires a clean pr-grind-equivalent loop and still forbids raw repo-mutating `codex exec` and deploy/release/publish.
 - [ ] Hook-runtime equivalence proven before any mutating launcher.
 - [ ] Marker freshness tied to current state, not filename presence.
 - [ ] MCP/plugin capabilities routed to Busdriver, not mirrored.
