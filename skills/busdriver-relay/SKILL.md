@@ -193,9 +193,9 @@ Default relay draft mode still cannot finalize. But when the user explicitly tel
    - fix and push additional commits if feedback is actionable;
    - bail to the user on policy gaps, design/scope questions, failing required checks, max-wait exhaustion, or unclear reviewer state.
 4. Merge only after the PR is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind.
-5. After merge, sync local `main`, verify the final state, and push a claude-mem summary.
+5. After merge, sync the PR base branch discovered from PR status (not hard-coded `main`), verify the final state, and push a claude-mem summary.
 
-This does not grant commit/PR/merge authority to draft agent launchers. It is an operator-level Hermes delivery path used only when the user explicitly asks Hermes to finish the whole job.
+This does not grant commit/PR/merge authority to draft agent launchers. It is an operator-level Hermes delivery path used only when the user explicitly asks Hermes to finish the whole job. Until a dedicated script/gate exists, these are mandatory operator steps: if any check/review/comment state cannot be verified clean, Hermes must bail instead of merging.
 
 ## Execution Seam Classification
 
@@ -252,11 +252,13 @@ Use this pattern to continue implementation when Claude Code quota is exhausted 
 
 ## Direct Command Ban
 
-Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher.
+Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher or the explicit operator-level Hermes Delivery Mode above.
+
+Delivery Mode is the only narrow exception for ordinary Git/GitHub finalization commands (`git commit`, `git push`, `gh pr create`, `gh pr merge`). It requires user intent to complete the whole delivery, local verification, a PR, pr-grind-equivalent checks, bounded reviewer-bot wait/fix rounds, and a clean PR before merge. It does **not** permit destructive git operations, deploy/release/publish, MCP mutation, marker writes, or database/cloud/secrets/payment mutations.
 
 Forbidden direct operations include:
-- `git commit`, `git push`, `git reset`, `git rebase`, `git merge`, destructive checkout;
-- `gh pr create`, `gh pr merge`, GitHub issue/comment mutation;
+- destructive `git reset`, `git rebase`, `git merge`, destructive checkout, or bypass/force operations;
+- `git commit`, `git push`, `gh pr create`, `gh pr merge`, or GitHub issue/comment mutation outside explicit Delivery Mode;
 - raw `codex exec` for repo-changing work;
 - direct Claude Code plugin commands;
 - direct MCP mutation calls;

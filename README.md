@@ -155,4 +155,4 @@ Not allowed yet:
 
 ## Delivery mode
 
-Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a pr-grind-equivalent loop: local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean.
+Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a pr-grind-equivalent loop: local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`.
