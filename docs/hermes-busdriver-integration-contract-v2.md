@@ -5,18 +5,19 @@
 
 ## 0. Executive Position
 
-Hermes should be a **Busdriver-aware relay/intake layer + read-only status/notifier + narrow draft launcher only after proof**, not a clone of Claude Code or Busdriver.
+Hermes should be a **Busdriver-aware relay/intake layer + read-only status/notifier + narrow draft launcher only after proof**, not a clone of Claude Code or Busdriver. The later `busdriver-relay` skill adds a narrow operator-level **Hermes Delivery Mode** for user-explicit branch/commit/PR/merge delivery after pr-grind-equivalent checks; that mode supersedes this document where the two differ.
 
 ```text
 User / Telegram / Cron
   → Hermes runtime discovery + intake classification
   → JIT-read current Busdriver source-of-truth
-  → if repo-changing: only use a Busdriver-approved launcher that proves hook/runtime equivalence or refuses gated operations
+  → if draft repo-changing: only use a Busdriver-approved launcher that proves hook/runtime equivalence or refuses gated operations
+  → if user explicitly requests full delivery: use Hermes Delivery Mode with pr-grind-equivalent checks before merge
   → Busdriver/Claude/Codex owns execution, gates, commits, PRs, MCP/plugin routes
   → Hermes reports verified artifacts and blockers back to the user
 ```
 
-**Hard boundary:** Hermes owns recognition, runtime discovery, read-only status, user interaction, and notification. Busdriver owns coding workflow, gates, reviewer routing, MCP/plugin use, execution, commits, PR grind, and source-of-truth skill content.
+**Hard boundary:** Hermes owns recognition, runtime discovery, read-only status, user interaction, and notification. Busdriver owns coding workflow, gates, reviewer routing, MCP/plugin use, execution, PR grind semantics, and source-of-truth skill content. Hermes Delivery Mode may perform branch/commit/PR/merge only as an operator-level path when the user explicitly asks Hermes to complete delivery and the pr-grind-equivalent loop verifies the PR is clean.
 
 **Critical correction from council:** Busdriver gates are primarily Claude Code hook runtime (`PreToolUse`, `PostToolUse`, etc.). A Hermes bare shell running `codex-goal-dispatch.sh` does **not** automatically execute Claude Code hooks. Therefore v1 must not assume “calling Busdriver scripts” means “Busdriver gates fired.”
 
@@ -424,7 +425,7 @@ Until proven otherwise:
 Hermes can recognize Busdriver pipelines and report status.
 Hermes can read Busdriver sources JIT.
 Hermes can ask the user to continue in Claude Code / Busdriver.
-Hermes cannot itself finalize repo-changing work.
+Hermes cannot itself finalize repo-changing work except through the later `busdriver-relay` Hermes Delivery Mode: user-explicit branch/commit/PR/merge with pr-grind-equivalent checks, no deploy/release/publish, no raw repo-mutating `codex exec`, and bail on unclear checks/reviews.
 ```
 
 This keeps Hermes useful as a second agent without making it a stale, gate-skipping shadow orchestrator.

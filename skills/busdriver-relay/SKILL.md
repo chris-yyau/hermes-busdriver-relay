@@ -109,7 +109,7 @@ Phase 0 runtime discovery
   → Phase 4 execution
   → Phase 5 verification / review
   → Phase 6 finishing / PR / merge
-  → claude-mem push (via claude-mem-log) for Hermes coding work visibility in Claude Code
+  → claude-mem push (via claude-mem-log) when configured/approved, otherwise Hermes/Hindsight summary only
 ```
 
 Routing examples:
@@ -176,7 +176,7 @@ Phase reads:
 | Code review | `requesting-code-review`, `receiving-code-review`, domain reviewers; read `orchestrator/domain-supplements.md` live for newly added reviewers such as `vue-reviewer` / `php-reviewer` |
 | Domain patterns | `orchestrator/domain-supplements.md`, domain skills such as `vue-patterns`, `kubernetes-patterns`, plus domain rule directories |
 | Config/skill maintenance | `config-gc`, `skill-scout`, `agent-self-evaluation` when the user asks to audit/adopt/evaluate setup or skills |
-| Finishing | `finishing-a-development-branch`; linked worktree cleanup must be detected and human-confirmed, never automatic; after Hermes coding via this relay, proactively push summary to claude-mem using claude-mem-log. |
+| Finishing | `finishing-a-development-branch`; linked worktree cleanup must be detected and human-confirmed, never automatic; after Hermes coding via this relay, proactively push summary to claude-mem using claude-mem-log only when claude-mem access is configured/approved. |
 | PR feedback/merge | `pr-grind`, `scripts/relevant-check-status.sh`, `scripts/ack-ledger.sh` |
 | Codex handoff | `codex-goal-handover`, `scripts/codex/*` |
 | MCP/plugin health | `mcp-health-check`, hook manifest, config/status scripts |
@@ -318,7 +318,7 @@ If a capability exists only through Busdriver/Claude/MCP/plugin, route it to Bus
 **Hermes-side access:** Confirm with `hermes mcp list` (expect `claude-mem ✓ enabled`). Hermes can directly invoke claude-mem tools for queries even when using a different external memory provider (e.g. hindsight or honcho). This is query-on-demand via tools, not automatic full ingestion into the Hermes provider.
 
 **Pushing Hermes work into claude-mem (explicit write after coding):**
-**busdriver-relay integration (proactive):** When using busdriver-relay for coding work, at the end of execution or finishing phases (or when user signals completion with 'finish' / 'done' / '這段結束了'), proactively load and use the related claude-mem-log skill. Summarize Hermes work (hindsight for narrative, files touched, decisions), push as observation with agent_type='hermes'. This makes Hermes coding visible to Claude Code automatically at task boundaries. claude-mem is populated by Claude Code hooks + explicit writes. Hermes coding (terminal, edits, decisions) does **not** automatically appear. When the user wants Claude Code to see Hermes actions ("要的", "push to claude-mem", "讓 claude code 記得 Hermes 做了什麼"):
+**busdriver-relay integration (proactive when configured/approved):** When using busdriver-relay for coding work, at the end of execution or finishing phases (or when user signals completion with 'finish' / 'done' / '這段結束了'), proactively load and use the related claude-mem-log skill if claude-mem access is configured/approved. Summarize Hermes work (hindsight for narrative, files touched, decisions), push as observation with agent_type='hermes'. If claude-mem access is unavailable or not approved, report the same summary in Hermes and rely on Hindsight instead of failing the delivery. claude-mem is populated by Claude Code hooks + explicit writes. Hermes coding (terminal, edits, decisions) does **not** automatically appear. When the user wants Claude Code to see Hermes actions ("要的", "push to claude-mem", "讓 claude code 記得 Hermes 做了什麼"):
 
 - At natural task boundaries (end of a coding block), summarize the work (Hindsight recall can help).
 - Log a structured observation (type: change | discovery | decision, agent_type="hermes").
