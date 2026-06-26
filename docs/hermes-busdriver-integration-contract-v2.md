@@ -5,19 +5,19 @@
 
 ## 0. Executive Position
 
-Hermes should be a **Busdriver-aware relay/intake layer + read-only status/notifier + narrow draft launcher only after proof**, not a clone of Claude Code or Busdriver. The later `busdriver-relay` skill adds a narrow operator-level **Hermes Delivery Mode** for user-explicit branch/commit/PR/merge delivery after pr-grind-equivalent checks; that mode supersedes this document where the two differ.
+Hermes should be a **Busdriver-aware relay/intake layer + read-only status/notifier + narrow draft launcher only after proof**, not a clone of Claude Code or Busdriver. The later `busdriver-relay` skill adds a narrow operator-level **Hermes Delivery Mode** for user-explicit branch/commit/PR/merge delivery after litmus/pre-PR plus pr-grind-equivalent checks; that mode supersedes this document where the two differ.
 
 ```text
 User / Telegram / Cron
   → Hermes runtime discovery + intake classification
   → JIT-read current Busdriver source-of-truth
   → if draft repo-changing: only use a Busdriver-approved launcher that proves hook/runtime equivalence or refuses gated operations
-  → if user explicitly requests full delivery: use Hermes Delivery Mode with pr-grind-equivalent checks before merge
+  → if user explicitly requests full delivery: use Hermes Delivery Mode with litmus/pre-PR checks before commit/PR and pr-grind-equivalent checks before merge
   → Busdriver/Claude/Codex owns execution, gates, commits, PRs, MCP/plugin routes
   → Hermes reports verified artifacts and blockers back to the user
 ```
 
-**Hard boundary:** Hermes owns recognition, runtime discovery, read-only status, user interaction, and notification. Busdriver owns coding workflow, gates, reviewer routing, MCP/plugin use, execution, PR grind semantics, and source-of-truth skill content. Hermes Delivery Mode may perform branch/commit/PR/merge only as an operator-level path when the user explicitly asks Hermes to complete delivery and the pr-grind-equivalent loop verifies the PR is clean.
+**Hard boundary:** Hermes owns recognition, runtime discovery, read-only status, user interaction, and notification. Busdriver owns coding workflow, gates, reviewer routing, MCP/plugin use, execution, litmus/PR-grind semantics, and source-of-truth skill content. Hermes Delivery Mode may perform branch/commit/PR/merge only as an operator-level path when the user explicitly asks Hermes to complete delivery, litmus/pre-PR-equivalent checks pass before commit/PR, and the pr-grind-equivalent loop verifies the PR is clean.
 
 **Critical correction from council:** Busdriver gates are primarily Claude Code hook runtime (`PreToolUse`, `PostToolUse`, etc.). A Hermes bare shell running `codex-goal-dispatch.sh` does **not** automatically execute Claude Code hooks. Therefore v1 must not assume “calling Busdriver scripts” means “Busdriver gates fired.”
 
@@ -210,7 +210,7 @@ Before Hermes can use any launcher for repo-changing work, the launcher must pro
 
 If this cannot be proven, Hermes may use the launcher only for read-only or non-mutating operations.
 
-For v1 draft launchers, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`. The later `busdriver-relay` skill supersedes this contract for one operator-level case: when the user explicitly asks Hermes to complete the whole delivery, Hermes may run branch/commit/push/PR/merge only through Hermes Delivery Mode with pr-grind-equivalent checks. Deploy/release/publish and raw repo-mutating `codex exec` remain forbidden.
+For v1 draft launchers, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`. The later `busdriver-relay` skill supersedes this contract for one operator-level case: when the user explicitly asks Hermes to complete the whole delivery, Hermes may run branch/commit/push/PR/merge only through Hermes Delivery Mode with litmus/pre-PR plus pr-grind-equivalent checks. Deploy/release/publish and raw repo-mutating `codex exec` remain forbidden.
 
 ## 10. Direct Command Ban
 
@@ -413,7 +413,8 @@ Not allowed yet:
 - repo-changing `hermes-busdriver-codex-goal` launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
+- commit/PR/merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks;
+- deploy/release/publish automation;
 - direct MCP/plugin routing;
 - any claim that Hermes-launched work is gate-safe without H13 proof.
 
@@ -425,7 +426,7 @@ Until proven otherwise:
 Hermes can recognize Busdriver pipelines and report status.
 Hermes can read Busdriver sources JIT.
 Hermes can ask the user to continue in Claude Code / Busdriver.
-Hermes cannot itself finalize repo-changing work except through the later `busdriver-relay` Hermes Delivery Mode: user-explicit branch/commit/PR/merge with pr-grind-equivalent checks, no deploy/release/publish, no raw repo-mutating `codex exec`, and bail on unclear checks/reviews.
+Hermes cannot itself finalize repo-changing work except through the later `busdriver-relay` Hermes Delivery Mode: user-explicit branch/commit/PR/merge with litmus/pre-PR plus pr-grind-equivalent checks, no deploy/release/publish, no raw repo-mutating `codex exec`, and bail on unclear checks/reviews.
 ```
 
 This keeps Hermes useful as a second agent without making it a stale, gate-skipping shadow orchestrator.

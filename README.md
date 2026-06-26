@@ -149,10 +149,11 @@ Not allowed yet:
 - repo-mutating `hermes-busdriver-codex-goal` launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
+- commit/PR/merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks;
+- deploy/release/publish automation;
 - direct MCP/plugin routing;
 - claims that Hermes shell execution is Busdriver-gate-safe.
 
 ## Delivery mode
 
-Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a pr-grind-equivalent loop: local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.
+Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a litmus/pre-PR plus pr-grind-equivalent loop: litmus/pre-PR-equivalent checks before commit/PR, local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.

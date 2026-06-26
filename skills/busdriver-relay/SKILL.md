@@ -22,7 +22,7 @@ The durable split:
 Hermes = recognition, Phase 0 discovery, JIT source reads, read-only status, user interaction, notification
 Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, coding execution, commits, PRs, merges
 Codex = worker only through Busdriver-approved handoff paths, never raw for repo-changing work
-Hermes Delivery Mode = user-explicit operator path for branch/commit/PR/merge only after pr-grind-equivalent checks pass
+Hermes Delivery Mode = user-explicit operator path for branch/commit/PR/merge only after litmus/pre-PR and pr-grind-equivalent checks pass
 ```
 
 Critical safety fact: Busdriver's most important gates are Claude Code hook-runtime behavior. A normal Hermes shell running a Busdriver script does not automatically fire Claude Code `PreToolUse`/`PostToolUse` hooks. Never assume “script exists” or “dispatcher ran” means “gate fired.”
@@ -183,19 +183,20 @@ Phase reads:
 
 ## Hermes Delivery Mode and PR Grind
 
-Default relay draft mode still cannot finalize. But when the user explicitly tells Hermes to **complete all work** (commit, PR, merge, or similar delivery language), Hermes must not stop at a dirty tree and must not skip Busdriver's PR feedback loop. In that delivery mode, Hermes may perform Git/GitHub finalization only if it runs a pr-grind-equivalent loop:
+Default relay draft mode still cannot finalize. But when the user explicitly tells Hermes to **complete all work** (commit, PR, merge, or similar delivery language), Hermes must not stop at a dirty tree and must not skip Busdriver's litmus/pre-PR or PR feedback loop. In that delivery mode, Hermes may perform Git/GitHub finalization only if it runs litmus/pre-PR-equivalent checks plus a pr-grind-equivalent loop:
 
-1. Create a branch and commit only after local tests/smoke pass.
-2. Push and open a PR with a body listing verification evidence.
-3. Run PR grind semantics before merge:
+1. Before committing or opening a PR, verify the current Busdriver litmus/pre-commit/pre-PR semantics for the target repo. If the Claude hook runtime cannot be proven to fire, run an equivalent explicit litmus/pre-PR check when available; otherwise bail instead of committing or creating the PR.
+2. Create a branch and commit only after litmus/pre-PR-equivalent checks and local tests/smoke pass.
+3. Push and open a PR with a body listing verification evidence.
+4. Run PR grind semantics before merge:
    - inspect `gh pr checks` / `statusCheckRollup`;
    - run live Busdriver `scripts/relevant-check-status.sh` when available;
    - inspect PR reviews and comments for actionable findings on changed lines;
    - wait with a bounded budget for advisory reviewer bots such as CodeRabbit, Devin, Cubic, Cursor, or Codex;
    - fix and push additional commits if feedback is actionable;
    - bail to the user on policy gaps, design/scope questions, failing required checks, max-wait exhaustion, or unclear reviewer state.
-4. Merge only after the PR is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind.
-5. After merge, sync the PR base branch discovered from PR status (not hard-coded `main`), verify the final state, and push a claude-mem summary only when claude-mem access is configured/approved; otherwise report the summary in Hermes and rely on Hindsight.
+5. Merge only after the PR is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind.
+6. After merge, sync the PR base branch discovered from PR status (not hard-coded `main`), verify the final state, and push a claude-mem summary only when claude-mem access is configured/approved; otherwise report the summary in Hermes and rely on Hindsight.
 
 This does not grant commit/PR/merge authority to draft agent launchers. It is an operator-level Hermes delivery path used only when the user explicitly asks Hermes to finish the whole job. Until a dedicated script/gate exists, these are mandatory operator steps: if any check/review/comment state cannot be verified clean, Hermes must bail instead of merging.
 
@@ -256,7 +257,7 @@ Use this pattern to continue implementation when Claude Code quota is exhausted 
 
 Hermes must not directly run repo-mutating or external-side-effect commands except through a proven Busdriver-approved launcher or the explicit operator-level Hermes Delivery Mode above.
 
-Delivery Mode is the only narrow exception for ordinary Git/GitHub finalization commands (`git commit`, `git push`, `gh pr create`, `gh pr merge`). It requires user intent to complete the whole delivery, local verification, a PR, pr-grind-equivalent checks, bounded reviewer-bot wait/fix rounds, and a clean PR before merge. It does **not** permit destructive git operations, deploy/release/publish, MCP mutation, marker writes, or database/cloud/secrets/payment mutations.
+Delivery Mode is the only narrow exception for ordinary Git/GitHub finalization commands (`git commit`, `git push`, `gh pr create`, `gh pr merge`). It requires user intent to complete the whole delivery, litmus/pre-PR-equivalent checks before commit/PR, local verification, a PR, pr-grind-equivalent checks, bounded reviewer-bot wait/fix rounds, and a clean PR before merge. It does **not** permit destructive git operations, deploy/release/publish, MCP mutation, marker writes, or database/cloud/secrets/payment mutations.
 
 Forbidden direct operations include:
 - destructive `git reset`, `git rebase`, `git merge`, destructive checkout, or bypass/force operations;
@@ -357,7 +358,8 @@ Not allowed yet:
 - mutating `hermes-busdriver-codex-goal` finalizing launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
+- commit/PR/merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks;
+- deploy/release/publish automation;
 - direct MCP/plugin routing;
 - claim that Hermes-launched work is gate-safe without hook-runtime equivalence;
 - activating support for non-Codex agents.
@@ -388,7 +390,7 @@ See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns afte
 - [ ] JIT-read current Busdriver source before nontrivial routing.
 - [ ] Phase 0 discovery completed before repo-changing decisions.
 - [ ] `hooks/hooks.json` used as dynamic gate inventory.
-- [ ] No repo-mutating direct git/gh/codex/deploy commands run by Hermes outside explicit Delivery Mode; Delivery Mode requires a clean pr-grind-equivalent loop and still forbids raw repo-mutating `codex exec` and deploy/release/publish.
+- [ ] No repo-mutating direct git/gh/codex/deploy commands run by Hermes outside explicit Delivery Mode; Delivery Mode requires litmus/pre-PR-equivalent checks plus a clean pr-grind-equivalent loop and still forbids raw repo-mutating `codex exec` and deploy/release/publish.
 - [ ] Hook-runtime equivalence proven before any mutating launcher.
 - [ ] Marker freshness tied to current state, not filename presence.
 - [ ] MCP/plugin capabilities routed to Busdriver, not mirrored.
