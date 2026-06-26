@@ -389,7 +389,7 @@ H1 — standalone dispatcher check: proves noninteractive execution or identifie
 H2 — final result envelope/schema check: distinguishes Codex self-report vs dispatcher final fields.  
 H3 — dirty tree fail-closed contract: assert dispatcher/source behavior and run fixture.  
 H4 — scope containment: out-of-scope edits must block/surface.  
-H5 — gate bypass check: Hermes must not commit/PR/merge without hook-runtime equivalence or explicit local-only constraint.  
+H5 — gate bypass check: Hermes must not commit/PR/merge without hook-runtime equivalence, explicit Hermes Delivery Mode with litmus/pre-PR plus pr-grind-equivalent checks, or an explicit local-only constraint.  
 H6 — read-only status check: status writes nowhere unsafe.  
 H7 — drift invalidation: changes to orchestrator/hooks/dispatcher/schema/gates disable mutating launcher until smoke tests pass.  
 H8 — state-dir/plugin-root portability: `$BUSDRIVER_PLUGIN_ROOT` and `$BUSDRIVER_STATE_DIR` route artifacts correctly.  
