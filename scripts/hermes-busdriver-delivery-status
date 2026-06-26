@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Read-only Hermes Delivery Mode status probe.
+
+This command is intentionally non-finalizing: it does not commit, push, create a
+PR, merge, write Busdriver markers, or mutate GitHub. It collects the local repo
+state, live Busdriver source availability, and (when available) the PR-grind
+readiness result from `hermes-busdriver-pr-grind-check`.
+
+The goal is to give Hermes a deterministic status envelope for the next delivery
+step while keeping Busdriver as the canonical workflow/gate authority.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+SCHEMA = "hermes-busdriver-delivery-status/v0"
+FINALIZATION_POLICY = (
+    "Read-only delivery status never authorizes commit/push/PR/merge. "
+    "Use explicit Hermes Delivery Mode only after current Busdriver litmus/pre-PR "
+    "semantics and a clean pr-grind-equivalent loop have been verified."
+)
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+
+
+def read_json(path: str | None, default: Any) -> Any:
+    if not path:
+        return default
+    data = json.loads(Path(path).expanduser().read_text())
+    return data
+
+
+def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args])
+
+
+def repo_status(repo_arg: str) -> dict[str, Any]:
+    repo = Path(repo_arg).expanduser()
+    root_cp = git(repo, "rev-parse", "--show-toplevel")
+    if root_cp.returncode != 0:
+        return {"ok": False, "error": "not_a_git_repo", "path": str(repo), "stderr": root_cp.stderr.strip()}
+    root = Path(root_cp.stdout.strip())
+    git_dir_cp = git(root, "rev-parse", "--git-dir")
+    git_dir = Path(git_dir_cp.stdout.strip()) if git_dir_cp.returncode == 0 else root / ".git"
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    head = git(root, "rev-parse", "HEAD").stdout.strip()
+    upstream_cp = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    status_lines = git(root, "status", "--porcelain=v1").stdout.splitlines()
+    staged = [line for line in status_lines if line and line[0] != "?" and line[0] != " "]
+    unstaged = [line for line in status_lines if len(line) > 1 and line[1] != " "]
+    untracked = [line for line in status_lines if line.startswith("??")]
+    merge_state = any((git_dir / name).exists() for name in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "BISECT_LOG"])
+    return {
+        "ok": True,
+        "root": str(root),
+        "git_dir": str(git_dir),
+        "branch": branch,
+        "head": head,
+        "upstream": upstream_cp.stdout.strip() if upstream_cp.returncode == 0 else None,
+        "dirty": bool(status_lines),
+        "dirty_entries": status_lines,
+        "staged_entries": staged,
+        "unstaged_entries": unstaged,
+        "untracked_entries": untracked,
+        "merge_state": merge_state,
+    }
+
+
+def package_version(plugin_root: Path) -> str | None:
+    p = plugin_root / "package.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        return data.get("version") if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def existing_paths(root: Path, rels: list[str]) -> list[str]:
+    return [rel for rel in rels if (root / rel).exists()]
+
+
+def busdriver_status(plugin_root_arg: str | None) -> dict[str, Any]:
+    candidates: list[Path] = []
+    if plugin_root_arg:
+        candidates.append(Path(plugin_root_arg).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
+
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(candidate)
+
+    selected = next((p for p in deduped if p.exists()), deduped[0] if deduped else Path(""))
+    scripts = [
+        "scripts/relevant-check-status.sh",
+        "scripts/ack-ledger.sh",
+        "scripts/fetch-pr-state.sh",
+        "hooks/gate-scripts/pre-pr-gate.sh",
+        "hooks/gate-scripts/pre-merge-gate.sh",
+    ]
+    skills = ["skills/pr-grind/SKILL.md", "opencode/skills/pr-grind/SKILL.md", "agents/pr-grinder.md", "opencode/agents/pr-grinder.md"]
+    present_scripts = existing_paths(selected, scripts)
+    present_skills = existing_paths(selected, skills)
+    return {
+        "ok": selected.exists(),
+        "plugin_root": str(selected),
+        "version": package_version(selected) if selected.exists() else None,
+        "required_sources": {
+            "present": present_scripts + present_skills,
+            "missing": [rel for rel in scripts + skills if rel not in present_scripts and rel not in present_skills],
+        },
+        "pr_grind_sources_available": bool({"scripts/relevant-check-status.sh", "scripts/ack-ledger.sh"} <= set(present_scripts) and present_skills),
+    }
+
+
+def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
+    if not repo.get("ok"):
+        return {"blocking": [], "present": []}
+    root = Path(repo["root"])
+    names = [
+        "freeze.local",
+        "careful.local",
+        "design-review-needed.local.md",
+        "skip-litmus.local",
+        "litmus-passed.local",
+        "pr-review-passed.local",
+        "pr-grind-clean.local",
+    ]
+    present: list[dict[str, Any]] = []
+    for state_dir_name in (".claude", ".opencode"):
+        state_dir = root / state_dir_name
+        for name in names:
+            path = state_dir / name
+            if path.exists():
+                st = path.stat()
+                present.append({"path": str(path), "state_dir": state_dir_name, "name": name, "mtime": st.st_mtime, "age_seconds": max(0, int(time.time() - st.st_mtime))})
+    blocking = [m for m in present if m["name"] in {"freeze.local", "careful.local", "design-review-needed.local.md"}]
+    return {"present": present, "blocking": blocking}
+
+
+def relay_capabilities() -> dict[str, Any]:
+    scripts = {
+        "status": ROOT / "scripts" / "hermes-busdriver-status",
+        "runtime_check": ROOT / "scripts" / "hermes-busdriver-runtime-check",
+        "gate": ROOT / "scripts" / "hermes-busdriver-gate",
+        "agent_draft": ROOT / "scripts" / "hermes-busdriver-agent-draft",
+        "pr_grind_check": ROOT / "scripts" / "hermes-busdriver-pr-grind-check",
+        "delivery_status": ROOT / "scripts" / "hermes-busdriver-delivery-status",
+    }
+    return {name: {"path": str(path), "available": path.exists()} for name, path in scripts.items()}
+
+
+def load_lock_status(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.no_lock_status:
+        return None
+    lock = ROOT / "scripts" / "hermes-busdriver-lock"
+    if not lock.exists():
+        return {"available": False}
+    cmd = [sys.executable, str(lock), "status"]
+    if args.state_dir:
+        cmd += ["--state-dir", args.state_dir]
+    cp = run(cmd, timeout=20)
+    if cp.returncode != 0:
+        return {"available": True, "ok": False, "returncode": cp.returncode, "stderr": cp.stderr.strip()}
+    try:
+        data = json.loads(cp.stdout)
+        data["available"] = True
+        return data
+    except Exception as e:  # noqa: BLE001
+        return {"available": True, "ok": False, "parse_error": str(e), "stdout_tail": cp.stdout[-2000:]}
+
+
+def latest_agent_runs(args: argparse.Namespace, repo: dict[str, Any]) -> list[dict[str, Any]]:
+    if args.no_agent_runs:
+        return []
+    state_root = Path(args.state_dir).expanduser() if args.state_dir else Path.home() / ".hermes" / "busdriver-relay"
+    runs_dir = state_root / "agent-runs"
+    if not runs_dir.exists():
+        return []
+    repo_root = repo.get("root") if repo.get("ok") else None
+    rows: list[dict[str, Any]] = []
+    for report in sorted(runs_dir.glob("*/final-report.json"), key=lambda p: p.stat().st_mtime, reverse=True)[: args.max_agent_runs * 4]:
+        try:
+            data = json.loads(report.read_text())
+        except Exception:
+            continue
+        if repo_root and data.get("repo") and data.get("repo") != repo_root:
+            continue
+        rows.append({
+            "report": str(report),
+            "mtime": report.stat().st_mtime,
+            "status": data.get("status"),
+            "ok": data.get("ok"),
+            "agent": data.get("agent"),
+            "run_dir": data.get("run_dir"),
+            "decision": data.get("decision"),
+        })
+        if len(rows) >= args.max_agent_runs:
+            break
+    return rows
+
+
+def run_pr_grind_check(args: argparse.Namespace, repo: dict[str, Any], busdriver: dict[str, Any]) -> dict[str, Any] | None:
+    if args.pr_grind_result_file:
+        data = read_json(args.pr_grind_result_file, {})
+        return {"available": True, "source": "fixture", "ok": True, "result": data}
+    if not args.pr:
+        return None
+    script = Path(args.pr_grind_check_script).expanduser() if args.pr_grind_check_script else ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
+    if not script.exists():
+        return {"available": False, "script": str(script), "reason": "hermes-busdriver-pr-grind-check not available in this branch"}
+    if not repo.get("ok"):
+        return {"available": True, "ok": False, "script": str(script), "reason": "repo_unavailable"}
+    cmd = [sys.executable, str(script), "--repo", repo["root"], "--pr", str(args.pr)]
+    if busdriver.get("ok"):
+        cmd += ["--plugin-root", busdriver["plugin_root"]]
+    cp = run(cmd, cwd=Path(repo["root"]), timeout=args.pr_grind_timeout)
+    if cp.returncode != 0:
+        return {"available": True, "ok": False, "script": str(script), "returncode": cp.returncode, "stderr": cp.stderr.strip(), "stdout_tail": cp.stdout[-4000:]}
+    try:
+        return {"available": True, "ok": True, "script": str(script), "result": json.loads(cp.stdout)}
+    except Exception as e:  # noqa: BLE001
+        return {"available": True, "ok": False, "script": str(script), "parse_error": str(e), "stdout_tail": cp.stdout[-4000:]}
+
+
+def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], pr_grind: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    stage = "unknown"
+    status = "blocked"
+    next_action = "Resolve blocking status before delivery."
+
+    if not repo.get("ok"):
+        blockers.append("repo_not_available")
+    else:
+        stage = "post_pr" if pr else ("draft_changes" if repo.get("dirty") else "no_local_changes")
+        if repo.get("merge_state"):
+            blockers.append("git_merge_rebase_cherry_pick_state_active")
+        if markers.get("blocking"):
+            blockers.append("blocking_busdriver_marker_present")
+
+    if not busdriver.get("ok"):
+        blockers.append("busdriver_plugin_unavailable")
+    elif not busdriver.get("pr_grind_sources_available"):
+        warnings.append("busdriver_pr_grind_sources_incomplete")
+
+    if pr:
+        if pr_grind is None:
+            blockers.append("pr_grind_status_not_collected")
+        elif not pr_grind.get("available"):
+            blockers.append("hermes_pr_grind_checker_unavailable")
+            next_action = "Wait for PR #3 / pr-grind readiness checker to land, or run Busdriver pr-grind in Claude Code."
+        elif not pr_grind.get("ok"):
+            blockers.append("pr_grind_checker_failed")
+        else:
+            result = pr_grind.get("result") or {}
+            pr_status = result.get("status")
+            if result.get("clean") is True or pr_status == "clean":
+                if not blockers:
+                    status = "pr_clean_read_only"
+                    next_action = "PR appears clean by read-only checker; only an explicit Delivery Mode finalizer may merge after re-verifying current Busdriver semantics."
+            elif pr_status == "wait":
+                blockers.append("pr_checks_or_reviewer_bots_pending")
+                next_action = "Wait bounded rounds for required checks/reviewer bots, then re-run PR-grind status."
+            elif pr_status == "needs_fix":
+                blockers.append("actionable_pr_feedback_present")
+                next_action = "Fix actionable feedback on the PR branch, push, then re-run PR-grind status."
+            else:
+                blockers.append("pr_not_clean")
+    elif repo.get("ok") and repo.get("dirty"):
+        if not blockers:
+            status = "draft_changes_need_busdriver_finalization"
+        next_action = "Run local verification plus current Busdriver litmus/pre-PR semantics before any commit or PR."
+    elif repo.get("ok"):
+        if not blockers:
+            status = "no_local_delivery_candidate"
+        next_action = "No local changes or PR were supplied; continue draft work or pass --pr for post-PR status."
+
+    if blockers:
+        status = "blocked"
+
+    return {
+        "status": status,
+        "stage": stage,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_action": next_action,
+        "finalization_allowed": False,
+        "commit_allowed": False,
+        "push_allowed": False,
+        "pr_allowed": False,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "policy": FINALIZATION_POLICY,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--repo", default=".", help="Target git repo/worktree to inspect")
+    ap.add_argument("--plugin-root", help="Busdriver plugin root; falls back to env/default install path")
+    ap.add_argument("--pr", help="Pull request number for post-PR delivery status")
+    ap.add_argument("--pr-grind-check-script", help="Path to hermes-busdriver-pr-grind-check; defaults to this relay repo's scripts dir")
+    ap.add_argument("--pr-grind-result-file", help="Fixture/result JSON from hermes-busdriver-pr-grind-check")
+    ap.add_argument("--pr-grind-timeout", type=int, default=180)
+    ap.add_argument("--state-dir", help="Hermes busdriver-relay state dir for lock/run lookup")
+    ap.add_argument("--max-agent-runs", type=int, default=3)
+    ap.add_argument("--no-agent-runs", action="store_true")
+    ap.add_argument("--no-lock-status", action="store_true")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    repo = repo_status(args.repo)
+    busdriver = busdriver_status(args.plugin_root)
+    markers = marker_status(repo)
+    capabilities = relay_capabilities()
+    pr_grind = run_pr_grind_check(args, repo, busdriver)
+    locks = load_lock_status(args)
+    runs = latest_agent_runs(args, repo)
+    decision = delivery_decision(repo, busdriver, markers, pr_grind, args.pr)
+
+    result = {
+        "schema": SCHEMA,
+        "ok": bool(repo.get("ok") and busdriver.get("ok")),
+        "repo": repo,
+        "busdriver": busdriver,
+        "markers": markers,
+        "relay_capabilities": capabilities,
+        "lock_status": locks,
+        "recent_agent_runs": runs,
+        "pr_grind": pr_grind,
+        "decision": decision,
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0 if result["ok"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
