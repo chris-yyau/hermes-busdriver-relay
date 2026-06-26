@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Hermes-side Busdriver-equivalent gate runner.
 
-This is the generic guard layer for Hermes-launched agents (Codex, OpenCode,
-Droid, Agy, Grok, etc.). It does not pretend to be Claude Code's hook runtime;
-instead it performs explicit preflight/postflight checks and reports what kind
+This is the generic guard layer for Hermes-launched draft agents. The active
+relay surface is Codex-only for now; custom/noop commands are reserved for
+tests. It does not pretend to be Claude Code's hook runtime; instead it performs
+explicit preflight/postflight checks and reports what kind
 of agent work is allowed.
 
 v1 capabilities:

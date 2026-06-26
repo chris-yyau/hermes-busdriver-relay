@@ -8,18 +8,18 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 |---|---|
 | Relay repo | `/Volumes/work/projects/hermes-busdriver-relay` |
 | Relay GitHub | `https://github.com/chris-yyau/hermes-busdriver-relay` |
-| Busdriver source main worktree used for verification | `/Volumes/Work/Projects/busdriver/.claude/worktrees/devin-reviewer` |
-| Installed Busdriver marketplace plugin | `~/.claude/plugins/marketplaces/busdriver` |
+| Busdriver source path read during Phase 0 | `/Volumes/work/projects/busdriver` |
+| Installed Busdriver marketplace plugin used for smoke | `~/.claude/plugins/marketplaces/busdriver` |
 | Hermes skill install path | `~/.hermes/skills/autonomous-ai-agents/busdriver-relay` |
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has started with a **Hermes-side equivalent gate runner** that allows draft-mode agent implementation while keeping commit/push/PR/merge/deploy blocked.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner** plus a **Codex-only draft launcher** that allows working-tree draft implementation while keeping commit/push/PR/merge/deploy blocked.
 
 Implemented:
 
 - `skills/busdriver-relay/SKILL.md`
-- `skills/busdriver-relay/references/*.md`
+- `skills/busdriver-relay/references/*.md` including claude-mem push and user-preference/profile notes
 - `scripts/hermes-busdriver-status`
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
@@ -41,35 +41,30 @@ Implemented:
 
 ```bash
 cd /Volumes/work/projects/hermes-busdriver-relay
-python3 -m pytest tests/contract -q
+uvx --from pytest pytest tests/contract -q
 scripts/hermes-busdriver-smoke \
-  --plugin-root /Volumes/Work/Projects/busdriver/.claude/worktrees/devin-reviewer \
-  --repo /Volumes/Work/Projects/busdriver/.claude/worktrees/devin-reviewer \
+  --plugin-root ~/.claude/plugins/marketplaces/busdriver \
   --pretty
 ```
+
+`hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
 Most recent verified result:
 
 ```text
-18 passed
+contract tests: 18 passed
 smoke_ok True
-returncodes [0, 0, 0, 0, 0]
 package_version 1.71.0
 hook_event_count 7
 route_count 7
-repo_dirty False
+runtime_check.hook_manifest_available True
+runtime_check.gate_hooks_declared True
+runtime_check.inside_claude_code_hook_invocation False
 runtime_check.mutating_launcher_allowed False
-gate.agent_implementation_draft_allowed True
-gate.commit_allowed False
-gate.push_allowed False
-gate.pr_allowed False
-agent_draft_noop.ok True
-agent_draft_noop.status needs_busdriver_review
-agent_draft_noop.commit_allowed False
-real_codex_smoke.ok True
-real_codex_smoke.status needs_busdriver_review
-real_codex_smoke.changed_files [src/codex_smoke.txt]
-real_codex_smoke.verifier file=True
+clean temp repo preflight.agent_implementation_draft_allowed True
+clean temp repo preflight.commit_allowed False
+clean temp repo preflight.push_allowed False
+clean temp repo preflight.pr_allowed False
 ```
 
 ## Still intentionally deferred

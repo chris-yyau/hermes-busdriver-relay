@@ -58,12 +58,12 @@ The PATH guard is defense in depth, not a complete sandbox. An agent that delibe
 ## Future Work
 
 - Stronger sandboxing / command broker if finalization authority is ever added.
-- Structured per-agent adapters for Codex/OpenCode/Droid/Agy/Grok output schemas.
+- Structured per-agent adapters if the deferred non-Codex scope is explicitly reopened.
 - Commit-capable finalization gates after litmus/review/secret/CI policies are modeled.
 
 ## Real-Agent Smoke
 
 `hermes-busdriver-agent-smoke` is an opt-in smoke runner for real model-backed adapters. It creates a throwaway git repo and calls `hermes-busdriver-agent-draft` with the selected agent. It is not part of the default contract suite because it can consume provider quota/tokens.
 
-The Codex adapter has been verified with real smoke (opencode and others temporarily deferred).
+The Codex adapter has been verified with real smoke. Other agents remain deferred.
 
