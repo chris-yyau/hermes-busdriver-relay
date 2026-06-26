@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Read-only Hermes-side PR-grind readiness checker.
+
+This command does not write Busdriver markers and does not merge. It collects the
+minimum deterministic signals Hermes can verify outside Claude Code: PR head,
+mergeability, relevant check status, and current-head review comments. It is a
+building block for Delivery Mode, not a replacement for Busdriver pr-grind.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+FAIL_STATUSES = {"fail", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
+PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
+NON_ACTIONABLE = re.compile(
+    r"^(lgtm|looks good|looks good to me|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
+    re.I,
+)
+
+
+def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=check)
+
+
+def read_json_file(path: str | None, default: Any) -> Any:
+    if not path:
+        return default
+    return json.loads(Path(path).expanduser().read_text())
+
+
+def gh_json(cmd: list[str], repo: Path) -> Any:
+    cp = run(cmd, cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "gh_failed", "cmd": cmd, "stderr": cp.stderr.strip()}))
+    return json.loads(cp.stdout)
+
+
+def owner_repo(repo: Path) -> str:
+    cp = run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=repo)
+    if cp.returncode == 0:
+        return json.loads(cp.stdout)["nameWithOwner"]
+    remote = run(["git", "remote", "get-url", "origin"], cwd=repo)
+    if remote.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "stderr": remote.stderr.strip()}))
+    url = remote.stdout.strip()
+    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
+    if not m:
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "remote": url}))
+    return m.group(1)
+
+
+def load_view(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
+    if args.view_json_file:
+        data = read_json_file(args.view_json_file, {})
+        if not isinstance(data, dict):
+            raise SystemExit(json.dumps({"ok": False, "error": "view_json_not_object"}))
+        return data
+    return gh_json([
+        "gh", "pr", "view", str(args.pr), "--json",
+        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefName,headRefName",
+    ], repo)
+
+
+def load_checks(args: argparse.Namespace, repo: Path) -> str:
+    if args.checks_file:
+        return Path(args.checks_file).expanduser().read_text()
+    cp = run(["gh", "pr", "checks", str(args.pr)], cwd=repo)
+    # gh exits non-zero for failing checks; the tabular stdout/stderr is still useful.
+    text = (cp.stdout or "") + (cp.stderr or "")
+    if not text.strip() and cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "gh_pr_checks_failed", "stderr": cp.stderr.strip()}))
+    return text
+
+
+def load_review_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.review_comments_file:
+        data = read_json_file(args.review_comments_file, [])
+        return data if isinstance(data, list) else []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/comments", "--paginate"], cwd=repo)
+    if cp.returncode != 0:
+        # Fail closed: if review comments are unavailable, surface a blocked state.
+        raise SystemExit(json.dumps({"ok": False, "error": "review_comments_unavailable", "stderr": cp.stderr.strip()}))
+    data = json.loads(cp.stdout or "[]")
+    return data if isinstance(data, list) else []
+
+
+def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
+    candidates: list[Path] = []
+    if args.relevant_check_script:
+        candidates.append(Path(args.relevant_check_script).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser() / "scripts" / "relevant-check-status.sh")
+    if args.plugin_root:
+        candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
+    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver/scripts/relevant-check-status.sh")
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    return None
+
+
+def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+    advisory = re.compile(advisory_pattern or "CodeScene", re.I)
+    kept: list[str] = []
+    failed_rows: list[str] = []
+    pending_rows: list[str] = []
+    for line in checks_text.splitlines():
+        if "\t" not in line:
+            continue
+        name, rest = line.split("\t", 1)
+        if advisory.search(name):
+            continue
+        kept.append(line)
+        status = rest.split("\t", 1)[0].strip().lower()
+        if status in FAIL_STATUSES:
+            failed_rows.append(line)
+        elif status in PENDING_STATUSES:
+            pending_rows.append(line)
+    return {"failed": len(failed_rows), "pending": len(pending_rows), "mode": "all", "kept": len(kept), "failed_rows": failed_rows, "pending_rows": pending_rows, "source": "fallback"}
+
+
+def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+    if script:
+        cp = subprocess.run(["bash", str(script), str(repo), advisory_pattern], input=checks_text, text=True, capture_output=True, cwd=str(repo))
+        if cp.returncode == 0 and cp.stdout.strip():
+            lines = cp.stdout.splitlines()
+            first = lines[0].split()
+            if len(first) == 4 and first[0].isdigit() and first[1].isdigit() and first[3].isdigit():
+                failed = int(first[0])
+                pending = int(first[1])
+                return {
+                    "failed": failed,
+                    "pending": pending,
+                    "mode": first[2],
+                    "kept": int(first[3]),
+                    "failed_rows": lines[1:] if failed else [],
+                    "pending_rows": [],
+                    "source": str(script),
+                }
+    return fallback_check_counts(checks_text, advisory_pattern)
+
+
+def _pending_rows(checks_text: str, mode: str) -> list[str]:
+    rows: list[str] = []
+    for line in checks_text.splitlines():
+        if "\t" not in line:
+            continue
+        status = line.split("\t")[1].strip().lower()
+        if status in PENDING_STATUSES:
+            rows.append(line)
+    return rows
+
+
+def same_head(comment_sha: str | None, head: str) -> bool:
+    if not comment_sha or not head:
+        return False
+    if len(comment_sha) < 7 or len(head) < 7:
+        return False
+    return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
+
+
+def actionable_comments(comments: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        thread = c.get("thread") if isinstance(c.get("thread"), dict) else {}
+        if c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
+            continue
+        if not same_head(str(c.get("commit_id") or ""), head):
+            continue
+        body = str(c.get("body") or "").strip()
+        if not body or NON_ACTIONABLE.search(body):
+            continue
+        user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        out.append({
+            "id": c.get("id"),
+            "user": user.get("login"),
+            "path": c.get("path"),
+            "line": c.get("line") or c.get("original_line"),
+            "commit_id": c.get("commit_id"),
+            "body_preview": body[:500],
+        })
+    return out
+
+
+def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    blockers: list[str] = []
+    state = view.get("state")
+    mergeable = view.get("mergeable")
+    if state and state != "OPEN":
+        blockers.append(f"state={state}")
+    if view.get("isDraft") is True:
+        blockers.append("isDraft=true")
+    if mergeable and mergeable not in {"MERGEABLE", "UNKNOWN"}:
+        blockers.append(f"mergeable={mergeable}")
+    merge_state = view.get("mergeStateStatus")
+    if merge_state and merge_state not in {"CLEAN", "HAS_HOOKS", "UNKNOWN"}:
+        blockers.append(f"mergeStateStatus={merge_state}")
+    review_decision = view.get("reviewDecision")
+    if review_decision in {"CHANGES_REQUESTED", "REVIEW_REQUIRED"}:
+        blockers.append(f"reviewDecision={review_decision}")
+    if blockers:
+        return "blocked", blockers
+    if checks["failed"] > 0:
+        return "needs_fix", blockers
+    if comments:
+        return "needs_fix", blockers
+    if checks["pending"] > 0 or mergeable == "UNKNOWN":
+        return "wait", blockers
+    if checks["kept"] == 0:
+        return "blocked", ["no_relevant_checks"]
+    return "clean", blockers
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--repo", default=".")
+    ap.add_argument("--pr", required=True)
+    ap.add_argument("--plugin-root")
+    ap.add_argument("--checks-file")
+    ap.add_argument("--review-comments-file")
+    ap.add_argument("--view-json-file")
+    ap.add_argument("--relevant-check-script")
+    ap.add_argument("--advisory-pattern", default="CodeScene")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    repo = Path(args.repo).expanduser().resolve()
+    view = load_view(args, repo)
+    head = str(view.get("headRefOid") or "")
+    checks_text = load_checks(args, repo)
+    script = resolve_relevant_script(args)
+    checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+    comments = actionable_comments(load_review_comments(args, repo), head)
+    status, blockers = classify(view, checks, comments)
+    result = {
+        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "ok": True,
+        "pr": int(view.get("number") or args.pr),
+        "url": view.get("url"),
+        "head": head,
+        "base": view.get("baseRefName"),
+        "status": status,
+        "clean": status == "clean",
+        "blockers": blockers,
+        "checks": checks,
+        "actionable_comments": comments,
+        "decision": {
+            "merge_allowed": status == "clean",
+            "needs_fix": status == "needs_fix",
+            "wait": status == "wait",
+            "blocked": status == "blocked",
+            "reason": "latest PR HEAD clean" if status == "clean" else status,
+        },
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
