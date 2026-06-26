@@ -308,14 +308,17 @@ def test_coderabbit_summary_issue_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
-def test_ack_value_must_match_exact_head_prefix_token():
+def test_ack_value_matches_exact_head_prefix_or_longer_prefix():
     ns = runpy.run_path(str(CHECK))
     assert ns["ack_matches_head"]("abc123de:E", "abc123def456") is True
     assert ns["ack_matches_head"]("abc123de", "abc123def456") is True
-    assert ns["ack_matches_head"]("abc123def:E", "abc123def456") is False
+    assert ns["ack_matches_head"]("abc123def:E", "abc123def456") is True
+    assert ns["ack_matches_head"]("abc123d0:E", "abc123def456") is False
+    assert ns["ack_matches_head"]("abc123dezzz:E", "abc123def456") is False
+    assert ns["ack_matches_head"]("abc123def4560:E", "abc123def456") is False
 
 
-def test_load_acked_bot_logins_uses_env_plugin_roots(tmp_path: Path):
+def test_load_acked_bot_logins_uses_env_plugin_roots(tmp_path: Path, monkeypatch):
     ns = runpy.run_path(str(CHECK))
     plugin = tmp_path / "plugin"
     scripts = plugin / "scripts"
@@ -323,17 +326,9 @@ def test_load_acked_bot_logins_uses_env_plugin_roots(tmp_path: Path):
     (scripts / "fetch-pr-state.sh").write_text("FETCH_OK=1; export FETCH_OK\n")
     (scripts / "ack-ledger.sh").write_text("#!/usr/bin/env bash\necho abc123de:E\n")
     (scripts / "ack-ledger.sh").chmod(0o755)
-    env = __import__("os").environ
-    old = env.get("BUSDRIVER_PLUGIN_ROOT")
-    env["BUSDRIVER_PLUGIN_ROOT"] = str(plugin)
-    try:
-        args = type("Args", (), {"fixture_mode": False, "plugin_root": None, "pr": "7"})()
-        assert "coderabbitai[bot]" in ns["load_acked_bot_logins"](args, tmp_path, "abc123def456")
-    finally:
-        if old is None:
-            env.pop("BUSDRIVER_PLUGIN_ROOT", None)
-        else:
-            env["BUSDRIVER_PLUGIN_ROOT"] = old
+    monkeypatch.setenv("BUSDRIVER_PLUGIN_ROOT", str(plugin))
+    args = type("Args", (), {"fixture_mode": False, "plugin_root": None, "pr": "7"})()
+    assert "coderabbitai[bot]" in ns["load_acked_bot_logins"](args, tmp_path, "abc123def456")
 
 
 
@@ -925,10 +920,22 @@ def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
-def test_load_head_time_fetches_check_runs_with_get():
-    source = CHECK.read_text()
-    assert '["gh", "api", f"repos/{repo_name}/commits/{head}/check-runs", "-X", "GET", "-F", "per_page=100", "--paginate", "--slurp"]' in source
+def test_select_head_time_prefers_commit_time_over_later_check_time():
+    ns = runpy.run_path(str(CHECK))
+    commit_time = ns["parse_github_time"]("2026-01-02T03:04:05Z")
+    check_time = ns["parse_github_time"]("2026-01-02T03:05:00Z")
+    assert ns["select_head_time"](commit_time, check_time, None) == commit_time
 
+
+
+def test_invalid_pr_number_is_rejected():
+    ns = runpy.run_path(str(CHECK))
+    try:
+        ns["validate_pr_number"]("3; rm -rf /")
+    except SystemExit as exc:
+        assert "invalid_pr_number" in str(exc)
+    else:
+        raise AssertionError("expected invalid PR number to fail")
 
 
 def test_parse_paginated_check_runs_flattens_slurped_pages():

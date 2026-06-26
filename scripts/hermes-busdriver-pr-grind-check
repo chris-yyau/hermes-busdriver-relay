@@ -109,8 +109,10 @@ def normalize_bot_login(login: str | None) -> str:
 
 
 def ack_matches_head(value: str, head: str) -> bool:
-    prefix = head[:8]
-    return value == prefix or value.startswith(f"{prefix}:")
+    token = str(value or "").split(":", 1)[0]
+    if len(token) < 8 or not head or re.search(r"[^0-9A-Fa-f]", token):
+        return False
+    return token == head[:8] or (len(token) > 8 and head.startswith(token))
 
 
 def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> set[str]:
@@ -132,17 +134,18 @@ def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> se
             break
     if fetch is None or ack is None:
         return set()
-    candidates = {"coderabbitai", "devin-ai-integration", "cubic-dev-ai", "chatgpt-codex-connector"}
-    bot_words = " ".join(sorted(candidates))
     script = (
         "set -euo pipefail\n"
-        f". {shlex.quote(str(fetch))} {shlex.quote(str(args.pr))}\n"
-        f"for b in {bot_words}; do\n"
-        f"  out=$(ACK_EMIT_TIER=1 bash {shlex.quote(str(ack))} \"$b\" 2>/dev/null || echo stale)\n"
+        ". \"$1\" \"$2\"\n"
+        "shift 2\n"
+        "ack_script=$1\n"
+        "shift\n"
+        "for b in \"$@\"; do\n"
+        "  out=$(ACK_EMIT_TIER=1 bash \"$ack_script\" \"$b\" 2>/dev/null || echo stale)\n"
         "  printf '%s=%s\\n' \"$b\" \"$out\"\n"
         "done\n"
     )
-    cp = run(["bash", "-lc", script], cwd=repo)
+    cp = run(["bash", "-c", script, "ack-ledger", str(fetch), str(args.pr), str(ack), "chatgpt-codex-connector", "coderabbitai", "cubic-dev-ai", "devin-ai-integration"], cwd=repo)
     if cp.returncode != 0:
         return set()
     acked: set[str] = set()
@@ -601,6 +604,12 @@ def check_runs_head_time(data: dict[str, Any]) -> dt.datetime | None:
     return min(times) if times else None
 
 
+def select_head_time(commit_time: dt.datetime | None, check_time: dt.datetime | None, fallback_time: dt.datetime | None) -> dt.datetime | None:
+    if commit_time:
+        return commit_time
+    return check_time or fallback_time
+
+
 def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
     if args.fixture_mode or args.view_json_file or not head:
         return latest_head_time(view)
@@ -619,9 +628,7 @@ def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], h
             check_time = check_runs_head_time({"check_runs": parse_paginated_check_runs(checks_cp.stdout)})
         except json.JSONDecodeError:
             check_time = None
-    if commit_time and check_time:
-        return max(commit_time, check_time)
-    return check_time or commit_time or latest_head_time(view)
+    return select_head_time(commit_time, check_time, latest_head_time(view))
 
 
 def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None, acked_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
@@ -660,6 +667,12 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
             "source": "issue_comment_after_head" if head_time else "issue_comment_unbound",
         })
     return out
+
+
+def validate_pr_number(value: str) -> str:
+    if not re.fullmatch(r"[1-9][0-9]*", str(value or "")):
+        raise SystemExit(json.dumps({"ok": False, "error": "invalid_pr_number", "pr": value}))
+    return str(value)
 
 
 def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[str, Any]]) -> tuple[str, list[str]]:
@@ -711,6 +724,7 @@ def main() -> int:
     ap.add_argument("--fixture-mode", action="store_true", help="Allow omitted feedback surfaces for offline contract fixtures only")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
+    args.pr = validate_pr_number(args.pr)
 
     repo = Path(args.repo).expanduser().resolve()
     view = load_view(args, repo)
