@@ -1,0 +1,60 @@
+# Relay v2 Settling Checks
+
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher and read-only PR-grind readiness checker.
+
+## Current scope
+
+Relay v2 supports:
+
+- read-only Busdriver status/runtime probes;
+- Hermes-owned single-flight locks;
+- scoped Codex draft runs that stop at `needs_busdriver_review`;
+- a read-only PR-grind readiness checker for explicit Hermes Delivery Mode.
+
+It still does **not** provide an autonomous finalization launcher. Commit/PR/merge remains an operator-level Delivery Mode path that must run litmus/pre-PR-equivalent checks and a latest-head pr-grind loop.
+
+## Checks
+
+| Check | v2 status | Evidence |
+|---|---|---|
+| H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft` and `hermes-busdriver-pr-grind-check` run standalone; no full finalization dispatcher yet. |
+| H2 final result envelope/schema | Partial | Draft launcher and PR-grind checker emit JSON schemas; no end-to-end delivery result envelope yet. |
+| H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
+| H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
+| H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
+| H6 read-only status check | Implemented | Status/runtime/PR-grind readiness probes are read-only. |
+| H7 drift invalidation | Partial | Status reports critical Busdriver file hashes; no automatic finalization disable/enable state machine yet. |
+| H8 state-dir/plugin-root portability | Partial | Status/gate/smoke accept plugin root and state dir; PR-grind checker can use live Busdriver `relevant-check-status.sh`. |
+| H9 marker freshness | Partial | Status reports marker metadata; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
+| H10 concurrency | Implemented scaffolding | `hermes-busdriver-lock` supports per-repo operations; finalization-specific lock class still future work. |
+| H11 external side effects | Partial | Draft paths block side effects; Delivery Mode PR/merge side effects require explicit user intent and clean checks. |
+| H12 sensitive payload | Partial | No advisory/model payload in status/checker paths; no full redaction test suite yet. |
+| H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization. |
+
+## Commands
+
+```bash
+uvx --from pytest pytest tests/contract -q
+```
+
+```bash
+scripts/hermes-busdriver-smoke \
+  --plugin-root /path/to/busdriver \
+  --pretty
+```
+
+```bash
+scripts/hermes-busdriver-pr-grind-check \
+  --repo /path/to/repo \
+  --pr 123 \
+  --plugin-root /path/to/busdriver \
+  --pretty
+```
+
+## Remaining finalization work
+
+- `hermes-busdriver-deliver` / finalization dispatcher;
+- final delivery result envelope;
+- programmatic litmus/pre-PR dual-review equivalent;
+- full pr-grind dispatcher loop with max-fix/max-wait, ack ledger, policy-gap bail categories, and latest-head re-poll after every push;
+- safe Busdriver marker interop only if Busdriver defines an integration surface.
