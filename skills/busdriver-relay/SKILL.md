@@ -131,7 +131,7 @@ Routing examples:
 | Pre-implementation | Write/Edit/MultiEdit/Bash while design unreviewed | hook | Never route around it. |
 | Litmus pre-commit | commit/finalize | Claude hook + skill | Hermes bare shell cannot assume it fired. |
 | Litmus pre-PR | `gh pr create` | Claude hook | PR creation needs current Busdriver review semantics. |
-| PR grind/pre-merge | `gh pr merge` | Claude hook + skill | No merge unless Busdriver says clean. |
+| PR grind/pre-merge | `gh pr merge` | Claude hook + skill or explicit Hermes pr-grind-equivalent loop | No merge unless Busdriver/pr-grind semantics say clean. Never merge while required checks, reviewer bots, or actionable comments are pending. |
 | Freeze/Guard | freeze marker active | hook | Do not edit outside scope; do not remove marker. |
 | Careful/destructive guard | destructive/high-risk Bash | hook | Stop and require human-visible approval. |
 | GateGuard | first edit/destructive action when enabled | opt-in hook | Treat active gateguard as a hard stop. |
@@ -178,6 +178,24 @@ Phase reads:
 | PR feedback/merge | `pr-grind`, `scripts/relevant-check-status.sh`, `scripts/ack-ledger.sh` |
 | Codex handoff | `codex-goal-handover`, `scripts/codex/*` |
 | MCP/plugin health | `mcp-health-check`, hook manifest, config/status scripts |
+
+## Hermes Delivery Mode and PR Grind
+
+Default relay draft mode still cannot finalize. But when the user explicitly tells Hermes to **complete all work** (commit, PR, merge, or similar delivery language), Hermes must not stop at a dirty tree and must not skip Busdriver's PR feedback loop. In that delivery mode, Hermes may perform Git/GitHub finalization only if it runs a pr-grind-equivalent loop:
+
+1. Create a branch and commit only after local tests/smoke pass.
+2. Push and open a PR with a body listing verification evidence.
+3. Run PR grind semantics before merge:
+   - inspect `gh pr checks` / `statusCheckRollup`;
+   - run live Busdriver `scripts/relevant-check-status.sh` when available;
+   - inspect PR reviews and comments for actionable findings on changed lines;
+   - wait with a bounded budget for advisory reviewer bots such as CodeRabbit, Devin, Cubic, Cursor, or Codex;
+   - fix and push additional commits if feedback is actionable;
+   - bail to the user on policy gaps, design/scope questions, failing required checks, max-wait exhaustion, or unclear reviewer state.
+4. Merge only after the PR is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind.
+5. After merge, sync local `main`, verify the final state, and push a claude-mem summary.
+
+This does not grant commit/PR/merge authority to draft agent launchers. It is an operator-level Hermes delivery path used only when the user explicitly asks Hermes to finish the whole job.
 
 ## Execution Seam Classification
 
@@ -334,7 +352,7 @@ Not allowed yet:
 - mutating `hermes-busdriver-codex-goal` finalizing launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation;
+- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
 - direct MCP/plugin routing;
 - claim that Hermes-launched work is gate-safe without hook-runtime equivalence;
 - activating support for non-Codex agents.

@@ -149,6 +149,10 @@ Not allowed yet:
 - repo-mutating `hermes-busdriver-codex-goal` launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge/deploy automation;
+- commit/PR/merge/deploy automation inside draft launchers or without pr-grind-equivalent checks;
 - direct MCP/plugin routing;
 - claims that Hermes shell execution is Busdriver-gate-safe.
+
+## Delivery mode
+
+Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a pr-grind-equivalent loop: local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean.
