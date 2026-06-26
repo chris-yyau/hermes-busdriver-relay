@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner** plus a **Codex-only draft launcher** that allows working-tree draft implementation while keeping commit/push/PR/merge/deploy blocked.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, and a **read-only PR-grind readiness checker**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has a deterministic checker for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -26,6 +26,7 @@ Implemented:
 - `scripts/hermes-busdriver-gate`
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-smoke`
+- `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
 - `tests/contract/test_lock.py`
@@ -33,8 +34,10 @@ Implemented:
 - `tests/contract/test_gate.py`
 - `tests/contract/test_agent_draft.py`
 - `tests/contract/test_agent_smoke.py`
+- `tests/contract/test_pr_grind_check.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
+- `docs/settling-checks-v2.md`
 - ADRs and README boundary docs
 
 ## Verification commands
@@ -52,7 +55,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 18 passed
+contract tests: 22 passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7
