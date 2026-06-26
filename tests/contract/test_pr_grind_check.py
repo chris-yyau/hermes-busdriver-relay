@@ -159,6 +159,13 @@ def test_fixture_comments_with_review_id_are_actionable_without_reviews_file(tmp
     assert data["actionable_comments"][0]["path"] == "src/app.py"
 
 
+def test_active_thread_from_dismissed_review_is_ignored():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Dismissed unresolved thread", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", set(), {123}, {9}, {9})
+    assert out == []
+
+
 def test_ignores_comments_from_dismissed_current_review(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     comments_file = tmp_path / "comments.json"
@@ -180,6 +187,14 @@ def test_ignores_comments_from_dismissed_current_review(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "clean"
     assert data["actionable_comments"] == []
+
+
+def test_active_prior_round_thread_comment_is_actionable():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Still unresolved", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", set(), {123}, {9}, set())
+    assert len(out) == 1
+    assert out[0]["source"] == "review_comment"
 
 
 def test_ignores_comments_from_previous_review_round(tmp_path: Path):

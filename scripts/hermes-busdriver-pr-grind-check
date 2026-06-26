@@ -165,12 +165,13 @@ def load_reviews(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
     return parse_paginated_json(cp.stdout)
 
 
-def load_resolved_review_comment_ids(args: argparse.Namespace, repo: Path) -> set[int]:
+def load_review_thread_comment_states(args: argparse.Namespace, repo: Path) -> tuple[set[int], set[int]]:
     if args.resolved_review_comment_ids_file:
         data = read_json_file(args.resolved_review_comment_ids_file, [])
-        return {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
+        resolved = {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
+        return resolved, set()
     if args.fixture_mode:
-        return set()
+        return set(), set()
     repo_name = owner_repo(repo)
     owner, name = repo_name.split("/", 1)
     query = """
@@ -190,6 +191,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
 }
 """
     resolved: set[int] = set()
+    active: set[int] = set()
     after = ""
     while True:
         cmd = ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={int(args.pr)}", "-f", f"query={query}"]
@@ -201,19 +203,20 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         data = json.loads(cp.stdout or "{}")
         threads = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
         for node in threads.get("nodes") or []:
-            if not isinstance(node, dict) or (node.get("isResolved") is not True and node.get("isOutdated") is not True):
+            if not isinstance(node, dict):
                 continue
+            target = resolved if (node.get("isResolved") is True or node.get("isOutdated") is True) else active
             for comment in ((node.get("comments") or {}).get("nodes") or []):
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
                 if isinstance(cid, int):
-                    resolved.add(cid)
+                    target.add(cid)
         page_info = threads.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
             break
         after = str(page_info.get("endCursor") or "")
         if not after:
             break
-    return resolved
+    return resolved, active
 
 
 def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
@@ -336,20 +339,24 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], current_review_ids: set[int] | None) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
             continue
         thread = c.get("thread") if isinstance(c.get("thread"), dict) else {}
         cid = c.get("id")
+        is_active_thread = isinstance(cid, int) and cid in active_ids
         if (isinstance(cid, int) and cid in resolved_ids) or c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
             continue
         review_id = c.get("pull_request_review_id")
-        if isinstance(review_id, int) and current_review_ids is not None and review_id not in current_review_ids:
+        if isinstance(review_id, int) and review_id in ignored_review_ids:
             continue
-        if not same_head(str(c.get("commit_id") or ""), head):
-            continue
+        if not is_active_thread:
+            if isinstance(review_id, int) and current_review_ids is not None and review_id not in current_review_ids:
+                continue
+            if not same_head(str(c.get("commit_id") or ""), head):
+                continue
         body = str(c.get("body") or "").strip()
         if not body or NON_ACTIONABLE.search(body):
             continue
@@ -379,18 +386,19 @@ def current_review_ids(reviews: list[dict[str, Any]], head: str) -> set[int]:
     return ids
 
 
-def review_ids_with_inline_comments(comments: list[dict[str, Any]]) -> set[int]:
+def ignored_review_ids(reviews: list[dict[str, Any]]) -> set[int]:
     ids: set[int] = set()
-    for c in comments:
-        if not isinstance(c, dict):
+    for r in reviews:
+        if not isinstance(r, dict):
             continue
-        rid = c.get("pull_request_review_id")
-        if isinstance(rid, int):
+        state = str(r.get("state") or "").upper()
+        rid = r.get("id")
+        if state in {"DISMISSED", "PENDING"} and isinstance(rid, int):
             ids.add(rid)
     return ids
 
 
-def actionable_reviews(reviews: list[dict[str, Any]], head: str, inline_review_ids: set[int]) -> list[dict[str, Any]]:
+def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in reviews:
         if not isinstance(r, dict):
@@ -530,13 +538,13 @@ def main() -> int:
     checks_text = load_checks(args, repo)
     script = resolve_relevant_script(args)
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
-    resolved_review_comment_ids = load_resolved_review_comment_ids(args, repo)
+    resolved_review_comment_ids, active_review_comment_ids = load_review_thread_comment_states(args, repo)
     reviews = load_reviews(args, repo)
     parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
     review_comments = load_review_comments(args, repo)
     comments = (
-        actionable_comments(review_comments, head, resolved_review_comment_ids, parent_review_ids)
-        + actionable_reviews(reviews, head, review_ids_with_inline_comments(review_comments))
+        actionable_comments(review_comments, head, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews))
+        + actionable_reviews(reviews, head)
         + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )
     if not args.fixture_mode and not args.view_json_file:
