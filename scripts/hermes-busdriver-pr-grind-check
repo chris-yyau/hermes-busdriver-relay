@@ -9,6 +9,7 @@ building block for Delivery Mode, not a replacement for Busdriver pr-grind.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -76,7 +77,7 @@ def load_view(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
         return data
     return gh_json([
         "gh", "pr", "view", str(args.pr), "--json",
-        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefName,headRefName",
+        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefName,headRefName,commits",
     ], repo)
 
 
@@ -176,13 +177,22 @@ def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, adv
             if len(first) == 4 and first[0].isdigit() and first[1].isdigit() and first[3].isdigit():
                 failed = int(first[0])
                 pending = int(first[1])
+                mode = first[2]
+                pending_rows = []
+                if pending:
+                    if not failed and len(lines) > 1:
+                        pending_rows = lines[1:]
+                    elif mode == "all":
+                        pending_rows = _pending_rows(checks_text, mode)
+                    if not pending_rows:
+                        pending_rows = ["<pending relevant check rows unavailable from relevant-check-status.sh>"]
                 return {
                     "failed": failed,
                     "pending": pending,
-                    "mode": first[2],
+                    "mode": mode,
                     "kept": int(first[3]),
                     "failed_rows": lines[1:] if failed else [],
-                    "pending_rows": [],
+                    "pending_rows": pending_rows,
                     "source": str(script),
                 }
     return fallback_check_counts(checks_text, advisory_pattern)
@@ -256,10 +266,40 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
     return out
 
 
-def actionable_issue_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def parse_github_time(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def latest_head_time(view: dict[str, Any]) -> dt.datetime | None:
+    commits = view.get("commits") if isinstance(view.get("commits"), list) else []
+    times = []
+    for c in commits:
+        if not isinstance(c, dict):
+            continue
+        for key in ("committedDate", "authoredDate", "pushedDate"):
+            parsed = parse_github_time(c.get(key))
+            if parsed:
+                times.append(parsed)
+                break
+    return max(times) if times else None
+
+
+def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None) -> list[dict[str, Any]]:
+    if not head_time:
+        return []
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
+            continue
+        comment_time = parse_github_time(c.get("updated_at") or c.get("created_at"))
+        if head_time and comment_time and comment_time < head_time:
+            continue
+        if head_time and not comment_time:
             continue
         body = str(c.get("body") or "").strip()
         if not body or NON_ACTIONABLE.search(body):
@@ -272,7 +312,7 @@ def actionable_issue_comments(comments: list[dict[str, Any]]) -> list[dict[str, 
             "line": None,
             "commit_id": None,
             "body_preview": body[:500],
-            "source": "issue_comment_unbound",
+            "source": "issue_comment_after_head",
         })
     return out
 
@@ -331,8 +371,29 @@ def main() -> int:
     comments = (
         actionable_comments(load_review_comments(args, repo), head)
         + actionable_reviews(load_reviews(args, repo), head)
-        + actionable_issue_comments(load_issue_comments(args, repo))
+        + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )
+    if not args.fixture_mode and not args.view_json_file:
+        fresh_view = load_view(args, repo)
+        fresh_head = str(fresh_view.get("headRefOid") or "")
+        if fresh_head and fresh_head != head:
+            checks = {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed"}
+            result = {
+                "schema": "hermes-busdriver-pr-grind-check/v0",
+                "ok": True,
+                "pr": int(fresh_view.get("number") or args.pr),
+                "url": fresh_view.get("url"),
+                "head": fresh_head,
+                "base": fresh_view.get("baseRefName"),
+                "status": "blocked",
+                "clean": False,
+                "blockers": [f"head_changed_during_collection:{head[:12]}->{fresh_head[:12]}"],
+                "checks": checks,
+                "actionable_comments": [],
+                "decision": {"merge_allowed": False, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
+            }
+            print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+            return 0
     status, blockers = classify(view, checks, comments)
     result = {
         "schema": "hermes-busdriver-pr-grind-check/v0",

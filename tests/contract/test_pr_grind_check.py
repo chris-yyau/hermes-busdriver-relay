@@ -171,6 +171,30 @@ def test_external_relevant_script_controls_pending_rows(tmp_path: Path):
     assert data["checks"]["pending_rows"] == []
 
 
+def test_external_relevant_script_reports_pending_diagnostic_rows(tmp_path: Path):
+    script = tmp_path / "relevant-check-status.sh"
+    script.write_text("#!/bin/sh\nprintf '0 1 required 1\\npending-required\\tpending\\t1m\\turl\\n'\n")
+    script.chmod(0o755)
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("advisory\tpending\t1m\turl\nunit\tpass\t1m\turl\n")
+    comments_file.write_text("[]")
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--view-json-file", str(view_file), "--relevant-check-script", str(script)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "wait"
+    assert data["checks"]["pending_rows"] == ["pending-required\tpending\t1m\turl"]
+
+
 def test_resolved_current_head_comment_is_not_actionable(tmp_path: Path):
     data = run_check(
         tmp_path,
@@ -237,8 +261,8 @@ def test_issue_comment_is_conservative_actionable_signal(tmp_path: Path):
     repo.mkdir()
     checks_file.write_text("unit\tpass\t1m\turl\n")
     review_comments_file.write_text("[]")
-    issue_comments_file.write_text(json.dumps([{"body": "This still needs a fix", "user": {"login": "reviewer"}}]))
-    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+    issue_comments_file.write_text(json.dumps([{"body": "This still needs a fix", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "reviewer"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
 
     cp = subprocess.run(
         [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
@@ -248,7 +272,30 @@ def test_issue_comment_is_conservative_actionable_signal(tmp_path: Path):
     assert cp.returncode == 0, cp.stderr
     data = json.loads(cp.stdout)
     assert data["status"] == "needs_fix"
-    assert data["actionable_comments"][0]["source"] == "issue_comment_unbound"
+    assert data["actionable_comments"][0]["source"] == "issue_comment_after_head"
+
+
+def test_old_issue_comment_before_latest_head_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "This used to need a fix", "created_at": "2025-12-31T23:59:00Z", "user": {"login": "reviewer"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
 
 
 def test_parse_paginated_json_flattens_slurped_pages():
