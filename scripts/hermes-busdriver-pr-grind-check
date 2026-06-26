@@ -402,8 +402,7 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str, inline_review_i
         if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
             continue
         user = r.get("user") if isinstance(r.get("user"), dict) else {}
-        rid = r.get("id")
-        if isinstance(rid, int) and rid in inline_review_ids and is_ignorable_review_body(body, user.get("login")):
+        if is_ignorable_review_body(body, user.get("login")):
             continue
         out.append({
             "id": r.get("id"),

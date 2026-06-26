@@ -504,7 +504,7 @@ def test_resolved_current_head_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
-def test_generic_bot_review_summary_without_inline_comment_is_actionable(tmp_path: Path):
+def test_generic_bot_review_summary_without_inline_comment_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
     reviews_file = tmp_path / "reviews.json"
@@ -523,8 +523,8 @@ def test_generic_bot_review_summary_without_inline_comment_is_actionable(tmp_pat
     )
     assert cp.returncode == 0, cp.stderr
     data = json.loads(cp.stdout)
-    assert data["status"] == "needs_fix"
-    assert data["actionable_comments"][0]["source"] == "review"
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
 
 
 def test_generic_bot_review_summary_with_inline_comment_is_not_actionable(tmp_path: Path):
