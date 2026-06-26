@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -100,6 +101,59 @@ def gh_json(cmd: list[str], repo: Path) -> Any:
     if cp.returncode != 0:
         raise SystemExit(json.dumps({"ok": False, "error": "gh_failed", "cmd": cmd, "stderr": cp.stderr.strip()}))
     return json.loads(cp.stdout)
+
+
+def normalize_bot_login(login: str | None) -> str:
+    value = str(login or "")
+    return value[:-5] if value.endswith("[bot]") else value
+
+
+def ack_matches_head(value: str, head: str) -> bool:
+    prefix = head[:8]
+    return value == prefix or value.startswith(f"{prefix}:")
+
+
+def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> set[str]:
+    if args.fixture_mode or not head:
+        return set()
+    plugin_candidates: list[Path] = []
+    if args.plugin_root:
+        plugin_candidates.append(Path(args.plugin_root).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            plugin_candidates.append(Path(os.environ[env_name]).expanduser())
+    plugin_candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
+    fetch = ack = None
+    for plugin in plugin_candidates:
+        candidate_fetch = plugin / "scripts" / "fetch-pr-state.sh"
+        candidate_ack = plugin / "scripts" / "ack-ledger.sh"
+        if candidate_fetch.exists() and candidate_ack.exists():
+            fetch, ack = candidate_fetch, candidate_ack
+            break
+    if fetch is None or ack is None:
+        return set()
+    candidates = {"coderabbitai", "devin-ai-integration", "cubic-dev-ai", "chatgpt-codex-connector"}
+    bot_words = " ".join(sorted(candidates))
+    script = (
+        "set -euo pipefail\n"
+        f". {shlex.quote(str(fetch))} {shlex.quote(str(args.pr))}\n"
+        f"for b in {bot_words}; do\n"
+        f"  out=$(ACK_EMIT_TIER=1 bash {shlex.quote(str(ack))} \"$b\" 2>/dev/null || echo stale)\n"
+        "  printf '%s=%s\\n' \"$b\" \"$out\"\n"
+        "done\n"
+    )
+    cp = run(["bash", "-lc", script], cwd=repo)
+    if cp.returncode != 0:
+        return set()
+    acked: set[str] = set()
+    for line in cp.stdout.splitlines():
+        if "=" not in line:
+            continue
+        login, value = line.split("=", 1)
+        if ack_matches_head(value, head):
+            acked.add(login)
+            acked.add(f"{login}[bot]")
+    return acked
 
 
 def owner_repo(repo: Path) -> str:
@@ -570,7 +624,7 @@ def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], h
     return check_time or commit_time or latest_head_time(view)
 
 
-def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None) -> list[dict[str, Any]]:
+def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None, acked_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -580,6 +634,9 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
             continue
         body = str(c.get("body") or "").strip()
         user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        if acked_bot_logins and (login in acked_bot_logins or normalize_bot_login(login) in acked_bot_logins):
+            continue
         if not body or NON_ACTIONABLE.search(body) or is_ignorable_bot_summary(body, user.get("login")):
             continue
         if is_progress_comment(body, user.get("login")):
@@ -666,10 +723,11 @@ def main() -> int:
     parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
     review_comments = load_review_comments(args, repo)
     head_time = load_head_time(args, repo, view, head)
+    acked_bot_logins = load_acked_bot_logins(args, repo, head)
     comments = (
         actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews), current_head_bot_review_logins(reviews, head))
         + actionable_reviews(reviews, head)
-        + actionable_issue_comments(load_issue_comments(args, repo), head_time)
+        + actionable_issue_comments(load_issue_comments(args, repo), head_time, acked_bot_logins)
     )
     if not args.fixture_mode and not args.view_json_file:
         fresh_view = load_view(args, repo)

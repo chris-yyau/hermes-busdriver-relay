@@ -308,6 +308,43 @@ def test_coderabbit_summary_issue_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_ack_value_must_match_exact_head_prefix_token():
+    ns = runpy.run_path(str(CHECK))
+    assert ns["ack_matches_head"]("abc123de:E", "abc123def456") is True
+    assert ns["ack_matches_head"]("abc123de", "abc123def456") is True
+    assert ns["ack_matches_head"]("abc123def:E", "abc123def456") is False
+
+
+def test_load_acked_bot_logins_uses_env_plugin_roots(tmp_path: Path):
+    ns = runpy.run_path(str(CHECK))
+    plugin = tmp_path / "plugin"
+    scripts = plugin / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "fetch-pr-state.sh").write_text("FETCH_OK=1; export FETCH_OK\n")
+    (scripts / "ack-ledger.sh").write_text("#!/usr/bin/env bash\necho abc123de:E\n")
+    (scripts / "ack-ledger.sh").chmod(0o755)
+    env = __import__("os").environ
+    old = env.get("BUSDRIVER_PLUGIN_ROOT")
+    env["BUSDRIVER_PLUGIN_ROOT"] = str(plugin)
+    try:
+        args = type("Args", (), {"fixture_mode": False, "plugin_root": None, "pr": "7"})()
+        assert "coderabbitai[bot]" in ns["load_acked_bot_logins"](args, tmp_path, "abc123def456")
+    finally:
+        if old is None:
+            env.pop("BUSDRIVER_PLUGIN_ROOT", None)
+        else:
+            env["BUSDRIVER_PLUGIN_ROOT"] = old
+
+
+
+def test_acked_coderabbit_rate_limit_comment_does_not_block():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"body": "Review limit reached: rate limited by CodeRabbit", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "coderabbitai[bot]"}}]
+    head_time = ns["parse_github_time"]("2026-01-01T00:00:00Z")
+    out = ns["actionable_issue_comments"](comments, head_time, {"coderabbitai[bot]"})
+    assert out == []
+
+
 def test_coderabbit_rate_limit_comment_blocks_clean(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
