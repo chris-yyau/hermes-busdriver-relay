@@ -897,6 +897,71 @@ def test_later_current_head_bot_review_supersedes_prior_round_bot_inline_comment
     assert out == []
 
 
+def test_current_head_bot_review_is_not_hidden_by_later_stale_review():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [
+        {"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "Current-head summary", "user": {"login": "chatgpt-codex-connector[bot]"}, "submitted_at": "2026-01-01T00:00:00Z"},
+        {"id": 10, "commit_id": "oldsha123", "state": "COMMENTED", "body": "Stale summary", "user": {"login": "chatgpt-codex-connector[bot]"}, "submitted_at": "2026-01-01T00:01:00Z"},
+    ]
+    assert "chatgpt-codex-connector[bot]" in ns["current_head_bot_review_logins"](reviews, "abc123def456")
+
+
+
+def test_head_changed_check_counts_keeps_stable_schema():
+    ns = runpy.run_path(str(CHECK))
+    counts = ns["head_changed_check_counts"]()
+    assert counts["source"] == "head_changed"
+    assert counts["relevance_unavailable"] is False
+
+
+
+def test_unresolved_outdated_thread_comment_remains_actionable():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Unresolved outdated feedback", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set())
+    assert len(out) == 1
+
+
+
+def test_unresolved_outdated_thread_id_is_active_not_resolved(tmp_path: Path):
+    ns = runpy.run_path(str(CHECK))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ns["owner_repo"] = lambda _repo: "owner/name"
+
+    def fake_run(cmd, cwd=None, check=False):
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": False},
+                            "nodes": [
+                                {"isResolved": False, "isOutdated": True, "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [{"databaseId": 123}]}}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    ns["load_review_thread_comment_states"].__globals__["run"] = fake_run
+    ns["load_review_thread_comment_states"].__globals__["owner_repo"] = lambda _repo: "owner/name"
+    resolved, active = ns["load_review_thread_comment_states"](type("Args", (), {"resolved_review_comment_ids_file": None, "fixture_mode": False, "pr": "7"})(), repo)
+    assert resolved == set()
+    assert active == {123}
+
+
+
+def test_fallback_check_counts_treats_failing_as_failed():
+    ns = runpy.run_path(str(CHECK))
+    counts = ns["fallback_check_counts"]("unit\tfailing\t1m\turl\n", "CodeScene")
+    assert counts["failed"] == 1
+    assert counts["failed_rows"] == ["unit\tfailing\t1m\turl"]
+
+
+
 def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -920,12 +985,88 @@ def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
-def test_select_head_time_prefers_commit_time_over_later_check_time():
+def test_select_head_time_without_push_anchor_is_unbound_even_with_check_time():
     ns = runpy.run_path(str(CHECK))
-    commit_time = ns["parse_github_time"]("2026-01-02T03:04:05Z")
+    commit_time = ns["parse_github_time"]("2026-01-01T00:00:00Z")
     check_time = ns["parse_github_time"]("2026-01-02T03:05:00Z")
-    assert ns["select_head_time"](commit_time, check_time, None) == commit_time
+    assert ns["select_head_time"](commit_time, check_time, None) is None
 
+
+
+def test_select_head_time_without_server_anchor_is_unbound():
+    ns = runpy.run_path(str(CHECK))
+    commit_time = ns["parse_github_time"]("2026-01-01T00:00:00Z")
+    fallback_time = ns["parse_github_time"]("2026-01-01T00:00:00Z")
+    assert ns["select_head_time"](commit_time, None, fallback_time) is None
+
+
+
+def test_select_head_time_prefers_pr_push_time_over_backdated_commit_time():
+    ns = runpy.run_path(str(CHECK))
+    commit_time = ns["parse_github_time"]("2026-01-01T00:00:00Z")
+    push_time = ns["parse_github_time"]("2026-01-02T03:04:05Z")
+    check_time = ns["parse_github_time"]("2026-01-02T03:05:00Z")
+    assert ns["select_head_time"](commit_time, check_time, None, push_time=push_time) == push_time
+
+
+
+def test_push_events_head_time_filters_head_and_branch():
+    ns = runpy.run_path(str(CHECK))
+    stdout = json.dumps([
+        [
+            {"type": "PushEvent", "created_at": "2026-01-02T03:03:00Z", "payload": {"head": "abc123def456", "ref": "refs/heads/other"}},
+            {"type": "PushEvent", "created_at": "2026-01-02T03:04:05Z", "payload": {"head": "abc123def456", "ref": "refs/heads/feature"}},
+            {"type": "PushEvent", "created_at": "2026-01-02T03:06:00Z", "payload": {"head": "different", "ref": "refs/heads/feature"}},
+        ]
+    ])
+    assert ns["push_events_head_time"](stdout, "abc123def456", "feature") == ns["parse_github_time"]("2026-01-02T03:04:05Z")
+
+
+
+
+
+def test_same_head_fresh_view_recollects_feedback(tmp_path: Path, monkeypatch):
+    ns = runpy.run_path(str(CHECK))
+    calls = []
+    view = {"number": 7, "url": "https://example.test/pull/7", "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefOid": "abc123def456", "baseRefName": "main", "headRefName": "feature"}
+
+    def fake_load_view(args, repo):
+        return dict(view)
+
+    def fake_collect(args, repo, current_view, head):
+        calls.append(current_view)
+        return [] if len(calls) == 1 else [{"id": 99, "source": "review_comment", "body_preview": "new same-head feedback"}]
+
+    ns["main"].__globals__["load_view"] = fake_load_view
+    ns["main"].__globals__["load_checks"] = lambda args, repo: "unit\tpass\t1m\turl\n"
+    ns["main"].__globals__["resolve_relevant_script"] = lambda args: None
+    ns["main"].__globals__["parse_relevant_counts"] = lambda script, repo, checks, advisory: {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "failed_rows": [], "pending_rows": [], "source": "test", "relevance_unavailable": False}
+    ns["main"].__globals__["collect_actionable_feedback"] = fake_collect
+    monkeypatch.setattr(sys, "argv", [str(CHECK), "--repo", str(tmp_path), "--pr", "7"] )
+    rc = ns["main"]()
+    assert rc == 0
+    assert len(calls) == 2
+
+
+
+def test_same_head_recollect_rechecks_head_after_feedback_collection(tmp_path: Path, monkeypatch, capsys):
+    ns = runpy.run_path(str(CHECK))
+    heads = ["abc123def456", "abc123def456", "def456abc789"]
+
+    def fake_load_view(args, repo):
+        head = heads.pop(0)
+        return {"number": 7, "url": "https://example.test/pull/7", "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "headRefOid": head, "baseRefName": "main", "headRefName": "feature"}
+
+    ns["main"].__globals__["load_view"] = fake_load_view
+    ns["main"].__globals__["load_checks"] = lambda args, repo: "unit\tpass\t1m\turl\n"
+    ns["main"].__globals__["resolve_relevant_script"] = lambda args: None
+    ns["main"].__globals__["parse_relevant_counts"] = lambda script, repo, checks, advisory: {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "failed_rows": [], "pending_rows": [], "source": "test", "relevance_unavailable": False}
+    ns["main"].__globals__["collect_actionable_feedback"] = lambda args, repo, view, head: []
+    monkeypatch.setattr(sys, "argv", [str(CHECK), "--repo", str(tmp_path), "--pr", "7"] )
+    assert ns["main"]() == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "blocked"
+    assert data["decision"]["reason"] == "head_changed"
 
 
 def test_invalid_pr_number_is_rejected():

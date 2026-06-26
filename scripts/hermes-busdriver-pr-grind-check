@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-FAIL_STATUSES = {"fail", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
+FAIL_STATUSES = {"fail", "failing", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
 PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
 NON_ACTIONABLE = re.compile(
     r"^(lgtm|looks good|looks good to me|looks solid|nice work|great work|ship it|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)[.!?]*$",
@@ -276,7 +276,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         for node in threads.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
-            target = resolved if (node.get("isResolved") is True or node.get("isOutdated") is True) else active
+            target = resolved if node.get("isResolved") is True else active
             comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
             if (comments_page.get("pageInfo") or {}).get("hasNextPage"):
                 raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
@@ -338,6 +338,10 @@ def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, 
         elif status in PENDING_STATUSES:
             pending_rows.append(line)
     return {"failed": len(failed_rows), "pending": len(pending_rows), "mode": "all", "kept": len(kept), "failed_rows": failed_rows, "pending_rows": pending_rows, "source": "fallback"}
+
+
+def head_changed_check_counts() -> dict[str, Any]:
+    return {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed", "relevance_unavailable": False}
 
 
 def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str) -> dict[str, Any]:
@@ -509,7 +513,7 @@ def latest_reviews_by_user(reviews: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def current_head_bot_review_logins(reviews: list[dict[str, Any]], head: str) -> set[str]:
     logins: set[str] = set()
-    for review in latest_reviews_by_user(reviews):
+    for review in reviews:
         if not isinstance(review, dict):
             continue
         user = review.get("user") if isinstance(review.get("user"), dict) else {}
@@ -604,31 +608,41 @@ def check_runs_head_time(data: dict[str, Any]) -> dt.datetime | None:
     return min(times) if times else None
 
 
-def select_head_time(commit_time: dt.datetime | None, check_time: dt.datetime | None, fallback_time: dt.datetime | None) -> dt.datetime | None:
-    if commit_time:
-        return commit_time
-    return check_time or fallback_time
+def push_events_head_time(stdout: str, head: str, branch: str | None) -> dt.datetime | None:
+    rows = parse_paginated_json(stdout)
+    ref = f"refs/heads/{branch}" if branch else ""
+    times: list[dt.datetime] = []
+    for event in rows:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("type") != "PushEvent" or payload.get("head") != head:
+            continue
+        if ref and payload.get("ref") != ref:
+            continue
+        parsed = parse_github_time(event.get("created_at"))
+        if parsed:
+            times.append(parsed)
+    return max(times) if times else None
+
+
+def select_head_time(commit_time: dt.datetime | None, check_time: dt.datetime | None, fallback_time: dt.datetime | None, push_time: dt.datetime | None = None) -> dt.datetime | None:
+    # Issue-comment freshness must be anchored to the server-observed PR-head push.
+    # Commit dates can be backdated and check runs can start late; without a push
+    # event, keep the cutoff unbound so comments remain conservatively actionable.
+    return push_time
 
 
 def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
     if args.fixture_mode or args.view_json_file or not head:
         return latest_head_time(view)
     repo_name = owner_repo(repo)
-    cp = run(["gh", "api", f"repos/{repo_name}/commits/{head}"], cwd=repo)
-    commit_time = None
-    if cp.returncode == 0:
+    push_cp = run(["gh", "api", "--paginate", "--slurp", f"repos/{repo_name}/events?per_page=100"], cwd=repo)
+    push_time = None
+    if push_cp.returncode == 0:
         try:
-            commit_time = commit_json_time(json.loads(cp.stdout or "{}"))
+            push_time = push_events_head_time(push_cp.stdout, head, str(view.get("headRefName") or ""))
         except json.JSONDecodeError:
-            commit_time = None
-    checks_cp = run(["gh", "api", f"repos/{repo_name}/commits/{head}/check-runs", "-X", "GET", "-F", "per_page=100", "--paginate", "--slurp"], cwd=repo)
-    check_time = None
-    if checks_cp.returncode == 0:
-        try:
-            check_time = check_runs_head_time({"check_runs": parse_paginated_check_runs(checks_cp.stdout)})
-        except json.JSONDecodeError:
-            check_time = None
-    return select_head_time(commit_time, check_time, latest_head_time(view))
+            push_time = None
+    return select_head_time(None, None, latest_head_time(view), push_time=push_time)
 
 
 def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None, acked_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
@@ -667,6 +681,37 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
             "source": "issue_comment_after_head" if head_time else "issue_comment_unbound",
         })
     return out
+
+
+def collect_actionable_feedback(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> list[dict[str, Any]]:
+    resolved_review_comment_ids, active_review_comment_ids = load_review_thread_comment_states(args, repo)
+    reviews = load_reviews(args, repo)
+    parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
+    review_comments = load_review_comments(args, repo)
+    head_time = load_head_time(args, repo, view, head)
+    acked_bot_logins = load_acked_bot_logins(args, repo, head)
+    return (
+        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews), current_head_bot_review_logins(reviews, head))
+        + actionable_reviews(reviews, head)
+        + actionable_issue_comments(load_issue_comments(args, repo), head_time, acked_bot_logins)
+    )
+
+
+def head_changed_result(args: argparse.Namespace, view: dict[str, Any], fresh_head: str, old_head: str, checks: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "ok": True,
+        "pr": int(view.get("number") or args.pr),
+        "url": view.get("url"),
+        "head": fresh_head,
+        "base": view.get("baseRefName"),
+        "status": "blocked",
+        "clean": False,
+        "blockers": [f"head_changed_during_collection:{old_head[:12]}->{fresh_head[:12]}"],
+        "checks": checks,
+        "actionable_comments": [],
+        "decision": {"merge_allowed": False, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
+    }
 
 
 def validate_pr_number(value: str) -> str:
@@ -732,39 +777,24 @@ def main() -> int:
     checks_text = load_checks(args, repo)
     script = resolve_relevant_script(args)
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
-    resolved_review_comment_ids, active_review_comment_ids = load_review_thread_comment_states(args, repo)
-    reviews = load_reviews(args, repo)
-    parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
-    review_comments = load_review_comments(args, repo)
-    head_time = load_head_time(args, repo, view, head)
-    acked_bot_logins = load_acked_bot_logins(args, repo, head)
-    comments = (
-        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews), current_head_bot_review_logins(reviews, head))
-        + actionable_reviews(reviews, head)
-        + actionable_issue_comments(load_issue_comments(args, repo), head_time, acked_bot_logins)
-    )
+    comments = collect_actionable_feedback(args, repo, view, head)
     if not args.fixture_mode and not args.view_json_file:
         fresh_view = load_view(args, repo)
         fresh_head = str(fresh_view.get("headRefOid") or "")
         if fresh_head and fresh_head == head:
             view = fresh_view
+            comments = collect_actionable_feedback(args, repo, view, head)
+            final_view = load_view(args, repo)
+            final_head = str(final_view.get("headRefOid") or "")
+            if final_head and final_head == head:
+                view = final_view
+            if final_head and final_head != head:
+                checks = head_changed_check_counts()
+                print(json.dumps(head_changed_result(args, final_view, final_head, head, checks), indent=2 if args.pretty else None, sort_keys=True))
+                return 0
         if fresh_head and fresh_head != head:
-            checks = {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed"}
-            result = {
-                "schema": "hermes-busdriver-pr-grind-check/v0",
-                "ok": True,
-                "pr": int(fresh_view.get("number") or args.pr),
-                "url": fresh_view.get("url"),
-                "head": fresh_head,
-                "base": fresh_view.get("baseRefName"),
-                "status": "blocked",
-                "clean": False,
-                "blockers": [f"head_changed_during_collection:{head[:12]}->{fresh_head[:12]}"],
-                "checks": checks,
-                "actionable_comments": [],
-                "decision": {"merge_allowed": False, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
-            }
-            print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+            checks = head_changed_check_counts()
+            print(json.dumps(head_changed_result(args, fresh_view, fresh_head, head, checks), indent=2 if args.pretty else None, sort_keys=True))
             return 0
     status, blockers = classify(view, checks, comments)
     result = {
