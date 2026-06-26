@@ -115,6 +115,27 @@ def test_needs_fix_for_actionable_comment_on_current_head(tmp_path: Path):
     assert data["actionable_comments"][0]["path"] == "src/app.py"
 
 
+def test_advisory_pattern_is_literal_not_regex(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text("[]")
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--view-json-file", str(view_file), "--advisory-pattern", ".*"],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["checks"]["kept"] == 1
+
+
 def test_ignores_resolved_review_comment_ids(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     comments_file = tmp_path / "comments.json"

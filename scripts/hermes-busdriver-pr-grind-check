@@ -154,6 +154,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           isResolved
+          isOutdated
           comments(first:100) { nodes { databaseId } }
         }
       }
@@ -173,7 +174,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         data = json.loads(cp.stdout or "{}")
         threads = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
         for node in threads.get("nodes") or []:
-            if not isinstance(node, dict) or node.get("isResolved") is not True:
+            if not isinstance(node, dict) or (node.get("isResolved") is not True and node.get("isOutdated") is not True):
                 continue
             for comment in ((node.get("comments") or {}).get("nodes") or []):
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
@@ -191,7 +192,14 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
 def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
     candidates: list[Path] = []
     if args.relevant_check_script:
+        if not args.fixture_mode:
+            raise SystemExit(json.dumps({"ok": False, "error": "explicit_relevant_check_script_requires_fixture_mode"}))
         candidates.append(Path(args.relevant_check_script).expanduser())
+    if args.fixture_mode:
+        for path in candidates:
+            if path.is_file():
+                return path.resolve()
+        return None
     if args.plugin_root:
         candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
     for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
@@ -204,8 +212,12 @@ def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
     return None
 
 
+def compile_advisory_pattern(advisory_pattern: str) -> re.Pattern[str]:
+    return re.compile(re.escape(advisory_pattern or "CodeScene"), re.I)
+
+
 def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, Any]:
-    advisory = re.compile(advisory_pattern or "CodeScene", re.I)
+    advisory = compile_advisory_pattern(advisory_pattern)
     kept: list[str] = []
     failed_rows: list[str] = []
     pending_rows: list[str] = []
@@ -285,7 +297,7 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int]) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], head_time: dt.datetime | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -443,7 +455,7 @@ def main() -> int:
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
     resolved_review_comment_ids = load_resolved_review_comment_ids(args, repo)
     comments = (
-        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids)
+        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids, latest_head_time(view))
         + actionable_reviews(load_reviews(args, repo), head)
         + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )
