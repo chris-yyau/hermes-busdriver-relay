@@ -24,14 +24,39 @@ NON_ACTIONABLE = re.compile(
     r"^(lgtm|looks good|looks good to me|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
     re.I,
 )
-PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit|auto-generated comment: summarize by coderabbit", re.I)
+PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
+BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabbit", re.I)
+BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
 
 
 def is_progress_comment(body: str, user_login: str | None) -> bool:
     login = (user_login or "").lower()
-    if "review limit reached" in body.lower() or "rate limited" in body.lower():
+    lowered = body.lower()
+    if "review limit reached" in lowered or "rate limited" in lowered:
         return False
     return "bot" in login and bool(PROGRESS_COMMENT.search(body))
+
+
+def is_ignorable_bot_summary(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    lowered = body.lower()
+    if "review limit reached" in lowered or "rate limited" in lowered:
+        return False
+    return "bot" in login and bool(BOT_SUMMARY_COMMENT.search(body))
+
+
+def is_ignorable_review_body(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    if "bot" not in login or "here are some automated review suggestions" not in body.lower():
+        return False
+    cleaned = body
+    cleaned = re.sub(r"###\s*💡\s*Codex Review", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"Here are some automated review suggestions for this pull request\.", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\*\*Reviewed commit:\*\*\s*`[0-9a-fA-F]+`", "", cleaned)
+    cleaned = re.sub(r"<details>\s*<summary>[^<]*About Codex in GitHub.*?</details>", "", cleaned, flags=re.I | re.S)
+    cleaned = re.sub(r"<br\s*/?>", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned == ""
 
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -346,14 +371,26 @@ def current_review_ids(reviews: list[dict[str, Any]], head: str) -> set[int]:
     for r in reviews:
         if not isinstance(r, dict):
             continue
+        state = str(r.get("state") or "").upper()
         rid = r.get("id")
         commit = str(r.get("commit_id") or "")
-        if isinstance(rid, int) and same_head(commit, head):
+        if state not in {"DISMISSED", "PENDING"} and isinstance(rid, int) and same_head(commit, head):
             ids.add(rid)
     return ids
 
 
-def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+def review_ids_with_inline_comments(comments: list[dict[str, Any]]) -> set[int]:
+    ids: set[int] = set()
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        rid = c.get("pull_request_review_id")
+        if isinstance(rid, int):
+            ids.add(rid)
+    return ids
+
+
+def actionable_reviews(reviews: list[dict[str, Any]], head: str, inline_review_ids: set[int]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in reviews:
         if not isinstance(r, dict):
@@ -365,6 +402,9 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
         if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
             continue
         user = r.get("user") if isinstance(r.get("user"), dict) else {}
+        rid = r.get("id")
+        if isinstance(rid, int) and rid in inline_review_ids and is_ignorable_review_body(body, user.get("login")):
+            continue
         out.append({
             "id": r.get("id"),
             "user": user.get("login"),
@@ -401,8 +441,6 @@ def latest_head_time(view: dict[str, Any]) -> dt.datetime | None:
 
 
 def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None) -> list[dict[str, Any]]:
-    if not head_time:
-        return []
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -410,11 +448,20 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
         comment_time = parse_github_time(c.get("updated_at") or c.get("created_at"))
         if head_time and comment_time and comment_time < head_time:
             continue
-        if head_time and not comment_time:
-            continue
         body = str(c.get("body") or "").strip()
         user = c.get("user") if isinstance(c.get("user"), dict) else {}
-        if not body or NON_ACTIONABLE.search(body) or is_progress_comment(body, user.get("login")):
+        if not body or NON_ACTIONABLE.search(body) or is_ignorable_bot_summary(body, user.get("login")):
+            continue
+        if is_progress_comment(body, user.get("login")):
+            out.append({
+                "id": c.get("id"),
+                "user": user.get("login"),
+                "path": None,
+                "line": None,
+                "commit_id": None,
+                "body_preview": body[:500],
+                "source": "bot_progress",
+            })
             continue
         out.append({
             "id": c.get("id"),
@@ -423,7 +470,7 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
             "line": None,
             "commit_id": None,
             "body_preview": body[:500],
-            "source": "issue_comment_after_head",
+            "source": "issue_comment_after_head" if head_time else "issue_comment_unbound",
         })
     return out
 
@@ -451,6 +498,8 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
     if checks["failed"] > 0:
         return "needs_fix", blockers
     if comments:
+        if all(c.get("source") == "bot_progress" for c in comments):
+            return "wait", blockers
         return "needs_fix", blockers
     if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state in {"UNKNOWN", "UNSTABLE"}:
         return "wait", blockers
@@ -485,9 +534,10 @@ def main() -> int:
     resolved_review_comment_ids = load_resolved_review_comment_ids(args, repo)
     reviews = load_reviews(args, repo)
     parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
+    review_comments = load_review_comments(args, repo)
     comments = (
-        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids, parent_review_ids)
-        + actionable_reviews(reviews, head)
+        actionable_comments(review_comments, head, resolved_review_comment_ids, parent_review_ids)
+        + actionable_reviews(reviews, head, review_ids_with_inline_comments(review_comments))
         + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )
     if not args.fixture_mode and not args.view_json_file:

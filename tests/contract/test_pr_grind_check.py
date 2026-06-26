@@ -159,6 +159,29 @@ def test_fixture_comments_with_review_id_are_actionable_without_reviews_file(tmp
     assert data["actionable_comments"][0]["path"] == "src/app.py"
 
 
+def test_ignores_comments_from_dismissed_current_review(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text(json.dumps([{"id": 123, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Dismissed finding", "path": "src/app.py", "line": 12}]))
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "DISMISSED", "body": "Old review"}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
 def test_ignores_comments_from_previous_review_round(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     comments_file = tmp_path / "comments.json"
@@ -225,7 +248,7 @@ def test_review_progress_issue_comment_is_not_actionable(tmp_path: Path):
     assert cp.returncode == 0, cp.stderr
     data = json.loads(cp.stdout)
     assert data["status"] == "wait"
-    assert data["actionable_comments"] == []
+    assert data["actionable_comments"][0]["source"] == "bot_progress"
 
 
 def test_coderabbit_summary_issue_comment_is_not_actionable(tmp_path: Path):
@@ -261,6 +284,29 @@ def test_coderabbit_rate_limit_comment_blocks_clean(tmp_path: Path):
     checks_file.write_text("unit\tpass\t1m\turl\n")
     review_comments_file.write_text("[]")
     issue_comments_file.write_text(json.dumps([{"body": "Review limit reached: rate limited by CodeRabbit", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "coderabbitai[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "issue_comment_after_head"
+
+
+def test_rate_limit_comment_with_progress_phrase_is_not_wait(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "Currently processing new changes, but review limit reached and rate limited by CodeRabbit", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "coderabbitai[bot]"}}]))
     view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
 
     cp = subprocess.run(
@@ -458,6 +504,98 @@ def test_resolved_current_head_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_generic_bot_review_summary_without_inline_comment_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "### 💡 Codex Review\nHere are some automated review suggestions for this pull request.\n**Reviewed commit:** `abc123def456`\n<details><summary>ℹ️ About Codex in GitHub</summary>Boilerplate</details>", "user": {"login": "chatgpt-codex-connector[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_generic_bot_review_summary_with_inline_comment_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text(json.dumps([{"id": 1, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Resolved inline detail", "resolved": True, "path": "x.py", "line": 1}]))
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "### 💡 Codex Review\nHere are some automated review suggestions for this pull request.\n**Reviewed commit:** `abc123def456`\n<details><summary>ℹ️ About Codex in GitHub</summary>Boilerplate</details>", "user": {"login": "chatgpt-codex-connector[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
+def test_bot_review_summary_with_actionable_details_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text(json.dumps([{"id": 1, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Resolved inline detail", "resolved": True, "path": "x.py", "line": 1}]))
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "### 💡 Codex Review\nHere are some automated review suggestions for this pull request.\n**Reviewed commit:** `abc123def456`\n<details><summary>Actionable details</summary>Please update the migration before merging.</details>", "user": {"login": "chatgpt-codex-connector[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_bot_review_summary_with_actionable_extra_text_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text(json.dumps([{"id": 1, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Resolved inline detail", "resolved": True, "path": "x.py", "line": 1}]))
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "### 💡 Codex Review\nHere are some automated review suggestions for this pull request.\nPlease update the migration before merging.\n**Reviewed commit:** `abc123def456`\n<details><summary>ℹ️ About Codex in GitHub</summary>Boilerplate</details>", "user": {"login": "chatgpt-codex-connector[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
 def test_review_body_on_current_head_is_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -502,6 +640,29 @@ def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "clean"
     assert data["actionable_comments"] == []
+
+
+def test_issue_comment_without_head_time_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "Do not merge until X is fixed", "user": {"login": "reviewer"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "issue_comment_unbound"
 
 
 def test_issue_comment_is_conservative_actionable_signal(tmp_path: Path):
