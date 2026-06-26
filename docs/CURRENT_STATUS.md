@@ -55,7 +55,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 45 passed
+contract tests: 46 passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7

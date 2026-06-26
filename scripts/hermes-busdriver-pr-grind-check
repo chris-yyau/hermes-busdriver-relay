@@ -24,11 +24,13 @@ NON_ACTIONABLE = re.compile(
     r"^(lgtm|looks good|looks good to me|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
     re.I,
 )
-PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
+PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit|auto-generated comment: summarize by coderabbit", re.I)
 
 
 def is_progress_comment(body: str, user_login: str | None) -> bool:
     login = (user_login or "").lower()
+    if "review limit reached" in body.lower() or "rate limited" in body.lower():
+        return False
     return "bot" in login and bool(PROGRESS_COMMENT.search(body))
 
 
