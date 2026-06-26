@@ -35,6 +35,18 @@ def read_json_file(path: str | None, default: Any) -> Any:
     return json.loads(Path(path).expanduser().read_text())
 
 
+def parse_paginated_json(stdout: str) -> list[dict[str, Any]]:
+    """Parse `gh api --paginate --slurp` output and flatten page arrays."""
+    if not stdout.strip():
+        return []
+    data = json.loads(stdout)
+    if isinstance(data, list) and all(isinstance(page, list) for page in data):
+        return [item for page in data for item in page if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
 def gh_json(cmd: list[str], repo: Path) -> Any:
     cp = run(cmd, cwd=repo)
     if cp.returncode != 0:
@@ -83,24 +95,51 @@ def load_review_comments(args: argparse.Namespace, repo: Path) -> list[dict[str,
     if args.review_comments_file:
         data = read_json_file(args.review_comments_file, [])
         return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
     repo_name = owner_repo(repo)
-    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/comments", "--paginate"], cwd=repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
     if cp.returncode != 0:
         # Fail closed: if review comments are unavailable, surface a blocked state.
         raise SystemExit(json.dumps({"ok": False, "error": "review_comments_unavailable", "stderr": cp.stderr.strip()}))
-    data = json.loads(cp.stdout or "[]")
-    return data if isinstance(data, list) else []
+    return parse_paginated_json(cp.stdout)
+
+
+def load_issue_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.issue_comments_file:
+        data = read_json_file(args.issue_comments_file, [])
+        return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/issues/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "issue_comments_unavailable", "stderr": cp.stderr.strip()}))
+    return parse_paginated_json(cp.stdout)
+
+
+def load_reviews(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.reviews_file:
+        data = read_json_file(args.reviews_file, [])
+        return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/reviews", "--paginate", "--slurp"], cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "reviews_unavailable", "stderr": cp.stderr.strip()}))
+    return parse_paginated_json(cp.stdout)
 
 
 def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
     candidates: list[Path] = []
     if args.relevant_check_script:
         candidates.append(Path(args.relevant_check_script).expanduser())
+    if args.plugin_root:
+        candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
     for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
         if os.environ.get(env_name):
             candidates.append(Path(os.environ[env_name]).expanduser() / "scripts" / "relevant-check-status.sh")
-    if args.plugin_root:
-        candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
     candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver/scripts/relevant-check-status.sh")
     for path in candidates:
         if path.is_file():
@@ -193,6 +232,51 @@ def actionable_comments(comments: list[dict[str, Any]], head: str) -> list[dict[
     return out
 
 
+def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        state = str(r.get("state") or "").upper()
+        body = str(r.get("body") or "").strip()
+        if state in {"APPROVED", "DISMISSED", "PENDING"} or not body or NON_ACTIONABLE.search(body):
+            continue
+        if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
+            continue
+        user = r.get("user") if isinstance(r.get("user"), dict) else {}
+        out.append({
+            "id": r.get("id"),
+            "user": user.get("login"),
+            "path": None,
+            "line": None,
+            "commit_id": r.get("commit_id"),
+            "body_preview": body[:500],
+            "source": "review",
+        })
+    return out
+
+
+def actionable_issue_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        body = str(c.get("body") or "").strip()
+        if not body or NON_ACTIONABLE.search(body):
+            continue
+        user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        out.append({
+            "id": c.get("id"),
+            "user": user.get("login"),
+            "path": None,
+            "line": None,
+            "commit_id": None,
+            "body_preview": body[:500],
+            "source": "issue_comment_unbound",
+        })
+    return out
+
+
 def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[str, Any]]) -> tuple[str, list[str]]:
     blockers: list[str] = []
     state = view.get("state")
@@ -229,9 +313,12 @@ def main() -> int:
     ap.add_argument("--plugin-root")
     ap.add_argument("--checks-file")
     ap.add_argument("--review-comments-file")
+    ap.add_argument("--issue-comments-file")
+    ap.add_argument("--reviews-file")
     ap.add_argument("--view-json-file")
     ap.add_argument("--relevant-check-script")
     ap.add_argument("--advisory-pattern", default="CodeScene")
+    ap.add_argument("--fixture-mode", action="store_true", help="Allow omitted feedback surfaces for offline contract fixtures only")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
@@ -241,7 +328,11 @@ def main() -> int:
     checks_text = load_checks(args, repo)
     script = resolve_relevant_script(args)
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
-    comments = actionable_comments(load_review_comments(args, repo), head)
+    comments = (
+        actionable_comments(load_review_comments(args, repo), head)
+        + actionable_reviews(load_reviews(args, repo), head)
+        + actionable_issue_comments(load_issue_comments(args, repo))
+    )
     status, blockers = classify(view, checks, comments)
     result = {
         "schema": "hermes-busdriver-pr-grind-check/v0",
