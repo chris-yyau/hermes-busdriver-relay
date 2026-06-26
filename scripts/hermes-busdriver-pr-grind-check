@@ -21,7 +21,7 @@ from typing import Any
 FAIL_STATUSES = {"fail", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
 PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
 NON_ACTIONABLE = re.compile(
-    r"^(lgtm|looks good|looks good to me|looks solid|nice work|ship it|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
+    r"^(lgtm|looks good|looks good to me|looks solid|nice work|great work|ship it|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)[.!?]*$",
     re.I,
 )
 PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
@@ -331,6 +331,8 @@ def _pending_rows(checks_text: str, mode: str) -> list[str]:
     return rows
 
 
+
+
 def same_head(comment_sha: str | None, head: str) -> bool:
     if not comment_sha or not head:
         return False
@@ -407,11 +409,9 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
         body = str(r.get("body") or "").strip()
         if state in {"DISMISSED", "PENDING"} or not body or NON_ACTIONABLE.search(body):
             continue
-        if state == "APPROVED" and is_ignorable_review_body(body, (r.get("user") if isinstance(r.get("user"), dict) else {}).get("login")):
-            continue
+        user = r.get("user") if isinstance(r.get("user"), dict) else {}
         if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
             continue
-        user = r.get("user") if isinstance(r.get("user"), dict) else {}
         if is_ignorable_review_body(body, user.get("login")):
             continue
         out.append({
@@ -553,6 +553,8 @@ def main() -> int:
     if not args.fixture_mode and not args.view_json_file:
         fresh_view = load_view(args, repo)
         fresh_head = str(fresh_view.get("headRefOid") or "")
+        if fresh_head and fresh_head == head:
+            view = fresh_view
         if fresh_head and fresh_head != head:
             checks = {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed"}
             result = {

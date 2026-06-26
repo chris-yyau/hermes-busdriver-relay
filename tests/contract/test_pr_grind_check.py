@@ -676,6 +676,28 @@ def test_approved_review_body_with_harmless_text_is_not_actionable(tmp_path: Pat
     assert data["actionable_comments"] == []
 
 
+def test_approved_review_body_with_great_work_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Great work!", "user": {"login": "human"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+
+
 def test_approved_review_body_with_actionable_text_is_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -686,6 +708,52 @@ def test_approved_review_body_with_actionable_text_is_actionable(tmp_path: Path)
     checks_file.write_text("unit\tpass\t1m\turl\n")
     review_comments_file.write_text("[]")
     reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Approved overall, but please fix the fallback before merging", "user": {"login": "bot"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_approved_review_body_with_broken_regression_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Approved, but this regression is broken", "user": {"login": "human"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_approved_review_body_with_please_update_migration_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Please update the migration", "user": {"login": "human"}}]))
     view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
 
     cp = subprocess.run(
