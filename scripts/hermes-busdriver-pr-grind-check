@@ -504,12 +504,12 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
         return "blocked", blockers
     if checks["failed"] > 0:
         return "needs_fix", blockers
+    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state in {"UNKNOWN", "UNSTABLE"}:
+        return "wait", blockers
     if comments:
         if all(c.get("source") == "bot_progress" for c in comments):
             return "wait", blockers
         return "needs_fix", blockers
-    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state in {"UNKNOWN", "UNSTABLE"}:
-        return "wait", blockers
     if checks["kept"] == 0:
         return "blocked", ["no_relevant_checks"]
     return "clean", blockers

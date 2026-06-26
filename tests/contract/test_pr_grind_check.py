@@ -114,6 +114,16 @@ def test_unstable_merge_state_with_passed_checks_still_waits(tmp_path: Path):
     assert data["clean"] is False
 
 
+def test_waits_for_pending_checks_before_acting_on_comments(tmp_path: Path):
+    data = run_check(
+        tmp_path,
+        checks="unit\tpending\t1m\turl\n",
+        comments=[{"commit_id": "abc123def456", "body": "This can crash on empty input", "path": "src/app.py", "line": 12}],
+    )
+    assert data["status"] == "wait"
+    assert data["actionable_comments"]
+
+
 def test_needs_fix_for_actionable_comment_on_current_head(tmp_path: Path):
     data = run_check(
         tmp_path,
