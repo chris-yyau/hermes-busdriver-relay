@@ -169,10 +169,19 @@ def test_fixture_comments_with_review_id_are_actionable_without_reviews_file(tmp
     assert data["actionable_comments"][0]["path"] == "src/app.py"
 
 
+def test_active_prior_round_thread_before_latest_head_is_actionable_when_not_outdated():
+    ns = runpy.run_path(str(CHECK))
+    head_time = ns["parse_github_time"]("2026-01-01T00:01:00Z")
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z", "body": "Old but still unresolved active thread", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", head_time, set(), {123}, {9}, set())
+    assert len(out) == 1
+    assert out[0]["source"] == "review_comment"
+
+
 def test_active_thread_from_dismissed_review_is_ignored():
     ns = runpy.run_path(str(CHECK))
     comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Dismissed unresolved thread", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
-    out = ns["actionable_comments"](comments, "abc123def456", set(), {123}, {9}, {9})
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, {9})
     assert out == []
 
 
@@ -202,7 +211,7 @@ def test_ignores_comments_from_dismissed_current_review(tmp_path: Path):
 def test_active_prior_round_thread_comment_is_actionable():
     ns = runpy.run_path(str(CHECK))
     comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Still unresolved", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
-    out = ns["actionable_comments"](comments, "abc123def456", set(), {123}, {9}, set())
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set())
     assert len(out) == 1
     assert out[0]["source"] == "review_comment"
 
@@ -631,6 +640,52 @@ def test_review_body_on_current_head_is_actionable(tmp_path: Path):
     checks_file.write_text("unit\tpass\t1m\turl\n")
     review_comments_file.write_text("[]")
     reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "COMMENTED", "body": "Please handle the edge case", "user": {"login": "bot"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_approved_review_body_with_harmless_text_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Ship it", "user": {"login": "bot"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
+def test_approved_review_body_with_actionable_text_is_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"commit_id": "abc123def456", "state": "APPROVED", "body": "Approved overall, but please fix the fallback before merging", "user": {"login": "bot"}}]))
     view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
 
     cp = subprocess.run(

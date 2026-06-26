@@ -21,7 +21,7 @@ from typing import Any
 FAIL_STATUSES = {"fail", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
 PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
 NON_ACTIONABLE = re.compile(
-    r"^(lgtm|looks good|looks good to me|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
+    r"^(lgtm|looks good|looks good to me|looks solid|nice work|ship it|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
     re.I,
 )
 PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
@@ -339,7 +339,7 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int]) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt.datetime | None, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -405,7 +405,9 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
             continue
         state = str(r.get("state") or "").upper()
         body = str(r.get("body") or "").strip()
-        if state in {"APPROVED", "DISMISSED", "PENDING"} or not body or NON_ACTIONABLE.search(body):
+        if state in {"DISMISSED", "PENDING"} or not body or NON_ACTIONABLE.search(body):
+            continue
+        if state == "APPROVED" and is_ignorable_review_body(body, (r.get("user") if isinstance(r.get("user"), dict) else {}).get("login")):
             continue
         if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
             continue
@@ -542,10 +544,11 @@ def main() -> int:
     reviews = load_reviews(args, repo)
     parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
     review_comments = load_review_comments(args, repo)
+    head_time = latest_head_time(view)
     comments = (
-        actionable_comments(review_comments, head, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews))
+        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews))
         + actionable_reviews(reviews, head)
-        + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
+        + actionable_issue_comments(load_issue_comments(args, repo), head_time)
     )
     if not args.fixture_mode and not args.view_json_file:
         fresh_view = load_view(args, repo)
