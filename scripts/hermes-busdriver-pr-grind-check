@@ -24,6 +24,12 @@ NON_ACTIONABLE = re.compile(
     r"^(lgtm|looks good|looks good to me|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)\.?$",
     re.I,
 )
+PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
+
+
+def is_progress_comment(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    return "bot" in login and bool(PROGRESS_COMMENT.search(body))
 
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -132,6 +138,56 @@ def load_reviews(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
     return parse_paginated_json(cp.stdout)
 
 
+def load_resolved_review_comment_ids(args: argparse.Namespace, repo: Path) -> set[int]:
+    if args.resolved_review_comment_ids_file:
+        data = read_json_file(args.resolved_review_comment_ids_file, [])
+        return {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
+    if args.fixture_mode:
+        return set()
+    repo_name = owner_repo(repo)
+    owner, name = repo_name.split("/", 1)
+    query = """
+query($owner:String!, $name:String!, $number:Int!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          comments(first:100) { nodes { databaseId } }
+        }
+      }
+    }
+  }
+}
+"""
+    resolved: set[int] = set()
+    after = ""
+    while True:
+        cmd = ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={int(args.pr)}", "-f", f"query={query}"]
+        if after:
+            cmd.extend(["-f", f"after={after}"])
+        cp = run(cmd, cwd=repo)
+        if cp.returncode != 0:
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_unavailable", "stderr": cp.stderr.strip()}))
+        data = json.loads(cp.stdout or "{}")
+        threads = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
+        for node in threads.get("nodes") or []:
+            if not isinstance(node, dict) or node.get("isResolved") is not True:
+                continue
+            for comment in ((node.get("comments") or {}).get("nodes") or []):
+                cid = comment.get("databaseId") if isinstance(comment, dict) else None
+                if isinstance(cid, int):
+                    resolved.add(cid)
+        page_info = threads.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        after = str(page_info.get("endCursor") or "")
+        if not after:
+            break
+    return resolved
+
+
 def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
     candidates: list[Path] = []
     if args.relevant_check_script:
@@ -194,7 +250,19 @@ def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, adv
                     "failed_rows": lines[1:] if failed else [],
                     "pending_rows": pending_rows,
                     "source": str(script),
+                    "relevance_unavailable": False,
                 }
+        return {
+            "failed": 0,
+            "pending": 0,
+            "mode": "unknown",
+            "kept": 0,
+            "failed_rows": [],
+            "pending_rows": [],
+            "source": str(script),
+            "relevance_unavailable": True,
+            "error": cp.stderr.strip() or cp.stdout.strip() or f"exit {cp.returncode}",
+        }
     return fallback_check_counts(checks_text, advisory_pattern)
 
 
@@ -217,13 +285,14 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
             continue
         thread = c.get("thread") if isinstance(c.get("thread"), dict) else {}
-        if c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
+        cid = c.get("id")
+        if (isinstance(cid, int) and cid in resolved_ids) or c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
             continue
         if not same_head(str(c.get("commit_id") or ""), head):
             continue
@@ -238,6 +307,7 @@ def actionable_comments(comments: list[dict[str, Any]], head: str) -> list[dict[
             "line": c.get("line") or c.get("original_line"),
             "commit_id": c.get("commit_id"),
             "body_preview": body[:500],
+            "source": "review_comment",
         })
     return out
 
@@ -302,9 +372,9 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
         if head_time and not comment_time:
             continue
         body = str(c.get("body") or "").strip()
-        if not body or NON_ACTIONABLE.search(body):
-            continue
         user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        if not body or NON_ACTIONABLE.search(body) or is_progress_comment(body, user.get("login")):
+            continue
         out.append({
             "id": c.get("id"),
             "user": user.get("login"),
@@ -321,6 +391,8 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
     blockers: list[str] = []
     state = view.get("state")
     mergeable = view.get("mergeable")
+    if checks.get("relevance_unavailable"):
+        blockers.append("relevant_check_status_unavailable")
     if state and state != "OPEN":
         blockers.append(f"state={state}")
     if view.get("isDraft") is True:
@@ -355,6 +427,7 @@ def main() -> int:
     ap.add_argument("--review-comments-file")
     ap.add_argument("--issue-comments-file")
     ap.add_argument("--reviews-file")
+    ap.add_argument("--resolved-review-comment-ids-file")
     ap.add_argument("--view-json-file")
     ap.add_argument("--relevant-check-script")
     ap.add_argument("--advisory-pattern", default="CodeScene")
@@ -368,8 +441,9 @@ def main() -> int:
     checks_text = load_checks(args, repo)
     script = resolve_relevant_script(args)
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+    resolved_review_comment_ids = load_resolved_review_comment_ids(args, repo)
     comments = (
-        actionable_comments(load_review_comments(args, repo), head)
+        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids)
         + actionable_reviews(load_reviews(args, repo), head)
         + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )

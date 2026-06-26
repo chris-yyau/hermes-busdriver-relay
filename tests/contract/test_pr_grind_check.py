@@ -115,6 +115,99 @@ def test_needs_fix_for_actionable_comment_on_current_head(tmp_path: Path):
     assert data["actionable_comments"][0]["path"] == "src/app.py"
 
 
+def test_ignores_resolved_review_comment_ids(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    resolved_file = tmp_path / "resolved.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text(json.dumps([{"id": 123, "commit_id": "abc123def456", "body": "Please fix this", "path": "src/app.py", "line": 12}]))
+    resolved_file.write_text(json.dumps([123]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--resolved-review-comment-ids-file", str(resolved_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
+def test_review_progress_issue_comment_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("CodeRabbit\tpending\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "Currently processing new changes in this PR. This may take a few minutes, please wait...", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "coderabbitai[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "wait"
+    assert data["actionable_comments"] == []
+
+
+def test_please_wait_actionable_issue_comment_is_not_suppressed(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "Please wait to merge until this null dereference is fixed", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "reviewer"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "issue_comment_after_head"
+
+
+def test_relevant_script_parse_failure_blocks(tmp_path: Path):
+    script = tmp_path / "relevant-check-status.sh"
+    script.write_text("#!/bin/sh\nprintf 'not parseable\\n'\n")
+    script.chmod(0o755)
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text("[]")
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--view-json-file", str(view_file), "--relevant-check-script", str(script)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "blocked"
+    assert "relevant_check_status_unavailable" in data["blockers"]
+
+
 def test_blocks_when_pr_is_not_mergeable_even_if_checks_pass(tmp_path: Path):
     data = run_check(
         tmp_path,
