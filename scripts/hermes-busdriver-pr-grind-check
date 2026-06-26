@@ -783,6 +783,8 @@ def main() -> int:
         fresh_head = str(fresh_view.get("headRefOid") or "")
         if fresh_head and fresh_head == head:
             view = fresh_view
+            checks_text = load_checks(args, repo)
+            checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
             comments = collect_actionable_feedback(args, repo, view, head)
             final_view = load_view(args, repo)
             final_head = str(final_view.get("headRefOid") or "")

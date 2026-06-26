@@ -1038,14 +1038,19 @@ def test_same_head_fresh_view_recollects_feedback(tmp_path: Path, monkeypatch):
         return [] if len(calls) == 1 else [{"id": 99, "source": "review_comment", "body_preview": "new same-head feedback"}]
 
     ns["main"].__globals__["load_view"] = fake_load_view
+    parse_calls = []
     ns["main"].__globals__["load_checks"] = lambda args, repo: "unit\tpass\t1m\turl\n"
     ns["main"].__globals__["resolve_relevant_script"] = lambda args: None
-    ns["main"].__globals__["parse_relevant_counts"] = lambda script, repo, checks, advisory: {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "failed_rows": [], "pending_rows": [], "source": "test", "relevance_unavailable": False}
+    def fake_parse(script, repo, checks, advisory):
+        parse_calls.append(checks)
+        return {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "failed_rows": [], "pending_rows": [], "source": "test", "relevance_unavailable": False}
+    ns["main"].__globals__["parse_relevant_counts"] = fake_parse
     ns["main"].__globals__["collect_actionable_feedback"] = fake_collect
     monkeypatch.setattr(sys, "argv", [str(CHECK), "--repo", str(tmp_path), "--pr", "7"] )
     rc = ns["main"]()
     assert rc == 0
     assert len(calls) == 2
+    assert len(parse_calls) == 2
 
 
 
