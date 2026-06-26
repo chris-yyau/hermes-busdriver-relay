@@ -90,6 +90,18 @@ def test_unstable_merge_state_with_pending_checks_waits(tmp_path: Path):
     assert data["clean"] is False
 
 
+def test_unknown_merge_state_with_passed_checks_still_waits(tmp_path: Path):
+    data = run_check(
+        tmp_path,
+        checks="unit\tpass\t1m\turl\n",
+        comments=[],
+        view_extra={"mergeStateStatus": "UNKNOWN"},
+    )
+
+    assert data["status"] == "wait"
+    assert data["clean"] is False
+
+
 def test_unstable_merge_state_with_passed_checks_still_waits(tmp_path: Path):
     data = run_check(
         tmp_path,
@@ -134,6 +146,40 @@ def test_advisory_pattern_is_literal_not_regex(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "clean"
     assert data["checks"]["kept"] == 1
+
+
+def test_fixture_comments_with_review_id_are_actionable_without_reviews_file(tmp_path: Path):
+    data = run_check(
+        tmp_path,
+        checks="unit\tpass\t1m\turl\n",
+        comments=[{"id": 123, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Current fixture finding", "path": "src/app.py", "line": 12}],
+    )
+
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["path"] == "src/app.py"
+
+
+def test_ignores_comments_from_previous_review_round(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text(json.dumps([{"id": 123, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Old round finding", "path": "src/app.py", "line": 12}]))
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "old123456789", "state": "COMMENTED", "body": "Old review"}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
 
 
 def test_ignores_resolved_review_comment_ids(tmp_path: Path):
@@ -182,6 +228,29 @@ def test_review_progress_issue_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_coderabbit_rate_limit_comment_blocks_clean(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    issue_comments_file = tmp_path / "issue-comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    issue_comments_file.write_text(json.dumps([{"body": "Review limit reached: rate limited by CodeRabbit", "created_at": "2026-01-01T00:01:00Z", "user": {"login": "coderabbitai[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456", "commits": [{"committedDate": "2026-01-01T00:00:00Z"}]}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--issue-comments-file", str(issue_comments_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "issue_comment_after_head"
+
+
 def test_please_wait_actionable_issue_comment_is_not_suppressed(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -203,6 +272,28 @@ def test_please_wait_actionable_issue_comment_is_not_suppressed(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "needs_fix"
     assert data["actionable_comments"][0]["source"] == "issue_comment_after_head"
+
+
+def test_missing_explicit_relevant_script_blocks_without_traceback(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    comments_file = tmp_path / "comments.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    comments_file.write_text("[]")
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(comments_file), "--view-json-file", str(view_file), "--relevant-check-script", str(tmp_path / "missing.sh")],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "blocked"
+    assert data["checks"]["error"] == "script_not_found"
+    assert "Traceback" not in cp.stderr
 
 
 def test_relevant_script_parse_failure_blocks(tmp_path: Path):

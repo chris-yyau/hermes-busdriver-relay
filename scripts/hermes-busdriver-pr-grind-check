@@ -194,11 +194,11 @@ def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
     if args.relevant_check_script:
         if not args.fixture_mode:
             raise SystemExit(json.dumps({"ok": False, "error": "explicit_relevant_check_script_requires_fixture_mode"}))
-        candidates.append(Path(args.relevant_check_script).expanduser())
+        path = Path(args.relevant_check_script).expanduser()
+        if path.is_file():
+            return path.resolve()
+        return path
     if args.fixture_mode:
-        for path in candidates:
-            if path.is_file():
-                return path.resolve()
         return None
     if args.plugin_root:
         candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
@@ -238,6 +238,18 @@ def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, 
 
 def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str) -> dict[str, Any]:
     if script:
+        if not script.is_file():
+            return {
+                "failed": 0,
+                "pending": 0,
+                "mode": "unknown",
+                "kept": 0,
+                "failed_rows": [],
+                "pending_rows": [],
+                "source": str(script),
+                "relevance_unavailable": True,
+                "error": "script_not_found",
+            }
         cp = subprocess.run(["bash", str(script), str(repo), advisory_pattern], input=checks_text, text=True, capture_output=True, cwd=str(repo))
         if cp.returncode == 0 and cp.stdout.strip():
             lines = cp.stdout.splitlines()
@@ -297,7 +309,7 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], head_time: dt.datetime | None = None) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids: set[int], current_review_ids: set[int] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -305,6 +317,9 @@ def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids:
         thread = c.get("thread") if isinstance(c.get("thread"), dict) else {}
         cid = c.get("id")
         if (isinstance(cid, int) and cid in resolved_ids) or c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
+            continue
+        review_id = c.get("pull_request_review_id")
+        if isinstance(review_id, int) and current_review_ids is not None and review_id not in current_review_ids:
             continue
         if not same_head(str(c.get("commit_id") or ""), head):
             continue
@@ -322,6 +337,18 @@ def actionable_comments(comments: list[dict[str, Any]], head: str, resolved_ids:
             "source": "review_comment",
         })
     return out
+
+
+def current_review_ids(reviews: list[dict[str, Any]], head: str) -> set[int]:
+    ids: set[int] = set()
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id")
+        commit = str(r.get("commit_id") or "")
+        if isinstance(rid, int) and same_head(commit, head):
+            ids.add(rid)
+    return ids
 
 
 def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
@@ -423,7 +450,7 @@ def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[s
         return "needs_fix", blockers
     if comments:
         return "needs_fix", blockers
-    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state == "UNSTABLE":
+    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state in {"UNKNOWN", "UNSTABLE"}:
         return "wait", blockers
     if checks["kept"] == 0:
         return "blocked", ["no_relevant_checks"]
@@ -454,9 +481,11 @@ def main() -> int:
     script = resolve_relevant_script(args)
     checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
     resolved_review_comment_ids = load_resolved_review_comment_ids(args, repo)
+    reviews = load_reviews(args, repo)
+    parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
     comments = (
-        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids, latest_head_time(view))
-        + actionable_reviews(load_reviews(args, repo), head)
+        actionable_comments(load_review_comments(args, repo), head, resolved_review_comment_ids, parent_review_ids)
+        + actionable_reviews(reviews, head)
         + actionable_issue_comments(load_issue_comments(args, repo), latest_head_time(view))
     )
     if not args.fixture_mode and not args.view_json_file:
