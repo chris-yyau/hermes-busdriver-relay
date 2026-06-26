@@ -74,7 +74,8 @@ These are not missing work; they are blocked by design until stronger equivalent
 - `hermes-busdriver-codex-goal` with commit authority
 - repo-mutating Codex (others temporarily deferred) launcher finalization
 - `.claude/hermes/jobs` queue
-- commit / PR / merge / deploy automation
+- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks
+- deploy / release / publish automation
 - direct MCP/plugin routing
 - any claim that Hermes bare shell execution is Busdriver-gate-safe
 
@@ -90,3 +91,5 @@ Hermes may use this repo for:
 6. future v2 work to add agent adapters and commit/PR-capable equivalent gates.
 
 Hermes must not use this repo to bypass Busdriver gates or duplicate Busdriver's source-of-truth.
+
+If the user explicitly asks Hermes to complete the whole delivery, Hermes must use litmus/pre-PR-equivalent checks before commit/PR and a pr-grind-equivalent loop before any merge: check PR status, wait for reviewer bots with a bounded budget, inspect comments/reviews, fix actionable feedback, and merge only when clean. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.
