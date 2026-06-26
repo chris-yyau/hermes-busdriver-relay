@@ -341,7 +341,7 @@ def same_head(comment_sha: str | None, head: str) -> bool:
     return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
 
 
-def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt.datetime | None, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int]) -> list[dict[str, Any]]:
+def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt.datetime | None, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int], superseded_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for c in comments:
         if not isinstance(c, dict):
@@ -352,6 +352,9 @@ def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt
         if (isinstance(cid, int) and cid in resolved_ids) or c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
             continue
         review_id = c.get("pull_request_review_id")
+        login = str((c.get("user") if isinstance(c.get("user"), dict) else {}).get("login") or "")
+        if is_active_thread and superseded_bot_logins and login in superseded_bot_logins and not same_head(str(c.get("commit_id") or ""), head):
+            continue
         if isinstance(review_id, int) and review_id in ignored_review_ids:
             continue
         if not is_active_thread:
@@ -400,29 +403,87 @@ def ignored_review_ids(reviews: list[dict[str, Any]]) -> set[int]:
     return ids
 
 
+def review_sort_key(review: dict[str, Any], index: int) -> tuple[str, int]:
+    for key in ("submitted_at", "submittedAt", "updated_at", "created_at"):
+        value = str(review.get(key) or "")
+        if value:
+            return value, index
+    return "", index
+
+
+def latest_reviews_by_user(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[str, tuple[tuple[str, int], dict[str, Any]]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for index, review in enumerate(reviews):
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state") or "").upper()
+        if state == "PENDING":
+            continue
+        user = review.get("user") if isinstance(review.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        if not login:
+            anonymous.append(review)
+            continue
+        key = review_sort_key(review, index)
+        current = latest.get(login)
+        if current is None or key >= current[0]:
+            latest[login] = (key, review)
+    return anonymous + [item[1] for item in latest.values()]
+
+
+def current_head_bot_review_logins(reviews: list[dict[str, Any]], head: str) -> set[str]:
+    logins: set[str] = set()
+    for review in latest_reviews_by_user(reviews):
+        if not isinstance(review, dict):
+            continue
+        user = review.get("user") if isinstance(review.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        state = str(review.get("state") or "").upper()
+        if state not in {"DISMISSED", "PENDING"} and "bot" in login.lower() and same_head(str(review.get("commit_id") or ""), head):
+            logins.add(login)
+    return logins
+
+
 def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for r in reviews:
+    by_user: dict[str, list[tuple[tuple[str, int], dict[str, Any]]]] = {}
+    anonymous: list[tuple[tuple[str, int], dict[str, Any]]] = []
+    for index, r in enumerate(reviews):
         if not isinstance(r, dict):
             continue
-        state = str(r.get("state") or "").upper()
-        body = str(r.get("body") or "").strip()
-        if state in {"DISMISSED", "PENDING"} or not body or NON_ACTIONABLE.search(body):
-            continue
         user = r.get("user") if isinstance(r.get("user"), dict) else {}
-        if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
-            continue
-        if is_ignorable_review_body(body, user.get("login")):
-            continue
-        out.append({
-            "id": r.get("id"),
-            "user": user.get("login"),
-            "path": None,
-            "line": None,
-            "commit_id": r.get("commit_id"),
-            "body_preview": body[:500],
-            "source": "review",
-        })
+        login = str(user.get("login") or "")
+        item = (review_sort_key(r, index), r)
+        if login:
+            by_user.setdefault(login, []).append(item)
+        else:
+            anonymous.append(item)
+
+    out: list[dict[str, Any]] = []
+    groups = list(by_user.values()) + [[item] for item in anonymous]
+    for group in groups:
+        for _, r in sorted(group, key=lambda item: item[0], reverse=True):
+            state = str(r.get("state") or "").upper()
+            if state in {"DISMISSED", "PENDING"}:
+                continue
+            if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
+                continue
+            body = str(r.get("body") or "").strip()
+            user = r.get("user") if isinstance(r.get("user"), dict) else {}
+            if not body or NON_ACTIONABLE.search(body) or is_ignorable_review_body(body, user.get("login")):
+                if state == "APPROVED":
+                    break
+                continue
+            out.append({
+                "id": r.get("id"),
+                "user": user.get("login"),
+                "path": None,
+                "line": None,
+                "commit_id": r.get("commit_id"),
+                "body_preview": body[:500],
+                "source": "review",
+            })
+            break
     return out
 
 
@@ -447,6 +508,28 @@ def latest_head_time(view: dict[str, Any]) -> dt.datetime | None:
                 times.append(parsed)
                 break
     return max(times) if times else None
+
+
+def commit_json_time(data: dict[str, Any]) -> dt.datetime | None:
+    commit = data.get("commit") if isinstance(data.get("commit"), dict) else {}
+    committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+    author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+    return parse_github_time(committer.get("date")) or parse_github_time(author.get("date"))
+
+
+def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
+    if args.fixture_mode or args.view_json_file or not head:
+        return latest_head_time(view)
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/commits/{head}"], cwd=repo)
+    if cp.returncode == 0:
+        try:
+            parsed = commit_json_time(json.loads(cp.stdout or "{}"))
+            if parsed:
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return latest_head_time(view)
 
 
 def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None) -> list[dict[str, Any]]:
@@ -544,9 +627,9 @@ def main() -> int:
     reviews = load_reviews(args, repo)
     parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
     review_comments = load_review_comments(args, repo)
-    head_time = latest_head_time(view)
+    head_time = load_head_time(args, repo, view, head)
     comments = (
-        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews))
+        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews), current_head_bot_review_logins(reviews, head))
         + actionable_reviews(reviews, head)
         + actionable_issue_comments(load_issue_comments(args, repo), head_time)
     )

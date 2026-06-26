@@ -767,6 +767,97 @@ def test_approved_review_body_with_please_update_migration_is_actionable(tmp_pat
     assert data["actionable_comments"][0]["source"] == "review"
 
 
+def test_non_actionable_commented_review_does_not_supersede_prior_actionable_review(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([
+        {"id": 1, "commit_id": "abc123def456", "state": "COMMENTED", "body": "Please update the migration", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:00:00Z"},
+        {"id": 2, "commit_id": "abc123def456", "state": "COMMENTED", "body": "thanks", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:01:00Z"},
+    ]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+
+
+def test_pending_review_does_not_supersede_prior_actionable_review(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([
+        {"id": 1, "commit_id": "abc123def456", "state": "COMMENTED", "body": "Please update the migration", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:00:00Z"},
+        {"id": 2, "commit_id": "abc123def456", "state": "PENDING", "body": "Draft note", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:01:00Z"},
+    ]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "needs_fix"
+    assert data["actionable_comments"][0]["source"] == "review"
+
+
+def test_latest_same_reviewer_approval_supersedes_prior_review_body(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([
+        {"id": 1, "commit_id": "abc123def456", "state": "COMMENTED", "body": "Please update the migration", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:00:00Z"},
+        {"id": 2, "commit_id": "abc123def456", "state": "APPROVED", "body": "Looks good", "user": {"login": "reviewer"}, "submitted_at": "2026-01-01T00:01:00Z"},
+    ]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+
+
+def test_current_head_bot_inline_comment_not_superseded_by_same_review():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "abc123def456", "body": "Current bot finding", "path": "src/app.py", "line": 4, "user": {"login": "chatgpt-codex-connector[bot]"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set(), {"chatgpt-codex-connector[bot]"})
+    assert len(out) == 1
+    assert out[0]["source"] == "review_comment"
+
+
+def test_later_current_head_bot_review_supersedes_prior_round_bot_inline_comment():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Old bot finding", "path": "src/app.py", "line": 4, "user": {"login": "chatgpt-codex-connector[bot]"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set(), {"chatgpt-codex-connector[bot]"})
+    assert out == []
+
+
 def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -788,6 +879,12 @@ def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "clean"
     assert data["actionable_comments"] == []
+
+
+def test_commit_json_time_prefers_committer_date():
+    ns = runpy.run_path(str(CHECK))
+    parsed = ns["commit_json_time"]({"commit": {"committer": {"date": "2026-01-02T03:04:05Z"}, "author": {"date": "2026-01-01T00:00:00Z"}}})
+    assert parsed == ns["parse_github_time"]("2026-01-02T03:04:05Z")
 
 
 def test_issue_comment_without_head_time_is_actionable(tmp_path: Path):
