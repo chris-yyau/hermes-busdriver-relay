@@ -81,6 +81,20 @@ def parse_paginated_json(stdout: str) -> list[dict[str, Any]]:
     return []
 
 
+def parse_paginated_check_runs(stdout: str) -> list[dict[str, Any]]:
+    if not stdout.strip():
+        return []
+    data = json.loads(stdout)
+    pages = data if isinstance(data, list) else [data]
+    rows: list[dict[str, Any]] = []
+    for page in pages:
+        if isinstance(page, dict):
+            for item in page.get("check_runs") or []:
+                if isinstance(item, dict):
+                    rows.append(item)
+    return rows
+
+
 def gh_json(cmd: list[str], repo: Path) -> Any:
     cp = run(cmd, cwd=repo)
     if cp.returncode != 0:
@@ -183,7 +197,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         nodes {
           isResolved
           isOutdated
-          comments(first:100) { nodes { databaseId } }
+          comments(first:100) { pageInfo { hasNextPage } nodes { databaseId } }
         }
       }
     }
@@ -206,7 +220,10 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
             if not isinstance(node, dict):
                 continue
             target = resolved if (node.get("isResolved") is True or node.get("isOutdated") is True) else active
-            for comment in ((node.get("comments") or {}).get("nodes") or []):
+            comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
+            if (comments_page.get("pageInfo") or {}).get("hasNextPage"):
+                raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
+            for comment in (comments_page.get("nodes") or []):
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
                 if isinstance(cid, int):
                     target.add(cid)
@@ -353,7 +370,8 @@ def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt
             continue
         review_id = c.get("pull_request_review_id")
         login = str((c.get("user") if isinstance(c.get("user"), dict) else {}).get("login") or "")
-        if is_active_thread and superseded_bot_logins and login in superseded_bot_logins and not same_head(str(c.get("commit_id") or ""), head):
+        original_commit = str(c.get("original_commit_id") or c.get("commit_id") or "")
+        if is_active_thread and superseded_bot_logins and login in superseded_bot_logins and not same_head(original_commit, head):
             continue
         if isinstance(review_id, int) and review_id in ignored_review_ids:
             continue
@@ -517,19 +535,39 @@ def commit_json_time(data: dict[str, Any]) -> dt.datetime | None:
     return parse_github_time(committer.get("date")) or parse_github_time(author.get("date"))
 
 
+def check_runs_head_time(data: dict[str, Any]) -> dt.datetime | None:
+    runs = data.get("check_runs") if isinstance(data.get("check_runs"), list) else []
+    times: list[dt.datetime] = []
+    for run_item in runs:
+        if not isinstance(run_item, dict):
+            continue
+        parsed = parse_github_time(run_item.get("started_at") or run_item.get("created_at"))
+        if parsed:
+            times.append(parsed)
+    return min(times) if times else None
+
+
 def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
     if args.fixture_mode or args.view_json_file or not head:
         return latest_head_time(view)
     repo_name = owner_repo(repo)
     cp = run(["gh", "api", f"repos/{repo_name}/commits/{head}"], cwd=repo)
+    commit_time = None
     if cp.returncode == 0:
         try:
-            parsed = commit_json_time(json.loads(cp.stdout or "{}"))
-            if parsed:
-                return parsed
+            commit_time = commit_json_time(json.loads(cp.stdout or "{}"))
         except json.JSONDecodeError:
-            pass
-    return latest_head_time(view)
+            commit_time = None
+    checks_cp = run(["gh", "api", f"repos/{repo_name}/commits/{head}/check-runs", "-X", "GET", "-F", "per_page=100", "--paginate", "--slurp"], cwd=repo)
+    check_time = None
+    if checks_cp.returncode == 0:
+        try:
+            check_time = check_runs_head_time({"check_runs": parse_paginated_check_runs(checks_cp.stdout)})
+        except json.JSONDecodeError:
+            check_time = None
+    if commit_time and check_time:
+        return max(commit_time, check_time)
+    return check_time or commit_time or latest_head_time(view)
 
 
 def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None) -> list[dict[str, Any]]:

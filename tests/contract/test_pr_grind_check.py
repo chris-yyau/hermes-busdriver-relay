@@ -851,6 +851,13 @@ def test_current_head_bot_inline_comment_not_superseded_by_same_review():
     assert out[0]["source"] == "review_comment"
 
 
+def test_later_current_head_bot_review_supersedes_rest_comment_retargeted_to_head():
+    ns = runpy.run_path(str(CHECK))
+    comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "abc123def456", "original_commit_id": "oldsha123", "body": "Old bot finding", "path": "src/app.py", "line": 4, "user": {"login": "chatgpt-codex-connector[bot]"}}]
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set(), {"chatgpt-codex-connector[bot]"})
+    assert out == []
+
+
 def test_later_current_head_bot_review_supersedes_prior_round_bot_inline_comment():
     ns = runpy.run_path(str(CHECK))
     comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Old bot finding", "path": "src/app.py", "line": 4, "user": {"login": "chatgpt-codex-connector[bot]"}}]
@@ -879,6 +886,32 @@ def test_dismissed_review_body_is_not_actionable(tmp_path: Path):
     data = json.loads(cp.stdout)
     assert data["status"] == "clean"
     assert data["actionable_comments"] == []
+
+
+def test_load_head_time_fetches_check_runs_with_get():
+    source = CHECK.read_text()
+    assert '["gh", "api", f"repos/{repo_name}/commits/{head}/check-runs", "-X", "GET", "-F", "per_page=100", "--paginate", "--slurp"]' in source
+
+
+
+def test_parse_paginated_check_runs_flattens_slurped_pages():
+    ns = runpy.run_path(str(CHECK))
+    stdout = json.dumps([
+        {"check_runs": [{"name": "late", "started_at": "2026-01-02T03:05:00Z"}]},
+        {"check_runs": [{"name": "early", "started_at": "2026-01-02T03:04:00Z"}]},
+    ])
+    rows = ns["parse_paginated_check_runs"](stdout)
+    assert [r["name"] for r in rows] == ["late", "early"]
+    assert ns["check_runs_head_time"]({"check_runs": rows}) == ns["parse_github_time"]("2026-01-02T03:04:00Z")
+
+
+def test_check_runs_head_time_uses_earliest_check_start():
+    ns = runpy.run_path(str(CHECK))
+    parsed = ns["check_runs_head_time"]({"check_runs": [
+        {"created_at": "2026-01-02T03:05:00Z"},
+        {"started_at": "2026-01-02T03:04:05Z"},
+    ]})
+    assert parsed == ns["parse_github_time"]("2026-01-02T03:04:05Z")
 
 
 def test_commit_json_time_prefers_committer_date():
