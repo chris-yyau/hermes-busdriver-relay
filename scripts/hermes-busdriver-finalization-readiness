@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Read-only finalization readiness and Busdriver handoff envelope.
+
+This helper deliberately stops before commit/push/PR/merge/deploy authority. It
+combines the existing read-only Delivery Mode status probe with the Phase-0
+Busdriver status probe, then emits a deterministic handoff envelope an operator
+or Busdriver/Claude session can review. It never writes Busdriver markers and has
+no execute mode.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
+PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
+SCHEMA = "hermes-busdriver-finalization-readiness/v0"
+HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
+POLICY = (
+    "Read-only finalization readiness only prepares a handoff envelope. It does "
+    "not authorize or perform commit, push, PR creation, merge, deploy, release, "
+    "publish, Busdriver marker writes, or gate bypass."
+)
+BLOCKED_FLAGS = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read-only finalization readiness / Busdriver handoff envelope")
+    parser.add_argument("--repo", default=".", help="Target git repo/worktree to inspect read-only")
+    parser.add_argument("--plugin-root", help="Busdriver plugin root")
+    parser.add_argument("--state-dir", default=".claude", help="Busdriver state dir name for Phase-0 marker/config discovery")
+    parser.add_argument("--user-config", help="Busdriver user config path for Phase-0 discovery")
+    parser.add_argument("--pr", help="Pull request number for post-PR readiness")
+    parser.add_argument("--target", default="auto", choices=["auto", "commit", "pr", "merge", "delivery"], help="Finalization handoff target to evaluate")
+    parser.add_argument("--pr-grind-check-script", help="Path to hermes-busdriver-pr-grind-check for delivery-status")
+    parser.add_argument("--pr-grind-result-file", help="Fixture/result JSON from hermes-busdriver-pr-grind-check")
+    parser.add_argument("--pr-grind-timeout", type=int, default=180)
+    parser.add_argument("--delivery-status-timeout", type=int, default=180)
+    parser.add_argument("--phase0-status-timeout", type=int, default=60)
+    parser.add_argument("--pretty", action="store_true")
+    return parser.parse_args()
+
+
+def run_json(cmd: list[str], timeout: int) -> tuple[dict[str, Any], int]:
+    try:
+        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
+    except FileNotFoundError as e:
+        return {"ok": False, "error": "command_not_found", "cmd": cmd, "stderr": str(e)}, 127
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        return {
+            "ok": False,
+            "error": "timeout",
+            "cmd": cmd,
+            "returncode": 124,
+            "stdout_tail": stdout[-4000:],
+            "stderr": stderr[-4000:],
+        }, 124
+    try:
+        data = json.loads(cp.stdout)
+    except json.JSONDecodeError as e:
+        return {
+            "ok": False,
+            "error": "invalid_json",
+            "cmd": cmd,
+            "returncode": cp.returncode,
+            "parse_error": str(e),
+            "stdout_tail": cp.stdout[-4000:],
+            "stderr": cp.stderr[-4000:],
+        }, cp.returncode
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "invalid_json_type", "cmd": cmd, "returncode": cp.returncode}, cp.returncode
+    if cp.returncode != 0:
+        data["ok"] = False
+        data["returncode"] = cp.returncode
+        data["stderr"] = cp.stderr[-4000:]
+    return data, cp.returncode
+
+
+def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    cmd = [sys.executable, str(DELIVERY_STATUS), "--repo", args.repo]
+    if args.plugin_root:
+        cmd += ["--plugin-root", args.plugin_root]
+    if args.pr:
+        cmd += ["--pr", args.pr]
+    if args.pr_grind_check_script:
+        cmd += ["--pr-grind-check-script", args.pr_grind_check_script]
+    if args.pr_grind_result_file:
+        cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
+    if args.pr_grind_timeout is not None:
+        cmd += ["--pr-grind-timeout", str(args.pr_grind_timeout)]
+    return run_json(cmd, args.delivery_status_timeout)
+
+
+def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    cmd = [sys.executable, str(PHASE0_STATUS), "--repo", args.repo, "--state-dir", args.state_dir, "--operation", "repo-mutation"]
+    if args.plugin_root:
+        cmd += ["--plugin-root", args.plugin_root]
+    if args.user_config:
+        cmd += ["--user-config", args.user_config]
+    return run_json(cmd, args.phase0_status_timeout)
+
+
+def summarize_pr(pr: str | None, delivery: dict[str, Any]) -> dict[str, Any] | None:
+    if not pr:
+        return None
+    pr_grind = delivery.get("pr_grind") or {}
+    result = pr_grind.get("result") or {}
+    return {
+        "number": pr,
+        "available": pr_grind.get("available"),
+        "ok": pr_grind.get("ok"),
+        "status": result.get("status"),
+        "clean": result.get("clean"),
+        "head": result.get("head") or result.get("headRefOid"),
+        "url": result.get("url"),
+    }
+
+
+def phase0_blockers(phase0: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if phase0.get("returncode", 0) != 0 or phase0.get("ok") is False:
+        blockers.append("phase0_status_failed")
+    if phase0.get("status_schema") != "hermes-busdriver-status/v0":
+        if "phase0_status_failed" not in blockers:
+            blockers.append("phase0_status_failed")
+        return blockers
+    if not ((phase0.get("plugin_root") or {}).get("exists")):
+        blockers.append("phase0_busdriver_plugin_unavailable")
+    hooks = phase0.get("hooks") or {}
+    if not hooks.get("exists") or hooks.get("parse_error"):
+        blockers.append("phase0_hooks_unavailable")
+    repo = phase0.get("repo") or {}
+    if not repo.get("is_git_repo"):
+        blockers.append("phase0_repo_unavailable")
+    locks = phase0.get("relay_locks") or {}
+    if locks.get("active_for_repo_count", 0):
+        blockers.append("relay_repo_mutation_lock_active")
+    return blockers
+
+
+def phase0_warnings(phase0: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    if phase0.get("status_schema") != "hermes-busdriver-status/v0":
+        return warnings
+    cfg = phase0.get("user_config") or {}
+    if not cfg.get("exists"):
+        warnings.append("busdriver_user_config_unavailable")
+    elif cfg.get("parse_error"):
+        warnings.append("busdriver_user_config_parse_error")
+    resolver = phase0.get("resolve_cli") or {}
+    if not resolver.get("ok"):
+        warnings.append("busdriver_resolve_cli_unavailable")
+    gates = phase0.get("minimum_gate_scripts") or {}
+    missing_gates = sorted(name for name, present in gates.items() if not present)
+    if missing_gates:
+        warnings.append("minimum_gate_scripts_missing")
+    return warnings
+
+
+def infer_target(args: argparse.Namespace, delivery: dict[str, Any]) -> str:
+    if args.target != "auto":
+        return args.target
+    if args.pr:
+        return "merge"
+    repo = delivery.get("repo") or {}
+    if repo.get("dirty"):
+        return "commit_or_pr"
+    return "delivery"
+
+
+def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any]) -> dict[str, Any]:
+    delivery_decision = delivery.get("decision") or {}
+    blockers = list(delivery_decision.get("blockers") or [])
+    warnings = list(delivery_decision.get("warnings") or [])
+    blockers.extend(b for b in phase0_blockers(phase0) if b not in blockers)
+    warnings.extend(w for w in phase0_warnings(phase0) if w not in warnings)
+    if not delivery.get("ok"):
+        blockers.append("delivery_status_failed")
+
+    repo = delivery.get("repo") or {}
+    target = infer_target(args, delivery)
+    state = "blocked" if blockers else "no_finalization_candidate"
+    next_action = "Resolve blockers, then re-run this read-only readiness helper."
+    handoff_ready = False
+
+    if not blockers:
+        if target == "merge":
+            if args.pr and delivery_decision.get("status") == "pr_clean_read_only":
+                state = "ready_for_merge_handoff"
+                handoff_ready = True
+                next_action = "Hand this envelope to Busdriver/Claude or an explicit operator finalizer; this helper must not merge."
+            elif args.pr:
+                state = "pr_not_clean_read_only"
+                next_action = "PR was supplied but read-only pr-grind is not clean; wait for checks/reviewers or fix actionable feedback, then re-run."
+            else:
+                next_action = "Merge handoff target requires --pr plus a clean read-only pr-grind result."
+        elif target in {"commit", "pr", "commit_or_pr"}:
+            if repo.get("dirty"):
+                state = "ready_for_commit_or_pr_handoff"
+                handoff_ready = True
+                next_action = "Hand this envelope to Busdriver/Claude for current litmus/pre-PR semantics; this helper must not commit, push, or create a PR."
+            else:
+                next_action = "Commit/PR handoff target requires a dirty worktree to finalize."
+        else:
+            next_action = "No dirty worktree or clean PR was supplied for the requested target; continue draft work or pass --pr for PR readiness."
+
+    return {
+        "ready": handoff_ready,
+        "status": state,
+        "target": target,
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_action": next_action,
+        "policy": POLICY,
+        **BLOCKED_FLAGS,
+    }
+
+
+def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any], ready: dict[str, Any]) -> dict[str, Any]:
+    repo = delivery.get("repo") or {}
+    busdriver = phase0.get("plugin_root") or {}
+    hooks = phase0.get("hooks") or {}
+    user_config = phase0.get("user_config") or {}
+    return {
+        "schema": HANDOFF_SCHEMA,
+        "read_only": True,
+        "target": ready["target"],
+        "readiness_status": ready["status"],
+        "ready_for_handoff": ready["ready"],
+        "repo": {
+            "root": repo.get("root"),
+            "branch": repo.get("branch"),
+            "head": repo.get("head"),
+            "dirty": repo.get("dirty"),
+            "merge_state": repo.get("merge_state"),
+            "dirty_entries": repo.get("dirty_entries"),
+        },
+        "pr": summarize_pr(args.pr, delivery),
+        "busdriver_phase0": {
+            "plugin_root": busdriver,
+            "user_config": {"path": user_config.get("path"), "exists": user_config.get("exists"), "parse_error": user_config.get("parse_error")},
+            "hooks": {"path": hooks.get("path"), "exists": hooks.get("exists"), "parse_error": hooks.get("parse_error"), "events": hooks.get("events")},
+            "active_markers": phase0.get("active_markers"),
+        },
+        "evidence": {
+            "delivery_status_schema": delivery.get("schema"),
+            "phase0_status_schema": phase0.get("status_schema"),
+            "delivery_decision": delivery.get("decision"),
+        },
+        "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
+        "required_next_actions": [
+            "Re-read live Busdriver source-of-truth before any repo-changing finalization.",
+            "Run current litmus/pre-PR-equivalent gates before commit/push/PR creation.",
+            "Run current latest-head pr-grind-equivalent loop before merge.",
+            "Treat this envelope as advisory evidence only; do not bypass gates or marker freshness checks.",
+        ],
+        "forbidden_by_this_helper": ["commit", "push", "pr_create", "merge", "deploy", "release", "publish", "busdriver_marker_write", "gate_bypass"],
+        "authority": BLOCKED_FLAGS,
+        "policy": POLICY,
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    delivery, delivery_rc = load_delivery_status(args)
+    phase0, phase0_rc = load_phase0_status(args)
+    ready = readiness(args, delivery, phase0)
+    result = {
+        "schema": SCHEMA,
+        "ok": bool(delivery.get("ok") and phase0.get("status_schema") == "hermes-busdriver-status/v0" and delivery_rc == 0 and phase0_rc == 0),
+        "read_only": True,
+        "delivery_status_returncode": delivery_rc,
+        "phase0_status_returncode": phase0_rc,
+        "readiness": ready,
+        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready),
+        "delivery_status": delivery,
+        "phase0_status": phase0,
+        "decision": {"status": ready["status"], "reason": "read_only_finalization_readiness", **BLOCKED_FLAGS},
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0 if result["ok"] else (delivery_rc or phase0_rc or 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, and a **fail-closed verify-only delivery dispatcher**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan/verify envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **fail-closed verify-only delivery dispatcher**, and a **read-only finalization readiness / handoff envelope**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -28,6 +28,7 @@ Implemented:
 - `scripts/hermes-busdriver-agent-smoke`
 - `scripts/hermes-busdriver-delivery-status`
 - `scripts/hermes-busdriver-deliver`
+- `scripts/hermes-busdriver-finalization-readiness`
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
@@ -38,6 +39,7 @@ Implemented:
 - `tests/contract/test_agent_smoke.py`
 - `tests/contract/test_delivery_status.py`
 - `tests/contract/test_deliver.py`
+- `tests/contract/test_finalization_readiness.py`
 - `tests/contract/test_pr_grind_check.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
@@ -59,8 +61,8 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 118 passed
-py_compile: hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-smoke passed
+contract tests: 134 passed
+py_compile: hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7
@@ -96,8 +98,9 @@ Hermes may use this repo for:
 2. Phase 0 status discovery;
 3. read-only route/gate/marker/lock reporting;
 4. preflight/postflight gates around Hermes-launched draft agents such as Codex (others temporarily deferred);
-5. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
-6. future v2 work to add agent adapters and commit/PR-capable equivalent gates.
+5. generating read-only finalization readiness / handoff envelopes for Busdriver/Claude or explicit operator finalization;
+6. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
+7. future v2 work to add agent adapters and commit/PR-capable equivalent gates.
 
 Hermes must not use this repo to bypass Busdriver gates or duplicate Busdriver's source-of-truth.
 
