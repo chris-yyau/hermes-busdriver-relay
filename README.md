@@ -38,7 +38,7 @@ scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate 
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
-scripts/hermes-busdriver-deliver           Fail-closed Delivery Mode dispatcher skeleton
+scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
@@ -139,7 +139,7 @@ scripts/hermes-busdriver-delivery-status \
 
 This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
-### Delivery dispatcher skeleton
+### Delivery dispatcher
 
 ```bash
 scripts/hermes-busdriver-deliver \
@@ -147,9 +147,17 @@ scripts/hermes-busdriver-deliver \
   --plugin-root /path/to/busdriver \
   --pr 123 \
   --pretty
+
+scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --mode execute \
+  --operation verify \
+  --verifier 'tests=pytest -q' \
+  --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. In this slice it is still plan/status only: it calls the read-only delivery-status probe, returns ordered delivery steps, and keeps commit, push, PR creation, merge, deploy, release, and publish disabled. `--mode execute` is intentionally unsupported and returns blocked rather than performing side effects.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
 
 ### PR-grind readiness check
 
