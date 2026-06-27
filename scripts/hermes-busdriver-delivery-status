@@ -302,11 +302,11 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
     elif repo.get("ok") and repo.get("dirty"):
         if not blockers:
             status = "draft_changes_need_busdriver_finalization"
-        next_action = "Run local verification plus current Busdriver litmus/pre-PR semantics before any commit or PR."
+            next_action = "Run local verification plus current Busdriver litmus/pre-PR semantics before any commit or PR."
     elif repo.get("ok"):
         if not blockers:
             status = "no_local_delivery_candidate"
-        next_action = "No local changes or PR were supplied; continue draft work or pass --pr for post-PR status."
+            next_action = "No local changes or PR were supplied; continue draft work or pass --pr for post-PR status."
 
     if blockers:
         status = "blocked"

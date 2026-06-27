@@ -160,3 +160,18 @@ def test_blocking_marker_blocks_delivery(tmp_path: Path):
     assert data["decision"]["status"] == "blocked"
     assert "blocking_busdriver_marker_present" in data["decision"]["blockers"]
     assert data["markers"]["blocking"][0]["name"] == "freeze.local"
+
+
+def test_blocking_marker_with_dirty_tree_keeps_blocker_next_action(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    marker = repo / ".claude" / "freeze.local"
+    marker.parent.mkdir()
+    marker.write_text("freeze\n")
+    (repo / "draft.txt").write_text("draft\n")
+
+    data = invoke(repo, plugin)
+
+    assert data["decision"]["status"] == "blocked"
+    assert "blocking_busdriver_marker_present" in data["decision"]["blockers"]
+    assert data["decision"]["next_action"] == "Resolve blocking status before delivery."
