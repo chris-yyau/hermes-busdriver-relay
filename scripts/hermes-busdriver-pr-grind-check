@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+"""Read-only Hermes-side PR-grind readiness checker.
+
+This command does not write Busdriver markers and does not merge. It collects the
+minimum deterministic signals Hermes can verify outside Claude Code: PR head,
+mergeability, relevant check status, and current-head review comments. It is a
+building block for Delivery Mode, not a replacement for Busdriver pr-grind.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+FAIL_STATUSES = {"fail", "failing", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
+PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
+NON_ACTIONABLE = re.compile(
+    r"^(lgtm|looks good|looks good to me|looks solid|nice work|great work|ship it|no issues?|no actionable findings?|approved|resolved|fixed|thanks|thank you|[✅✔️👍]+)[.!?]*$",
+    re.I,
+)
+PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
+BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabbit", re.I)
+BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
+
+
+def is_progress_comment(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    lowered = body.lower()
+    if "review limit reached" in lowered or "rate limited" in lowered:
+        return False
+    return "bot" in login and bool(PROGRESS_COMMENT.search(body))
+
+
+def is_ignorable_bot_summary(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    lowered = body.lower()
+    if "review limit reached" in lowered or "rate limited" in lowered:
+        return False
+    return "bot" in login and bool(BOT_SUMMARY_COMMENT.search(body))
+
+
+def is_ignorable_review_body(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    if "bot" not in login or "here are some automated review suggestions" not in body.lower():
+        return False
+    cleaned = body
+    cleaned = re.sub(r"###\s*💡\s*Codex Review", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"Here are some automated review suggestions for this pull request\.", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\*\*Reviewed commit:\*\*\s*`[0-9a-fA-F]+`", "", cleaned)
+    cleaned = re.sub(r"<details>\s*<summary>[^<]*About Codex in GitHub.*?</details>", "", cleaned, flags=re.I | re.S)
+    cleaned = re.sub(r"<br\s*/?>", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned == ""
+
+
+def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=check)
+
+
+def read_json_file(path: str | None, default: Any) -> Any:
+    if not path:
+        return default
+    return json.loads(Path(path).expanduser().read_text())
+
+
+def parse_paginated_json(stdout: str) -> list[dict[str, Any]]:
+    """Parse `gh api --paginate --slurp` output and flatten page arrays."""
+    if not stdout.strip():
+        return []
+    data = json.loads(stdout)
+    if isinstance(data, list) and all(isinstance(page, list) for page in data):
+        return [item for page in data for item in page if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def parse_paginated_check_runs(stdout: str) -> list[dict[str, Any]]:
+    if not stdout.strip():
+        return []
+    data = json.loads(stdout)
+    pages = data if isinstance(data, list) else [data]
+    rows: list[dict[str, Any]] = []
+    for page in pages:
+        if isinstance(page, dict):
+            for item in page.get("check_runs") or []:
+                if isinstance(item, dict):
+                    rows.append(item)
+    return rows
+
+
+def gh_json(cmd: list[str], repo: Path) -> Any:
+    cp = run(cmd, cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "gh_failed", "cmd": cmd, "stderr": cp.stderr.strip()}))
+    return json.loads(cp.stdout)
+
+
+def normalize_bot_login(login: str | None) -> str:
+    value = str(login or "")
+    return value[:-5] if value.endswith("[bot]") else value
+
+
+def ack_matches_head(value: str, head: str) -> bool:
+    token = str(value or "").split(":", 1)[0]
+    if len(token) < 8 or not head or re.search(r"[^0-9A-Fa-f]", token):
+        return False
+    return token == head[:8] or (len(token) > 8 and head.startswith(token))
+
+
+def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> set[str]:
+    if args.fixture_mode or not head:
+        return set()
+    plugin_candidates: list[Path] = []
+    if args.plugin_root:
+        plugin_candidates.append(Path(args.plugin_root).expanduser())
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            plugin_candidates.append(Path(os.environ[env_name]).expanduser())
+    plugin_candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
+    fetch = ack = None
+    for plugin in plugin_candidates:
+        candidate_fetch = plugin / "scripts" / "fetch-pr-state.sh"
+        candidate_ack = plugin / "scripts" / "ack-ledger.sh"
+        if candidate_fetch.exists() and candidate_ack.exists():
+            fetch, ack = candidate_fetch, candidate_ack
+            break
+    if fetch is None or ack is None:
+        return set()
+    script = (
+        "set -euo pipefail\n"
+        ". \"$1\" \"$2\"\n"
+        "shift 2\n"
+        "ack_script=$1\n"
+        "shift\n"
+        "for b in \"$@\"; do\n"
+        "  out=$(ACK_EMIT_TIER=1 bash \"$ack_script\" \"$b\" 2>/dev/null || echo stale)\n"
+        "  printf '%s=%s\\n' \"$b\" \"$out\"\n"
+        "done\n"
+    )
+    cp = run(["bash", "-c", script, "ack-ledger", str(fetch), str(args.pr), str(ack), "chatgpt-codex-connector", "coderabbitai", "cubic-dev-ai", "devin-ai-integration"], cwd=repo)
+    if cp.returncode != 0:
+        return set()
+    acked: set[str] = set()
+    for line in cp.stdout.splitlines():
+        if "=" not in line:
+            continue
+        login, value = line.split("=", 1)
+        if ack_matches_head(value, head):
+            acked.add(login)
+            acked.add(f"{login}[bot]")
+    return acked
+
+
+def owner_repo(repo: Path) -> str:
+    cp = run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=repo)
+    if cp.returncode == 0:
+        return json.loads(cp.stdout)["nameWithOwner"]
+    remote = run(["git", "remote", "get-url", "origin"], cwd=repo)
+    if remote.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "stderr": remote.stderr.strip()}))
+    url = remote.stdout.strip()
+    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
+    if not m:
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "remote": url}))
+    return m.group(1)
+
+
+def load_view(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
+    if args.view_json_file:
+        data = read_json_file(args.view_json_file, {})
+        if not isinstance(data, dict):
+            raise SystemExit(json.dumps({"ok": False, "error": "view_json_not_object"}))
+        return data
+    return gh_json([
+        "gh", "pr", "view", str(args.pr), "--json",
+        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefName,headRefName,commits",
+    ], repo)
+
+
+def load_checks(args: argparse.Namespace, repo: Path) -> str:
+    if args.checks_file:
+        return Path(args.checks_file).expanduser().read_text()
+    cp = run(["gh", "pr", "checks", str(args.pr)], cwd=repo)
+    # gh exits non-zero for failing checks; the tabular stdout/stderr is still useful.
+    text = (cp.stdout or "") + (cp.stderr or "")
+    if not text.strip() and cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "gh_pr_checks_failed", "stderr": cp.stderr.strip()}))
+    return text
+
+
+def load_review_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.review_comments_file:
+        data = read_json_file(args.review_comments_file, [])
+        return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
+    if cp.returncode != 0:
+        # Fail closed: if review comments are unavailable, surface a blocked state.
+        raise SystemExit(json.dumps({"ok": False, "error": "review_comments_unavailable", "stderr": cp.stderr.strip()}))
+    return parse_paginated_json(cp.stdout)
+
+
+def load_issue_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.issue_comments_file:
+        data = read_json_file(args.issue_comments_file, [])
+        return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/issues/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "issue_comments_unavailable", "stderr": cp.stderr.strip()}))
+    return parse_paginated_json(cp.stdout)
+
+
+def load_reviews(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
+    if args.reviews_file:
+        data = read_json_file(args.reviews_file, [])
+        return data if isinstance(data, list) else []
+    if args.fixture_mode:
+        return []
+    repo_name = owner_repo(repo)
+    cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/reviews", "--paginate", "--slurp"], cwd=repo)
+    if cp.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "reviews_unavailable", "stderr": cp.stderr.strip()}))
+    return parse_paginated_json(cp.stdout)
+
+
+def load_review_thread_comment_states(args: argparse.Namespace, repo: Path) -> tuple[set[int], set[int]]:
+    if args.resolved_review_comment_ids_file:
+        data = read_json_file(args.resolved_review_comment_ids_file, [])
+        resolved = {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
+        return resolved, set()
+    if args.fixture_mode:
+        return set(), set()
+    repo_name = owner_repo(repo)
+    owner, name = repo_name.split("/", 1)
+    query = """
+query($owner:String!, $name:String!, $number:Int!, $after:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          isResolved
+          isOutdated
+          comments(first:100) { pageInfo { hasNextPage } nodes { databaseId } }
+        }
+      }
+    }
+  }
+}
+"""
+    resolved: set[int] = set()
+    active: set[int] = set()
+    after = ""
+    while True:
+        cmd = ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={int(args.pr)}", "-f", f"query={query}"]
+        if after:
+            cmd.extend(["-f", f"after={after}"])
+        cp = run(cmd, cwd=repo)
+        if cp.returncode != 0:
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_unavailable", "stderr": cp.stderr.strip()}))
+        data = json.loads(cp.stdout or "{}")
+        threads = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
+        for node in threads.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            target = resolved if node.get("isResolved") is True else active
+            comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
+            if (comments_page.get("pageInfo") or {}).get("hasNextPage"):
+                raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
+            for comment in (comments_page.get("nodes") or []):
+                cid = comment.get("databaseId") if isinstance(comment, dict) else None
+                if isinstance(cid, int):
+                    target.add(cid)
+        page_info = threads.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        after = str(page_info.get("endCursor") or "")
+        if not after:
+            break
+    return resolved, active
+
+
+def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
+    candidates: list[Path] = []
+    if args.relevant_check_script:
+        if not args.fixture_mode:
+            raise SystemExit(json.dumps({"ok": False, "error": "explicit_relevant_check_script_requires_fixture_mode"}))
+        path = Path(args.relevant_check_script).expanduser()
+        if path.is_file():
+            return path.resolve()
+        return path
+    if args.fixture_mode:
+        return None
+    if args.plugin_root:
+        candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
+    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser() / "scripts" / "relevant-check-status.sh")
+    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver/scripts/relevant-check-status.sh")
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    return None
+
+
+def compile_advisory_pattern(advisory_pattern: str) -> re.Pattern[str]:
+    return re.compile(re.escape(advisory_pattern or "CodeScene"), re.I)
+
+
+def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+    advisory = compile_advisory_pattern(advisory_pattern)
+    kept: list[str] = []
+    failed_rows: list[str] = []
+    pending_rows: list[str] = []
+    for line in checks_text.splitlines():
+        if "\t" not in line:
+            continue
+        name, rest = line.split("\t", 1)
+        if advisory.search(name):
+            continue
+        kept.append(line)
+        status = rest.split("\t", 1)[0].strip().lower()
+        if status in FAIL_STATUSES:
+            failed_rows.append(line)
+        elif status in PENDING_STATUSES:
+            pending_rows.append(line)
+    return {"failed": len(failed_rows), "pending": len(pending_rows), "mode": "all", "kept": len(kept), "failed_rows": failed_rows, "pending_rows": pending_rows, "source": "fallback"}
+
+
+def head_changed_check_counts() -> dict[str, Any]:
+    return {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed", "relevance_unavailable": False}
+
+
+def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+    if script:
+        if not script.is_file():
+            return {
+                "failed": 0,
+                "pending": 0,
+                "mode": "unknown",
+                "kept": 0,
+                "failed_rows": [],
+                "pending_rows": [],
+                "source": str(script),
+                "relevance_unavailable": True,
+                "error": "script_not_found",
+            }
+        cp = subprocess.run(["bash", str(script), str(repo), advisory_pattern], input=checks_text, text=True, capture_output=True, cwd=str(repo))
+        if cp.returncode == 0 and cp.stdout.strip():
+            lines = cp.stdout.splitlines()
+            first = lines[0].split()
+            if len(first) == 4 and first[0].isdigit() and first[1].isdigit() and first[3].isdigit():
+                failed = int(first[0])
+                pending = int(first[1])
+                mode = first[2]
+                pending_rows = []
+                if pending:
+                    if not failed and len(lines) > 1:
+                        pending_rows = lines[1:]
+                    elif mode == "all":
+                        pending_rows = _pending_rows(checks_text, mode)
+                    if not pending_rows:
+                        pending_rows = ["<pending relevant check rows unavailable from relevant-check-status.sh>"]
+                return {
+                    "failed": failed,
+                    "pending": pending,
+                    "mode": mode,
+                    "kept": int(first[3]),
+                    "failed_rows": lines[1:] if failed else [],
+                    "pending_rows": pending_rows,
+                    "source": str(script),
+                    "relevance_unavailable": False,
+                }
+        return {
+            "failed": 0,
+            "pending": 0,
+            "mode": "unknown",
+            "kept": 0,
+            "failed_rows": [],
+            "pending_rows": [],
+            "source": str(script),
+            "relevance_unavailable": True,
+            "error": cp.stderr.strip() or cp.stdout.strip() or f"exit {cp.returncode}",
+        }
+    return fallback_check_counts(checks_text, advisory_pattern)
+
+
+def _pending_rows(checks_text: str, mode: str) -> list[str]:
+    rows: list[str] = []
+    for line in checks_text.splitlines():
+        if "\t" not in line:
+            continue
+        status = line.split("\t")[1].strip().lower()
+        if status in PENDING_STATUSES:
+            rows.append(line)
+    return rows
+
+
+
+
+def same_head(comment_sha: str | None, head: str) -> bool:
+    if not comment_sha or not head:
+        return False
+    if len(comment_sha) < 7 or len(head) < 7:
+        return False
+    return comment_sha == head or comment_sha.startswith(head[:8]) or head.startswith(comment_sha[:8])
+
+
+def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt.datetime | None, resolved_ids: set[int], active_ids: set[int], current_review_ids: set[int] | None, ignored_review_ids: set[int], superseded_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        thread = c.get("thread") if isinstance(c.get("thread"), dict) else {}
+        cid = c.get("id")
+        is_active_thread = isinstance(cid, int) and cid in active_ids
+        if (isinstance(cid, int) and cid in resolved_ids) or c.get("resolved") is True or c.get("is_resolved") is True or thread.get("resolved") is True:
+            continue
+        review_id = c.get("pull_request_review_id")
+        login = str((c.get("user") if isinstance(c.get("user"), dict) else {}).get("login") or "")
+        original_commit = str(c.get("original_commit_id") or c.get("commit_id") or "")
+        if is_active_thread and superseded_bot_logins and login in superseded_bot_logins and not same_head(original_commit, head):
+            continue
+        if isinstance(review_id, int) and review_id in ignored_review_ids:
+            continue
+        if not is_active_thread:
+            if isinstance(review_id, int) and current_review_ids is not None and review_id not in current_review_ids:
+                continue
+            if not same_head(str(c.get("commit_id") or ""), head):
+                continue
+        body = str(c.get("body") or "").strip()
+        if not body or NON_ACTIONABLE.search(body):
+            continue
+        user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        out.append({
+            "id": c.get("id"),
+            "user": user.get("login"),
+            "path": c.get("path"),
+            "line": c.get("line") or c.get("original_line"),
+            "commit_id": c.get("commit_id"),
+            "body_preview": body[:500],
+            "source": "review_comment",
+        })
+    return out
+
+
+def current_review_ids(reviews: list[dict[str, Any]], head: str) -> set[int]:
+    ids: set[int] = set()
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        state = str(r.get("state") or "").upper()
+        rid = r.get("id")
+        commit = str(r.get("commit_id") or "")
+        if state not in {"DISMISSED", "PENDING"} and isinstance(rid, int) and same_head(commit, head):
+            ids.add(rid)
+    return ids
+
+
+def ignored_review_ids(reviews: list[dict[str, Any]]) -> set[int]:
+    ids: set[int] = set()
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        state = str(r.get("state") or "").upper()
+        rid = r.get("id")
+        if state in {"DISMISSED", "PENDING"} and isinstance(rid, int):
+            ids.add(rid)
+    return ids
+
+
+def review_sort_key(review: dict[str, Any], index: int) -> tuple[str, int]:
+    for key in ("submitted_at", "submittedAt", "updated_at", "created_at"):
+        value = str(review.get(key) or "")
+        if value:
+            return value, index
+    return "", index
+
+
+def latest_reviews_by_user(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    latest: dict[str, tuple[tuple[str, int], dict[str, Any]]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for index, review in enumerate(reviews):
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state") or "").upper()
+        if state == "PENDING":
+            continue
+        user = review.get("user") if isinstance(review.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        if not login:
+            anonymous.append(review)
+            continue
+        key = review_sort_key(review, index)
+        current = latest.get(login)
+        if current is None or key >= current[0]:
+            latest[login] = (key, review)
+    return anonymous + [item[1] for item in latest.values()]
+
+
+def current_head_bot_review_logins(reviews: list[dict[str, Any]], head: str) -> set[str]:
+    logins: set[str] = set()
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        user = review.get("user") if isinstance(review.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        state = str(review.get("state") or "").upper()
+        if state not in {"DISMISSED", "PENDING"} and "bot" in login.lower() and same_head(str(review.get("commit_id") or ""), head):
+            logins.add(login)
+    return logins
+
+
+def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+    by_user: dict[str, list[tuple[tuple[str, int], dict[str, Any]]]] = {}
+    anonymous: list[tuple[tuple[str, int], dict[str, Any]]] = []
+    for index, r in enumerate(reviews):
+        if not isinstance(r, dict):
+            continue
+        user = r.get("user") if isinstance(r.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        item = (review_sort_key(r, index), r)
+        if login:
+            by_user.setdefault(login, []).append(item)
+        else:
+            anonymous.append(item)
+
+    out: list[dict[str, Any]] = []
+    groups = list(by_user.values()) + [[item] for item in anonymous]
+    for group in groups:
+        for _, r in sorted(group, key=lambda item: item[0], reverse=True):
+            state = str(r.get("state") or "").upper()
+            if state in {"DISMISSED", "PENDING"}:
+                continue
+            if r.get("commit_id") and not same_head(str(r.get("commit_id")), head):
+                continue
+            body = str(r.get("body") or "").strip()
+            user = r.get("user") if isinstance(r.get("user"), dict) else {}
+            if not body or NON_ACTIONABLE.search(body) or is_ignorable_review_body(body, user.get("login")):
+                if state == "APPROVED":
+                    break
+                continue
+            out.append({
+                "id": r.get("id"),
+                "user": user.get("login"),
+                "path": None,
+                "line": None,
+                "commit_id": r.get("commit_id"),
+                "body_preview": body[:500],
+                "source": "review",
+            })
+            break
+    return out
+
+
+def parse_github_time(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def latest_head_time(view: dict[str, Any]) -> dt.datetime | None:
+    commits = view.get("commits") if isinstance(view.get("commits"), list) else []
+    times = []
+    for c in commits:
+        if not isinstance(c, dict):
+            continue
+        for key in ("committedDate", "authoredDate", "pushedDate"):
+            parsed = parse_github_time(c.get(key))
+            if parsed:
+                times.append(parsed)
+                break
+    return max(times) if times else None
+
+
+def commit_json_time(data: dict[str, Any]) -> dt.datetime | None:
+    commit = data.get("commit") if isinstance(data.get("commit"), dict) else {}
+    committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+    author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+    return parse_github_time(committer.get("date")) or parse_github_time(author.get("date"))
+
+
+def check_runs_head_time(data: dict[str, Any]) -> dt.datetime | None:
+    runs = data.get("check_runs") if isinstance(data.get("check_runs"), list) else []
+    times: list[dt.datetime] = []
+    for run_item in runs:
+        if not isinstance(run_item, dict):
+            continue
+        parsed = parse_github_time(run_item.get("started_at") or run_item.get("created_at"))
+        if parsed:
+            times.append(parsed)
+    return min(times) if times else None
+
+
+def push_events_head_time(stdout: str, head: str, branch: str | None) -> dt.datetime | None:
+    rows = parse_paginated_json(stdout)
+    ref = f"refs/heads/{branch}" if branch else ""
+    times: list[dt.datetime] = []
+    for event in rows:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if event.get("type") != "PushEvent" or payload.get("head") != head:
+            continue
+        if ref and payload.get("ref") != ref:
+            continue
+        parsed = parse_github_time(event.get("created_at"))
+        if parsed:
+            times.append(parsed)
+    return max(times) if times else None
+
+
+def select_head_time(commit_time: dt.datetime | None, check_time: dt.datetime | None, fallback_time: dt.datetime | None, push_time: dt.datetime | None = None) -> dt.datetime | None:
+    # Issue-comment freshness must be anchored to the server-observed PR-head push.
+    # Commit dates can be backdated and check runs can start late; without a push
+    # event, keep the cutoff unbound so comments remain conservatively actionable.
+    return push_time
+
+
+def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
+    if args.fixture_mode or args.view_json_file or not head:
+        return latest_head_time(view)
+    repo_name = owner_repo(repo)
+    push_cp = run(["gh", "api", "--paginate", "--slurp", f"repos/{repo_name}/events?per_page=100"], cwd=repo)
+    push_time = None
+    if push_cp.returncode == 0:
+        try:
+            push_time = push_events_head_time(push_cp.stdout, head, str(view.get("headRefName") or ""))
+        except json.JSONDecodeError:
+            push_time = None
+    return select_head_time(None, None, latest_head_time(view), push_time=push_time)
+
+
+def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.datetime | None, acked_bot_logins: set[str] | None = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        comment_time = parse_github_time(c.get("updated_at") or c.get("created_at"))
+        if head_time and comment_time and comment_time < head_time:
+            continue
+        body = str(c.get("body") or "").strip()
+        user = c.get("user") if isinstance(c.get("user"), dict) else {}
+        login = str(user.get("login") or "")
+        if acked_bot_logins and (login in acked_bot_logins or normalize_bot_login(login) in acked_bot_logins):
+            continue
+        if not body or NON_ACTIONABLE.search(body) or is_ignorable_bot_summary(body, user.get("login")):
+            continue
+        if is_progress_comment(body, user.get("login")):
+            out.append({
+                "id": c.get("id"),
+                "user": user.get("login"),
+                "path": None,
+                "line": None,
+                "commit_id": None,
+                "body_preview": body[:500],
+                "source": "bot_progress",
+            })
+            continue
+        out.append({
+            "id": c.get("id"),
+            "user": user.get("login"),
+            "path": None,
+            "line": None,
+            "commit_id": None,
+            "body_preview": body[:500],
+            "source": "issue_comment_after_head" if head_time else "issue_comment_unbound",
+        })
+    return out
+
+
+def collect_actionable_feedback(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> list[dict[str, Any]]:
+    resolved_review_comment_ids, active_review_comment_ids = load_review_thread_comment_states(args, repo)
+    reviews = load_reviews(args, repo)
+    parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
+    review_comments = load_review_comments(args, repo)
+    head_time = load_head_time(args, repo, view, head)
+    acked_bot_logins = load_acked_bot_logins(args, repo, head)
+    return (
+        actionable_comments(review_comments, head, head_time, resolved_review_comment_ids, active_review_comment_ids, parent_review_ids, ignored_review_ids(reviews), current_head_bot_review_logins(reviews, head))
+        + actionable_reviews(reviews, head)
+        + actionable_issue_comments(load_issue_comments(args, repo), head_time, acked_bot_logins)
+    )
+
+
+def head_changed_result(args: argparse.Namespace, view: dict[str, Any], fresh_head: str, old_head: str, checks: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "ok": True,
+        "pr": int(view.get("number") or args.pr),
+        "url": view.get("url"),
+        "head": fresh_head,
+        "base": view.get("baseRefName"),
+        "status": "blocked",
+        "clean": False,
+        "blockers": [f"head_changed_during_collection:{old_head[:12]}->{fresh_head[:12]}"],
+        "checks": checks,
+        "actionable_comments": [],
+        "decision": {"merge_allowed": False, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
+    }
+
+
+def validate_pr_number(value: str) -> str:
+    if not re.fullmatch(r"[1-9][0-9]*", str(value or "")):
+        raise SystemExit(json.dumps({"ok": False, "error": "invalid_pr_number", "pr": value}))
+    return str(value)
+
+
+def classify(view: dict[str, Any], checks: dict[str, Any], comments: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    blockers: list[str] = []
+    state = view.get("state")
+    mergeable = view.get("mergeable")
+    if checks.get("relevance_unavailable"):
+        blockers.append("relevant_check_status_unavailable")
+    if state and state != "OPEN":
+        blockers.append(f"state={state}")
+    if view.get("isDraft") is True:
+        blockers.append("isDraft=true")
+    if mergeable and mergeable not in {"MERGEABLE", "UNKNOWN"}:
+        blockers.append(f"mergeable={mergeable}")
+    merge_state = view.get("mergeStateStatus")
+    if merge_state and merge_state not in {"CLEAN", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"}:
+        blockers.append(f"mergeStateStatus={merge_state}")
+    review_decision = view.get("reviewDecision")
+    if review_decision in {"CHANGES_REQUESTED", "REVIEW_REQUIRED"}:
+        blockers.append(f"reviewDecision={review_decision}")
+    if blockers:
+        return "blocked", blockers
+    if checks["failed"] > 0:
+        return "needs_fix", blockers
+    if checks["pending"] > 0 or mergeable == "UNKNOWN" or merge_state in {"UNKNOWN", "UNSTABLE"}:
+        return "wait", blockers
+    if comments:
+        if all(c.get("source") == "bot_progress" for c in comments):
+            return "wait", blockers
+        return "needs_fix", blockers
+    if checks["kept"] == 0:
+        return "blocked", ["no_relevant_checks"]
+    return "clean", blockers
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--repo", default=".")
+    ap.add_argument("--pr", required=True)
+    ap.add_argument("--plugin-root")
+    ap.add_argument("--checks-file")
+    ap.add_argument("--review-comments-file")
+    ap.add_argument("--issue-comments-file")
+    ap.add_argument("--reviews-file")
+    ap.add_argument("--resolved-review-comment-ids-file")
+    ap.add_argument("--view-json-file")
+    ap.add_argument("--relevant-check-script")
+    ap.add_argument("--advisory-pattern", default="CodeScene")
+    ap.add_argument("--fixture-mode", action="store_true", help="Allow omitted feedback surfaces for offline contract fixtures only")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+    args.pr = validate_pr_number(args.pr)
+
+    repo = Path(args.repo).expanduser().resolve()
+    view = load_view(args, repo)
+    head = str(view.get("headRefOid") or "")
+    script = resolve_relevant_script(args)
+    live_mode = not args.fixture_mode and not args.view_json_file
+    if live_mode:
+        fresh_view = load_view(args, repo)
+        fresh_head = str(fresh_view.get("headRefOid") or "")
+        if fresh_head and fresh_head != head:
+            checks = head_changed_check_counts()
+            print(json.dumps(head_changed_result(args, fresh_view, fresh_head, head, checks), indent=2 if args.pretty else None, sort_keys=True))
+            return 0
+        if fresh_head and fresh_head == head:
+            view = fresh_view
+
+    checks_text = load_checks(args, repo)
+    checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+    comments = collect_actionable_feedback(args, repo, view, head)
+
+    if live_mode:
+        final_view = load_view(args, repo)
+        final_head = str(final_view.get("headRefOid") or "")
+        if final_head and final_head != head:
+            checks = head_changed_check_counts()
+            print(json.dumps(head_changed_result(args, final_view, final_head, head, checks), indent=2 if args.pretty else None, sort_keys=True))
+            return 0
+        if final_head and final_head == head:
+            view = final_view
+            checks_text = load_checks(args, repo)
+            checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+            comments = collect_actionable_feedback(args, repo, view, head)
+            post_feedback_view = load_view(args, repo)
+            post_feedback_head = str(post_feedback_view.get("headRefOid") or "")
+            if post_feedback_head and post_feedback_head != head:
+                checks = head_changed_check_counts()
+                print(json.dumps(head_changed_result(args, post_feedback_view, post_feedback_head, head, checks), indent=2 if args.pretty else None, sort_keys=True))
+                return 0
+            if post_feedback_head and post_feedback_head == head:
+                view = post_feedback_view
+    status, blockers = classify(view, checks, comments)
+    result = {
+        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "ok": True,
+        "pr": int(view.get("number") or args.pr),
+        "url": view.get("url"),
+        "head": head,
+        "base": view.get("baseRefName"),
+        "status": status,
+        "clean": status == "clean",
+        "blockers": blockers,
+        "checks": checks,
+        "actionable_comments": comments,
+        "decision": {
+            "merge_allowed": status == "clean",
+            "needs_fix": status == "needs_fix",
+            "wait": status == "wait",
+            "blocked": status == "blocked",
+            "reason": "latest PR HEAD clean" if status == "clean" else status,
+        },
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

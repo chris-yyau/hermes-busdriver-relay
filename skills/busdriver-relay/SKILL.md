@@ -222,6 +222,8 @@ Known seams:
 - `scripts/hermes-busdriver-gate`: Hermes-owned equivalent preflight/postflight gate runner for draft-mode agents; normal pass allows `agent_implementation_draft_allowed=true` while keeping commit/push/PR/merge false.
 - `scripts/hermes-busdriver-agent-draft`: Launcher that acquires the Hermes lock, runs gate preflight, executes **Codex** (active surface) or custom/noop test commands in draft mode under a best-effort PATH guard, runs postflight, and returns `needs_busdriver_review`.
 - `scripts/hermes-busdriver-agent-smoke`: Optional real-agent adapter smoke; creates a throwaway repo and may consume provider quota/tokens. Codex has been verified with it; other agents are deferred.
+- `scripts/hermes-busdriver-pr-grind-check`: Read-only Delivery Mode helper that checks latest PR HEAD mergeability, relevant checks via Busdriver `scripts/relevant-check-status.sh` when available, and current-head review comments. It returns `clean` / `wait` / `needs_fix` / `blocked` and never writes Busdriver markers or merges.
+- `references/pr-grind-delivery-discipline.md`: captured user correction for end-to-end Hermes delivery expectations and exact Busdriver pr-grind latest-head loop semantics.
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence

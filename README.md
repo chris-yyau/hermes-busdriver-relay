@@ -28,6 +28,7 @@ ADRs/                                      Lightweight architecture decisions
 docs/CURRENT_STATUS.md                     Current completion/verification state
 docs/hermes-busdriver-integration-contract-v2.md
 docs/settling-checks-v1.md                 H1-H13 v1 status map
+docs/settling-checks-v2.md                 H1-H13 v2 status map
 skills/busdriver-relay/SKILL.md            Hermes skill source
 skills/busdriver-relay/references/         Skill reference notes
 scripts/hermes-busdriver-status            Read-only status probe
@@ -36,6 +37,7 @@ scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
+scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
 ```
@@ -122,6 +124,18 @@ scripts/hermes-busdriver-agent-smoke \
 ```
 
 This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+
+### PR-grind readiness check
+
+```bash
+scripts/hermes-busdriver-pr-grind-check \
+  --repo /path/to/repo \
+  --pr 123 \
+  --plugin-root /path/to/busdriver \
+  --pretty
+```
+
+This is a read-only Delivery Mode helper. It checks the latest PR HEAD, mergeability, relevant `gh pr checks` output using Busdriver `scripts/relevant-check-status.sh` when available, and current-head review comments. It returns `clean`, `wait`, `needs_fix`, or `blocked`; it does **not** write `pr-grind-clean.local`, create commits, push, merge, or replace Busdriver's dispatcher-owned `pr-grind` loop.
 
 ### Safe smoke checks
 

@@ -406,7 +406,8 @@ Allowed now, after this contract:
 1. maintain the Hermes `busdriver-relay` skill from v2 sections 0–20;
 2. implement `hermes-busdriver-status --json` read-only;
 3. implement Hermes-owned single-flight lock/status scaffolding;
-4. run H1–H13 as smoke/contract tests.
+4. implement `hermes-busdriver-pr-grind-check` as a read-only Delivery Mode readiness checker that reports `clean` / `wait` / `needs_fix` / `blocked` for the latest PR HEAD;
+5. run H1–H13 as smoke/contract tests.
 
 Not allowed yet:
 
