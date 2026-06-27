@@ -184,6 +184,10 @@ def main() -> int:
     for index in range(1, args.max_polls + 1):
         now = time.monotonic()
         elapsed = now - started
+        if index > 1 and elapsed >= args.max_wait_seconds:
+            envelope = result_envelope(args, False, "wait", "max_wait_exhausted", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
         data, meta = run_check(args, fixture_index)
         fixture_index += 1
         if data is None:
@@ -211,6 +215,12 @@ def main() -> int:
             return 1
         if status == "blocked" and not is_head_changed(data):
             envelope = result_envelope(args, False, "blocked", "pr_grind_blocked", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+
+        if status != "wait" and not (status == "blocked" and is_head_changed(data)):
+            policy_gaps.append(f"unrecognized_status:{status}")
+            envelope = result_envelope(args, False, "blocked", "policy_gap", iterations, policy_gaps, latest, started)
             print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
             return 1
 

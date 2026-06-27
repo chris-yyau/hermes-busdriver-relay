@@ -69,6 +69,9 @@ def assert_no_finalization_authority(decision: dict) -> None:
         "publish_allowed",
     ]:
         assert decision[key] is False
+    assert decision["fixing_allowed"] is False
+    assert decision["fix_rounds_attempted"] == 0
+    assert decision["marker_write_allowed"] is False
 
 
 def test_clean_result_emits_read_only_envelope_without_merge_authority(tmp_path: Path):
@@ -141,6 +144,18 @@ def test_wait_exhaustion_fails_closed(tmp_path: Path):
     assert_no_finalization_authority(data["decision"])
 
 
+def test_unrecognized_checker_status_is_policy_gap(tmp_path: Path):
+    cp, data = run_loop(tmp_path, fixture(tmp_path, "mystery.json", "mystery"))
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["status"] == "blocked"
+    assert data["decision"]["reason"] == "policy_gap"
+    assert data["policy_gaps"] == ["unrecognized_status:mystery"]
+    assert len(data["iterations"]) == 1
+    assert_no_finalization_authority(data["decision"])
+
+
 def test_nonzero_fix_round_request_is_rejected_before_loop(tmp_path: Path):
     cp = subprocess.run(
         [
@@ -161,4 +176,5 @@ def test_nonzero_fix_round_request_is_rejected_before_loop(tmp_path: Path):
     )
 
     assert cp.returncode != 0
-    assert "fix_rounds_not_supported_in_read_only_loop" in (cp.stdout + cp.stderr)
+    data = json.loads(cp.stderr.strip())
+    assert data == {"ok": False, "error": "fix_rounds_not_supported_in_read_only_loop"}
