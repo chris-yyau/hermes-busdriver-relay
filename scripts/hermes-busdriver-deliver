@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
@@ -17,6 +19,7 @@ DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 SCHEMA = "hermes-busdriver-deliver/v0"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
+VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
 BLOCKED_FLAGS = {
     "finalization_allowed": False,
     "commit_allowed": False,
@@ -83,7 +86,7 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "error": "delivery_status_invalid_json",
             "returncode": cp.returncode,
             "stdout_tail": tail(cp.stdout),
-            "stderr": cp.stderr.strip(),
+            "stderr": tail(cp.stderr.strip()),
             "parse_error": str(e),
         }, cp.returncode
     if not isinstance(data, dict):
@@ -116,18 +119,38 @@ def pr_summary(pr: str | None, delivery_status: dict[str, Any]) -> dict[str, Any
 
 
 def parse_verifier(item: str, index: int) -> tuple[str, str]:
-    if "=" in item:
+    if VERIFIER_LABEL.match(item):
         name, command = item.split("=", 1)
-        return name.strip() or f"verifier_{index}", command.strip()
-    return f"verifier_{index}", item.strip()
+        command = command.strip()
+        if not command:
+            raise ValueError("empty verifier command")
+        return name.strip(), command
+    command = item.strip()
+    if not command:
+        raise ValueError("empty verifier command")
+    return f"verifier_{index}", command
 
 
 def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for index, item in enumerate(verifiers, start=1):
-        name, command = parse_verifier(item, index)
         try:
-            cp = subprocess.run(command, cwd=str(repo), shell=True, text=True, capture_output=True, check=False, timeout=timeout)
+            name, command = parse_verifier(item, index)
+            argv = shlex.split(command)
+            if not argv:
+                raise ValueError("empty verifier command")
+        except ValueError as e:
+            results.append({
+                "name": f"verifier_{index}",
+                "command": item,
+                "returncode": 2,
+                "ok": False,
+                "stdout_tail": "",
+                "stderr_tail": str(e),
+            })
+            continue
+        try:
+            cp = subprocess.run(argv, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=timeout)
             results.append({
                 "name": name,
                 "command": command,
@@ -156,9 +179,9 @@ def artifact_path() -> Path:
 
 def write_artifact(result: dict[str, Any]) -> None:
     path = artifact_path()
-    result["run_artifact_path"] = str(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    result["run_artifact_path"] = str(path)
 
 
 def steps_for(reason: str | None) -> list[dict[str, str]]:
@@ -193,6 +216,15 @@ def steps_for(reason: str | None) -> list[dict[str, str]]:
     if reason == "verifier_failed":
         return [
             {"name": "verify", "status": "blocked", "reason": "verifier_failed"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "artifact_write_failed":
+        return [
+            {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"},
             {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
@@ -276,6 +308,7 @@ def main() -> int:
             result["ok"] = False
             result["run_artifact_error"] = str(e)
             result["decision"] = decision("blocked", "artifact_write_failed")
+            result["steps"] = steps_for("artifact_write_failed")
             returncode = 1
 
     print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))

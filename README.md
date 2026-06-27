@@ -157,7 +157,7 @@ scripts/hermes-busdriver-deliver \
   --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo, captures bounded output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
 
 ### PR-grind readiness check
 

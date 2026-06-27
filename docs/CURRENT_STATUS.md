@@ -59,7 +59,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 114 passed
+contract tests: 118 passed
 py_compile: hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.0

@@ -144,6 +144,23 @@ def test_delivery_status_non_object_json_fails_closed(monkeypatch):
     assert data["returncode"] == 0
 
 
+def test_delivery_status_invalid_json_stderr_is_bounded(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+
+    class CP:
+        stdout = "not-json"
+        stderr = "e" * 5005
+        returncode = 0
+
+    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
+
+    assert rc == 0
+    assert data["ok"] is False
+    assert data["error"] == "delivery_status_invalid_json"
+    assert len(data["stderr"]) <= 4000
+
+
 def test_delivery_status_timeout_fails_closed(monkeypatch):
     ns = runpy.run_path(str(DELIVER))
 
@@ -199,6 +216,9 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     plugin = fake_busdriver(tmp_path / "busdriver")
     artifact_dir = tmp_path / "delivery-runs"
 
+    verifier_code = 'import sys; print("ok"); sys.stderr.write("err\\n")'
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(verifier_code)}"
+
     cp, data = invoke(
         repo,
         plugin,
@@ -207,7 +227,7 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
         "--operation",
         "verify",
         "--verifier",
-        "smoke=printf 'ok\\n'; printf 'err\\n' >&2",
+        f"smoke={verifier_cmd}",
         artifact_dir=artifact_dir,
     )
 
@@ -219,7 +239,7 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     assert data["verifiers"] == [
         {
             "name": "smoke",
-            "command": "printf 'ok\\n'; printf 'err\\n' >&2",
+            "command": verifier_cmd,
             "returncode": 0,
             "ok": True,
             "stdout_tail": "ok\n",
@@ -263,6 +283,85 @@ def test_failing_verifier_fails_closed_with_bounded_tails(tmp_path: Path):
     assert len(data["verifiers"][0]["stdout_tail"]) <= 4000
     assert len(data["verifiers"][0]["stderr_tail"]) <= 4000
     assert Path(data["run_artifact_path"]).exists()
+
+
+def test_verifier_command_with_equals_not_at_label_prefix_is_not_split(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    code = "value='foo=bar'; print(value)"
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        verifier_cmd,
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 0
+    assert data["ok"] is True
+    assert data["verifiers"][0]["name"] == "verifier_1"
+    assert data["verifiers"][0]["command"] == verifier_cmd
+    assert data["verifiers"][0]["stdout_tail"] == "foo=bar\n"
+    assert_finalization_blocked(data["decision"])
+
+
+def test_empty_verifier_command_fails_closed(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        "empty=",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["reason"] == "verifier_failed"
+    assert data["verifiers"][0]["ok"] is False
+    assert data["verifiers"][0]["stderr_tail"] == "empty verifier command"
+    assert Path(data["run_artifact_path"]).exists()
+    assert_finalization_blocked(data["decision"])
+
+
+def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir_file = tmp_path / "not-a-directory"
+    artifact_dir_file.write_text("occupied")
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        f"ok={shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}",
+        artifact_dir=artifact_dir_file,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["run_artifact_path"] is None
+    assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in ["finalization_allowed", "commit_allowed", "push_allowed", "pr_allowed", "merge_allowed", "deploy_allowed", "release_allowed", "publish_allowed"]}}
+    assert data["steps"][0] == {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"}
+    assert_finalization_blocked(data["decision"])
 
 
 def test_unsupported_execute_operation_fails_closed_without_verifier(tmp_path: Path):
