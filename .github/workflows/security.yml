@@ -92,22 +92,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Check for compliance job
-        id: check
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: |
-          # Only skip on push — compliance job in tests.yml is push-only,
-          # so PRs must always run trivy here for coverage. Match a real trivy
-          # VULN scanner line specifically (not any 'trivy-action' mention,
-          # which a license-only scan or a comment would also satisfy and would
-          # wrongly disable vuln coverage).
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]] && grep -qE '^[[:space:]]*scanners:[[:space:]]*vuln' .github/workflows/tests.yml 2>/dev/null; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Trivy already covered by compliance job — skipping"
-          fi
+      # Always scan here on both PR and push. (tests.yml's compliance job also
+      # runs trivy on push, but only after `test` passes — so relying on it
+      # would leave a gap when the build is red. A second ~15s scan on a
+      # no-dependency repo is cheaper than that gap and the skip-probe it
+      # required.)
       - name: Scan dependencies
-        if: steps.check.outputs.skip != 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs

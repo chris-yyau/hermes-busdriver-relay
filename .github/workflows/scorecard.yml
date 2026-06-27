@@ -24,6 +24,7 @@ jobs:
       issues: read
       checks: read
       pull-requests: read
+      security-events: write  # upload SARIF to the code-scanning dashboard
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
@@ -45,3 +46,7 @@ jobs:
           name: scorecard-results
           path: results.sarif
           retention-days: 14
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@c35d1b164463ee62a100735382aaaa525c5d3496 # codeql-bundle-v2.25.6
+        with:
+          sarif_file: results.sarif

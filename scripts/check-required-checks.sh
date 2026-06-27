@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
 # Required-check drift detector. Verifies .github/required-checks.lock against:
-#   (a) workflow source   — each required entry maps to its declared job
+#   (a) workflow source   — each required entry maps to its declared job, and
+#                           the required name is the job's own key or `name:`
+#                           (scoped to the job block — not any name: in the file)
 #   (b) branch protection — lock's required-name set == server's contexts set
 #
 # (c) reporter-app verification and (d) global name-uniqueness are omitted in
 # this lean version. (c) adds little signal for an all-`github-actions` lock;
 # (d) needs a real YAML parser to distinguish job names from `on:`/step keys
-# (no stdlib YAML here) — with 5 workflows and distinct names it's review-
-# enforced. ponytail: add (c)/(d) (via a YAML lib) if this repo grows external
-# required checks or many workflows.
+# (no stdlib YAML here). ponytail: add (c)/(d) (via a YAML lib) if this repo
+# grows external required checks or many workflows.
 #
 # Exit: 0 = clean, 1 = drift, 2 = config error.
 #
@@ -38,18 +39,41 @@ jq empty "$LOCK" 2>/dev/null || { echo "config error: $LOCK is not valid JSON" >
 
 drift=0
 
+# For a `  <job>:` key (2-space indent under top-level `jobs:`), echo whether
+# the job exists ("EXISTS"/"") and, on its own line, the value of the job's
+# DIRECT `name:` child (the field at exactly base+2 indent — NOT a nested
+# step `- name:` or a `with: { name: }`). Output: line 1 = "1" if job found
+# else "0"; line 2 = the job's own name value (empty if none). Comparison of
+# the name is done as an exact string by the caller (no regex), so a required
+# check name containing regex metacharacters is handled literally.
+job_name() {
+  awk -v job="$1" '
+    function indent(s,   i){ i=match(s, /[^ ]/); return (i==0)? 9999 : i-1 }
+    $0 ~ "^  " job ":[[:space:]]*$" { found=1; inblk=1; base=indent($0); next }
+    inblk && $0 !~ /^[[:space:]]*$/ && indent($0) <= base { inblk=0 }
+    inblk && !gotname && indent($0)==base+2 && $0 ~ /^[[:space:]]+name:[[:space:]]/ {
+      v=$0; sub(/^[[:space:]]+name:[[:space:]]*/,"",v); sub(/[[:space:]]+$/,"",v)
+      sub(/^"/,"",v); sub(/"$/,"",v); sub(/^'\''/,"",v); sub(/'\''$/,"",v)
+      name=v; gotname=1
+    }
+    END { print (found?1:0); print name }
+  ' "$2"
+}
+
 # ── (a) lock vs workflow source ──
 while IFS=$'\t' read -r name job wf; do
   [[ -n "$wf" ]] || continue
   if [[ ! -f "$wf" ]]; then
     echo "DRIFT (a): $wf missing for required check '$name'"; drift=1; continue
   fi
-  # job key must exist; lock name must appear as the job key or a name: value.
-  if ! grep -qE "^[[:space:]]+${job}:[[:space:]]*$" "$wf"; then
+  { IFS= read -r found; IFS= read -r actual_name; } < <(job_name "$job" "$wf" || true)
+  if [[ "$found" != "1" ]]; then
     echo "DRIFT (a): job key '$job' not found in $wf (required '$name')"; drift=1; continue
   fi
-  if [[ "$name" != "$job" ]] && ! grep -qF "name: $name" "$wf"; then
-    echo "DRIFT (a): required name '$name' not declared in $wf (job '$job')"; drift=1
+  # The effective check name is the job's own `name:` if present, else the job
+  # key. Exact string compare (no regex) against the job's DIRECT name field.
+  if [[ "$name" != "$job" && "$name" != "$actual_name" ]]; then
+    echo "DRIFT (a): required name '$name' not declared as job '$job' in $wf (job name='${actual_name:-<none>}')"; drift=1
   fi
 done < <(jq -r '.required[] | select(.source_app=="github-actions") | [.name, .job, .workflow] | @tsv' "$LOCK" || true)
 
@@ -66,22 +90,42 @@ if [[ "$LOCAL_ONLY" -eq 0 ]]; then
       echo "skip (b): could not resolve owner/repo"
     else
       DEFAULT_BRANCH=$(gh api "repos/$OWNER/$REPO" --jq .default_branch 2>/dev/null) || DEFAULT_BRANCH=""
-      # Raw fetch — a missing protection returns a {"message":...} error object,
-      # not an array. Only treat an actual array as server contexts.
-      raw=$(gh api "repos/$OWNER/$REPO/branches/$DEFAULT_BRANCH/protection/required_status_checks" 2>/dev/null) || raw=""
-      have=$(printf '%s' "$raw" | jq -c 'if type=="object" and (.contexts|type=="array") then (.contexts|sort) else empty end' 2>/dev/null) || have=""
-      if [[ -z "$have" ]]; then
-        echo "skip (b): no branch protection on $DEFAULT_BRANCH yet"
+      if [[ -z "$DEFAULT_BRANCH" ]]; then
+        # Fail-CLOSED: an empty default branch means the repo lookup failed
+        # (auth/network/API). Do NOT proceed — a query with an empty branch
+        # would 404 and be misread below as "no protection". Flag drift.
+        echo "DRIFT (b): could not resolve default branch (gh api error)"; drift=1
       else
-        want=$(jq -c '[.required[].name] | sort' "$LOCK")
-        if [[ "$want" != "$have" ]]; then
-          echo "DRIFT (b): lock required != branch-protection contexts"
-          echo "  lock:   $want"
-          echo "  server: $have"
-          drift=1
+      err=$(mktemp)
+      raw=$(gh api "repos/$OWNER/$REPO/branches/$DEFAULT_BRANCH/protection/required_status_checks" 2>"$err"); rc=$?
+      if [[ $rc -ne 0 ]]; then
+        # Fail-CLOSED: only a genuine 404 (no protection / no required checks)
+        # is a legitimate skip. Auth, network, or other API errors must NOT be
+        # silently treated as "clean" — flag them as drift.
+        if grep -qiE 'HTTP 404|Not Found' "$err"; then
+          echo "skip (b): no branch protection / required checks on $DEFAULT_BRANCH yet"
         else
-          echo "(b) branch-protection contexts match lock"
+          echo "DRIFT (b): gh api error querying branch protection: $( { tr -d '\r' < "$err" | head -c 200; } || true)"
+          drift=1
         fi
+        rm -f "$err"
+      else
+        rm -f "$err"
+        have=$(printf '%s' "$raw" | jq -c 'if (.contexts|type=="array") then (.contexts|sort) else empty end' 2>/dev/null) || have=""
+        if [[ -z "$have" ]]; then
+          echo "DRIFT (b): branch-protection response had no contexts array"; drift=1
+        else
+          want=$(jq -c '[.required[].name] | sort' "$LOCK")
+          if [[ "$want" != "$have" ]]; then
+            echo "DRIFT (b): lock required != branch-protection contexts"
+            echo "  lock:   $want"
+            echo "  server: $have"
+            drift=1
+          else
+            echo "(b) branch-protection contexts match lock"
+          fi
+        fi
+      fi
       fi
     fi
   fi
