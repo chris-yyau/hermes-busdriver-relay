@@ -29,6 +29,7 @@ PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progr
 BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabbit", re.I)
 BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
 CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files\b", re.I)
+DEVIN_REVIEW_SUMMARY = re.compile(r"\*\*Devin Review\*\*\s+found\s+\d+\s+new potential issue", re.I)
 
 
 def is_cubic_no_issues_review(body: str, user_login: str | None) -> bool:
@@ -54,6 +55,8 @@ def is_ignorable_bot_summary(body: str, user_login: str | None) -> bool:
 
 def is_ignorable_review_body(body: str, user_login: str | None) -> bool:
     login = (user_login or "").lower()
+    if "devin" in login and DEVIN_REVIEW_SUMMARY.search(body):
+        return True
     if "bot" not in login or "here are some automated review suggestions" not in body.lower():
         return False
     cleaned = body
@@ -285,7 +288,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
             if node.get("isResolved") is True:
                 target = resolved
             elif node.get("isOutdated") is True:
-                target = None
+                target = resolved
             else:
                 target = active
             comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
@@ -293,7 +296,7 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
                 raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
             for comment in (comments_page.get("nodes") or []):
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
-                if isinstance(cid, int) and target is not None:
+                if isinstance(cid, int):
                     target.add(cid)
         page_info = threads.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):

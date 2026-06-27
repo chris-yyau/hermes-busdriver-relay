@@ -946,7 +946,7 @@ def test_unresolved_outdated_thread_comment_is_not_actionable_when_not_live():
 
 
 
-def test_unresolved_outdated_thread_id_is_neither_active_nor_resolved(tmp_path: Path):
+def test_unresolved_outdated_thread_id_is_ignored_like_resolved(tmp_path: Path):
     ns = runpy.run_path(str(CHECK))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -972,8 +972,15 @@ def test_unresolved_outdated_thread_id_is_neither_active_nor_resolved(tmp_path: 
     ns["load_review_thread_comment_states"].__globals__["run"] = fake_run
     ns["load_review_thread_comment_states"].__globals__["owner_repo"] = lambda _repo: "owner/name"
     resolved, active = ns["load_review_thread_comment_states"](type("Args", (), {"resolved_review_comment_ids_file": None, "fixture_mode": False, "pr": "7"})(), repo)
-    assert resolved == set()
+    assert resolved == {123}
     assert active == set()
+
+
+
+def test_devin_review_summary_without_live_inline_issue_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**Devin Review** found 1 new potential issue.\n\n<!-- devin-review-badge-begin -->", "user": {"login": "devin-ai-integration[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
 
 
 
