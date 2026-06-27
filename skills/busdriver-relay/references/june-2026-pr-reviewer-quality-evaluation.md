@@ -2,7 +2,7 @@
 
 ## Scope
 
-- Window: 2026-06-01 through 2026-06-30.
+- Window: 2026-06-01 through 2026-06-30 (requested reporting period preserved from the supplied evaluation report; this document records that report rather than recalculating live metrics at save time).
 - Owners: `chris-yyau` and `Dive-And-Dev`.
 - Total PRs reviewed: 218 (`chris-yyau`: 77, `Dive-And-Dev`: 141).
 - Reviewers evaluated: CodeRabbit, cubic, Codex, Cursor, Devin.

@@ -570,6 +570,29 @@ def test_resolved_current_head_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_cubic_no_issues_review_body_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**No issues found** across 5 files\n\n<sub>[Re-trigger cubic](https://www.cubic.dev/action/re-review/pr/owner/repo/5)</sub>", "user": {"login": "cubic-dev-ai[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
 def test_generic_bot_review_summary_without_inline_comment_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"

@@ -28,6 +28,12 @@ NON_ACTIONABLE = re.compile(
 PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
 BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabbit", re.I)
 BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
+CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files\b", re.I)
+
+
+def is_cubic_no_issues_review(body: str, user_login: str | None) -> bool:
+    login = (user_login or "").lower()
+    return "cubic" in login and bool(CUBIC_NO_ISSUES_REVIEW.search(body))
 
 
 def is_progress_comment(body: str, user_login: str | None) -> bool:
@@ -549,7 +555,7 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
                 continue
             body = str(r.get("body") or "").strip()
             user = r.get("user") if isinstance(r.get("user"), dict) else {}
-            if not body or NON_ACTIONABLE.search(body) or is_ignorable_review_body(body, user.get("login")):
+            if not body or NON_ACTIONABLE.search(body) or is_cubic_no_issues_review(body, user.get("login")) or is_ignorable_review_body(body, user.get("login")):
                 if state == "APPROVED":
                     break
                 continue
