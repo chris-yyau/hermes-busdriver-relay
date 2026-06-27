@@ -24,8 +24,10 @@ OWNER=""; REPO=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local-only) LOCAL_ONLY=1; shift ;;
-    --owner) OWNER="$2"; shift 2 ;;
-    --repo)  REPO="$2";  shift 2 ;;
+    # Guard the value before `$2` so a trailing `--owner`/`--repo` with no
+    # argument exits 2 (config error) instead of crashing under `set -u`.
+    --owner) [[ $# -ge 2 ]] || { echo "config error: --owner needs a value" >&2; exit 2; }; OWNER="$2"; shift 2 ;;
+    --repo)  [[ $# -ge 2 ]] || { echo "config error: --repo needs a value"  >&2; exit 2; }; REPO="$2";  shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done

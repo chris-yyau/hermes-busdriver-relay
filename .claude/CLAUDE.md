@@ -6,9 +6,10 @@ clone and must not vendor Claude plugins, MCP configs, runtime markers, credenti
 or Busdriver skill bodies.
 
 > This file lives at `.claude/CLAUDE.md` (helmet's standard project-guide location).
-> `.gitignore` ignores the rest of `.claude/` as runtime state but keeps an exception
-> for this file (`!.claude/CLAUDE.md`), so it stays tracked and the Hermes agent loads
-> it on a fresh clone.
+> `.gitignore` does **not** blanket-ignore `.claude/`; it ignores only specific
+> runtime/gate state inside it (`.claude/*.log`, `litmus-state.md`, `bypass-log.jsonl`,
+> `_backstop/`, `worktrees/`, …). Everything else under `.claude/` — including this
+> file — stays tracked, so the Hermes agent loads it on a fresh clone.
 
 ## Boundary (read this first)
 

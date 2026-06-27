@@ -98,8 +98,11 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           # Only skip on push — compliance job in tests.yml is push-only,
-          # so PRs must always run trivy here for coverage.
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]] && grep -ql 'trivy-action\|scanners.*vuln' .github/workflows/tests.yml 2>/dev/null; then
+          # so PRs must always run trivy here for coverage. Match a real trivy
+          # VULN scanner line specifically (not any 'trivy-action' mention,
+          # which a license-only scan or a comment would also satisfy and would
+          # wrongly disable vuln coverage).
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]] && grep -qE '^[[:space:]]*scanners:[[:space:]]*vuln' .github/workflows/tests.yml 2>/dev/null; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Trivy already covered by compliance job — skipping"
           fi
@@ -200,7 +203,11 @@ jobs:
             echo "| checkov | $CHECKOV |"
             echo "| zizmor | $ZIZMOR |"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$TRIVY" == "failure" || "$SEMGREP" == "failure" || "$CHECKOV" == "failure" || "$ZIZMOR" == "failure" ]]; then
-            echo "::error::One or more security scanners failed"
-            exit 1
-          fi
+          # Block on failure OR cancelled (a job killed by timeout-minutes
+          # returns "cancelled" and must not silently pass the backstop).
+          for r in "$TRIVY" "$SEMGREP" "$CHECKOV" "$ZIZMOR"; do
+            if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
+              echo "::error::One or more security scanners failed or were cancelled"
+              exit 1
+            fi
+          done

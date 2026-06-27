@@ -46,7 +46,7 @@ jobs:
       # extra plumbing, so the contract assertions ARE the signal (see
       # .claude/CLAUDE.md). Codecov is N/A by design for this repo.
       - name: Install pytest
-        run: pip install --quiet pytest
+        run: pip install --quiet 'pytest==8.4.1'  # Pin version — reproducible CI, consistent with security.yml scanners
       - name: Run contract suite
         run: pytest tests/contract -q
 
