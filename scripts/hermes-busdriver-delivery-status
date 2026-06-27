@@ -281,7 +281,7 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
             blockers.append("pr_grind_status_not_collected")
         elif not pr_grind.get("available"):
             blockers.append("hermes_pr_grind_checker_unavailable")
-            next_action = "Wait for PR #3 / pr-grind readiness checker to land, or run Busdriver pr-grind in Claude Code."
+            next_action = "Install or supply the PR-grind readiness checker, or run Busdriver pr-grind in Claude Code."
         elif not pr_grind.get("ok"):
             blockers.append("pr_grind_checker_failed")
         else:

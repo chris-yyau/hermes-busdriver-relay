@@ -99,6 +99,8 @@ def test_pr_status_blocks_when_pr_grind_checker_missing(tmp_path: Path):
 
     assert data["decision"]["status"] == "blocked"
     assert "hermes_pr_grind_checker_unavailable" in data["decision"]["blockers"]
+    assert "PR #3" not in data["decision"]["next_action"]
+    assert "PR-grind readiness checker" in data["decision"]["next_action"]
     assert data["pr_grind"]["available"] is False
     assert data["decision"]["merge_allowed"] is False
 
