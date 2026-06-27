@@ -42,6 +42,7 @@ scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode
 scripts/hermes-busdriver-finalization-readiness
                                            Read-only finalization handoff envelope
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
+scripts/hermes-busdriver-pr-grind-loop     Read-only bounded PR-grind polling loop
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
 ```
@@ -184,6 +185,20 @@ scripts/hermes-busdriver-pr-grind-check \
 ```
 
 This is a read-only Delivery Mode helper. It checks the latest PR HEAD, mergeability, relevant `gh pr checks` output using Busdriver `scripts/relevant-check-status.sh` when available, and current-head review comments. It returns `clean`, `wait`, `needs_fix`, or `blocked`; it does **not** write `pr-grind-clean.local`, create commits, push, merge, or replace Busdriver's dispatcher-owned `pr-grind` loop.
+
+### PR-grind bounded loop
+
+```bash
+scripts/hermes-busdriver-pr-grind-loop \
+  --repo /path/to/repo \
+  --pr 123 \
+  --plugin-root /path/to/busdriver \
+  --max-wait-seconds 300 \
+  --poll-interval 30 \
+  --pretty
+```
+
+This read-only loop repeatedly invokes `hermes-busdriver-pr-grind-check` until the latest PR HEAD is clean, needs a fix, is blocked, or the wait/poll budget expires. It re-polls after latest-head drift, records the ack-ledger policy as delegated to the checker, and refuses fix rounds (`--max-fix-rounds` must remain `0`). It never commits, pushes, writes Busdriver markers, or merges; even a clean result keeps finalization authority false for explicit operator finalization.
 
 ### Safe smoke checks
 

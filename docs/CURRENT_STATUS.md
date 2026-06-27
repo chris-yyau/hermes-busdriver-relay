@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against Busdriver `1.71.0` source on `origin/main`.
+Last verified against Busdriver `1.71.1` source on `origin/main`.
 
 ## Locations
 
@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **fail-closed verify-only delivery dispatcher**, and a **read-only finalization readiness / handoff envelope**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher**, and a **read-only finalization readiness / handoff envelope**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -30,6 +30,7 @@ Implemented:
 - `scripts/hermes-busdriver-deliver`
 - `scripts/hermes-busdriver-finalization-readiness`
 - `scripts/hermes-busdriver-pr-grind-check`
+- `scripts/hermes-busdriver-pr-grind-loop`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
 - `tests/contract/test_lock.py`
@@ -41,6 +42,7 @@ Implemented:
 - `tests/contract/test_deliver.py`
 - `tests/contract/test_finalization_readiness.py`
 - `tests/contract/test_pr_grind_check.py`
+- `tests/contract/test_pr_grind_loop.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
 - `docs/settling-checks-v2.md`
@@ -61,10 +63,10 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 134 passed
-py_compile: hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-smoke passed
+contract tests: 147 passed
+py_compile: hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
-package_version 1.71.0
+package_version 1.71.1
 hook_event_count 7
 route_count 7
 runtime_check.hook_manifest_available True
@@ -85,7 +87,7 @@ These are not missing work; they are blocked by design until stronger equivalent
 - `hermes-busdriver-codex-goal` with commit authority
 - repo-mutating Codex (others temporarily deferred) launcher finalization
 - `.claude/hermes/jobs` queue
-- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks
+- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks; `hermes-busdriver-pr-grind-loop` remains read-only and refuses fix rounds
 - deploy / release / publish automation
 - direct MCP/plugin routing
 - any claim that Hermes bare shell execution is Busdriver-gate-safe
