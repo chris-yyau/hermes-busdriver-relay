@@ -1,0 +1,206 @@
+name: Security
+
+on:
+  pull_request:                     # No path filter — workflow always starts on PRs
+                                    # (scanner jobs skip via if: when not needed)
+  push:
+    branches: [main]
+    paths:                          # Push trigger keeps path filter (no required-check issue)
+      - '.github/**'
+      - '**/*.sh'
+      - '**/*.py'
+      - '**/*.yml'
+      - '**/*.yaml'
+      - '**/pyproject.toml'
+      - '**/requirements*.txt'
+      - '**/Dockerfile'
+      - '**/*.tf'
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Detect whether this PR/push touches security-relevant files.
+  # Scanner jobs below skip via `if:` when false. GitHub treats skipped jobs as
+  # passing for required status checks — so scanners can safely be required.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      security: ${{ steps.filter.outputs.security }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect security-relevant changes
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "security=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::warning::Base SHA $BASE_SHA not available — running scanners (fail-closed)"
+            echo "security=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed_files="$(git diff --name-only "$BASE_SHA"...HEAD)" || {
+            echo "::warning::git diff failed — running scanners (fail-closed)"
+            echo "security=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          grep_status=0
+          grep -qE '\.(sh|py|yml|yaml|tf)$|\.github/|requirements.*\.txt|Dockerfile|pyproject\.toml' <<< "$changed_files" || grep_status=$?
+          case "$grep_status" in
+            0) echo "security=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "security=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::warning::grep failed (exit $grep_status) — running scanners (fail-closed)"
+               echo "security=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  trivy:
+    name: Dependency CVEs
+    needs: [changes]
+    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check for compliance job
+        id: check
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Only skip on push — compliance job in tests.yml is push-only,
+          # so PRs must always run trivy here for coverage.
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]] && grep -ql 'trivy-action\|scanners.*vuln' .github/workflows/tests.yml 2>/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Trivy already covered by compliance job — skipping"
+          fi
+      - name: Scan dependencies
+        if: steps.check.outputs.skip != 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          skip-dirs: tests
+
+  semgrep:
+    name: Code security
+    needs: [changes]
+    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install semgrep
+        run: pip install --quiet 'semgrep==1.157.0'  # Pin version — unpinned is a supply chain risk
+      - name: Scan for vulnerabilities
+        run: semgrep scan --config p/security-audit --error --exclude tests .
+
+  checkov:
+    name: IaC misconfig
+    needs: [changes]
+    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install checkov
+        run: pip install --quiet 'checkov==3.2.510'  # Pin version — unpinned is a supply chain risk
+      - name: Scan for misconfigurations
+        run: checkov -d . --skip-path tests --quiet --compact
+
+  zizmor:
+    name: Actions security
+    needs: [changes]
+    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify SHA pinning
+        run: bash .github/scripts/check-pinned-uses.sh
+      - name: Install zizmor
+        run: pip install --quiet 'zizmor==1.23.1'  # Pin version — unpinned is a supply chain risk
+      - name: Scan GitHub Actions workflows
+        run: zizmor --min-severity high --min-confidence high .github/workflows/
+
+  reports:
+    if: always()
+    needs: [changes, trivy, semgrep, checkov, zizmor]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Write summary
+        env:
+          TRIVY: ${{ needs.trivy.result }}
+          SEMGREP: ${{ needs.semgrep.result }}
+          CHECKOV: ${{ needs.checkov.result }}
+          ZIZMOR: ${{ needs.zizmor.result }}
+        run: |
+          {
+            echo "## Security Backstop"
+            echo "| Scanner | Result |"
+            echo "|---------|--------|"
+            echo "| trivy | $TRIVY |"
+            echo "| semgrep | $SEMGREP |"
+            echo "| checkov | $CHECKOV |"
+            echo "| zizmor | $ZIZMOR |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$TRIVY" == "failure" || "$SEMGREP" == "failure" || "$CHECKOV" == "failure" || "$ZIZMOR" == "failure" ]]; then
+            echo "::error::One or more security scanners failed"
+            exit 1
+          fi

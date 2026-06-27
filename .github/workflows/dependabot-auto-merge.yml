@@ -1,0 +1,163 @@
+name: Dependabot Auto-Merge
+
+# Approves AND enqueues auto-merge on Dependabot PRs based on update-type,
+# dependency-type, and package-ecosystem — but ONLY on repos where
+# `vars.DEPENDABOT_AUTO_APPROVE == 'true'`. On other repos the workflow
+# becomes annotate-only: it posts a comment for safe bumps explaining the
+# repo is opted out of auto-merge (manual merge needed) AND posts the
+# manual-review comment for unsafe bumps.
+#
+# Auto-approve + auto-merge enqueued (var=true, safe bucket):
+#   - patch (any ecosystem, any dependency-type)
+#   - minor (dev dependencies, indirect/transitive, OR github_actions ecosystem)
+# Major (any) + production-direct minor are NEVER auto-merged on any tier.
+
+on:
+  pull_request:
+
+# SECURITY MODEL (why job-level write on a `pull_request` trigger is safe here):
+#   1. This is `pull_request`, NOT `pull_request_target`. For `pull_request`,
+#      GitHub executes the workflow definition from the BASE branch, never the
+#      version in the PR head — so a contributor who edits this file in their PR
+#      cannot get their modified workflow to run.
+#   2. PRs from forks receive a READ-ONLY `GITHUB_TOKEN` with no access to repo
+#      secrets, regardless of the `permissions:` declared below. The write scope
+#      is only ever effective for same-repo branches (which require push access).
+#   3. The single job is gated on `github.event.pull_request.user.login ==
+#      'dependabot[bot]'` — the immutable PR-author login (not the spoofable
+#      `github.actor`). Non-Dependabot PRs skip the job entirely (a skipped job
+#      runs no steps and is treated as passing).
+# Net: the job-level `contents/pull-requests: write` is reachable only on a
+# genuine Dependabot PR on this repo. Workflow-level default stays read-only.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  auto-merge:
+    name: Enqueue Dependabot auto-merge
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          egress-policy: audit
+
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute auto-merge policy
+        id: policy
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEP_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          PKG_ECO: ${{ steps.metadata.outputs.package-ecosystem }}
+        run: |
+          safe=false
+          if [ "$UPDATE_TYPE" = "version-update:semver-patch" ]; then
+            safe=true
+          elif [ "$UPDATE_TYPE" = "version-update:semver-minor" ]; then
+            case "$DEP_TYPE" in
+              direct:development|indirect) safe=true ;;
+            esac
+            if [ "$PKG_ECO" = "github_actions" ]; then
+              safe=true
+            fi
+          fi
+          echo "safe=$safe" >> "$GITHUB_OUTPUT"
+          echo "policy: update-type=$UPDATE_TYPE dep-type=$DEP_TYPE pkg-ecosystem=$PKG_ECO safe=$safe"
+
+      - name: Approve PR — patch + safe minor
+        if: steps.policy.outputs.safe == 'true' && vars.DEPENDABOT_AUTO_APPROVE == 'true'
+        uses: hmarr/auto-approve-action@f0939ea97e9205ef24d872e76833fa908a770363 # v4.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enqueue auto-merge — patch + safe minor
+        if: steps.policy.outputs.safe == 'true' && vars.DEPENDABOT_AUTO_APPROVE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          out=$(gh pr merge --auto --squash "$PR_URL" 2>&1) || rc=$?
+          if [ "${rc:-0}" -ne 0 ]; then
+            if [[ "$out" == *"already enabled"* ]]; then
+              echo "auto-merge enqueue skipped: already enabled"
+            else
+              echo "$out" >&2
+              exit "$rc"
+            fi
+          else
+            echo "$out"
+          fi
+
+      - name: Comment — manual review or manual merge required
+        if: |
+          steps.policy.outputs.safe == 'false' ||
+          (steps.policy.outputs.safe == 'true' && vars.DEPENDABOT_AUTO_APPROVE != 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+          PACKAGE_ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          POLICY_SAFE: ${{ steps.policy.outputs.safe }}
+        run: |
+          set -eo pipefail
+          if [ "$POLICY_SAFE" = "true" ]; then
+            MARKER="<!-- dependabot-auto-merge: annotate-only -->"
+          else
+            MARKER="<!-- dependabot-auto-merge: manual-review-required -->"
+          fi
+
+          existing_comments=$(gh pr view "$PR_URL" --json comments \
+              --jq '.comments[] | select(.author.login == "github-actions[bot]") | .body' 2>&1) || {
+            echo "::warning::gh pr view failed — posting comment without dedup check (fail-closed)"
+            echo "$existing_comments" >&2
+            existing_comments=""
+          }
+
+          grep_status=0
+          grep -qF "$MARKER" <<< "$existing_comments" || grep_status=$?
+          case "$grep_status" in
+            0)
+              echo "already commented on this PR — skipping"
+              exit 0
+              ;;
+            1) ;;
+            *)
+              echo "::warning::grep failed (exit $grep_status) — posting comment (fail-closed)"
+              ;;
+          esac
+
+          if [ "$POLICY_SAFE" = "true" ]; then
+            REASON="Safe bump (${PACKAGE_ECOSYSTEM} / ${DEPENDENCY_NAMES})"
+            CTA="Auto-merge skipped — this repo runs the auto-merge workflow in annotate-only mode (vars.DEPENDABOT_AUTO_APPROVE != 'true'). Please merge manually once required checks pass."
+          elif [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
+            REASON="Major version bump detected (${PACKAGE_ECOSYSTEM} / ${DEPENDENCY_NAMES})"
+            CTA="Auto-merge skipped — please review changes manually before merging."
+          elif [ "$UPDATE_TYPE" = "version-update:semver-minor" ]; then
+            REASON="Production direct-dependency minor bump (${PACKAGE_ECOSYSTEM} / ${DEPENDENCY_NAMES})"
+            CTA="Auto-merge skipped — please review changes manually before merging."
+          else
+            REASON="Unsafe Dependabot bump — update-type='${UPDATE_TYPE}' dependency-type='${DEPENDENCY_TYPE}' (${PACKAGE_ECOSYSTEM} / ${DEPENDENCY_NAMES})"
+            CTA="Auto-merge skipped — please inspect the bump type and merge manually if appropriate."
+          fi
+          BODY=$(printf '%s\n\n%s. %s\n' "$MARKER" "$REASON" "$CTA")
+          gh pr comment "$PR_URL" --body "$BODY"

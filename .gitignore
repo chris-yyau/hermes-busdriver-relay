@@ -7,13 +7,29 @@ venv/
 
 # Hermes / Busdriver runtime state (never commit)
 .hermes/
-.claude/
-.opencode/
 *.local
 *.local.*
 *.secret*
 *.token*
 *.key
+
+# .claude / .opencode gate state (transient; CLAUDE.md + shared config stay tracked).
+# Mirrors busdriver: ignore specific runtime files, NOT the whole directory.
+.claude/*.log
+.claude/litmus-state.md
+.claude/bypass-log.jsonl
+.claude/review-metrics.jsonl
+.claude/_backstop/
+.claude/worktrees/
+.opencode/*.log
+.opencode/litmus-state.md
+.opencode/bypass-log.jsonl
+.opencode/review-metrics.jsonl
+.opencode/_backstop/
+.opencode/worktrees/
+
+# CodeGraph tree-sitter index (regeneratable, per-repo)
+.codegraph/
 
 # Logs / run output
 logs/
