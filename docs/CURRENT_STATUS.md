@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, and a **fail-closed delivery dispatcher skeleton**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, and a **fail-closed verify-only delivery dispatcher**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan/verify envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -59,7 +59,8 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 110 passed
+contract tests: 114 passed
+py_compile: hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7
@@ -78,7 +79,7 @@ clean temp repo preflight.pr_allowed False
 
 These are not missing work; they are blocked by design until stronger equivalent finalization gates exist:
 
-- `hermes-busdriver-deliver` commit/push/PR/merge execution mode
+- `hermes-busdriver-deliver` commit/push/PR/merge execution mode beyond verify-only local verifiers
 - `hermes-busdriver-codex-goal` with commit authority
 - repo-mutating Codex (others temporarily deferred) launcher finalization
 - `.claude/hermes/jobs` queue
