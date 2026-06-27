@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "0 6 * * 1"  # Weekly Monday 6am UTC
 
+# Empty top-level permissions = deny-all default (satisfies checkov CKV2_GHA_1).
+# scorecard-action only forbids top-level `env:`/`defaults:`, not `permissions:`.
+# The scorecard job below grants its own least-privilege scopes.
+permissions: {}
+
 jobs:
   scorecard:
     runs-on: ubuntu-latest
