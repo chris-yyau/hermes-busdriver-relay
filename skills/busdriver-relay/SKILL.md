@@ -225,6 +225,7 @@ Known seams:
 - `scripts/hermes-busdriver-delivery-status`: Read-only Delivery Mode status envelope that combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output; it never authorizes or performs finalization.
 - `scripts/hermes-busdriver-pr-grind-check`: Read-only Delivery Mode helper that checks latest PR HEAD mergeability, relevant checks via Busdriver `scripts/relevant-check-status.sh` when available, and current-head review comments. It returns `clean` / `wait` / `needs_fix` / `blocked` and never writes Busdriver markers or merges.
 - `references/pr-grind-delivery-discipline.md`: captured user correction for end-to-end Hermes delivery expectations and exact Busdriver pr-grind latest-head loop semantics.
+- `references/june-2026-pr-reviewer-quality-evaluation.md`: durable June 2026 reviewer-quality report and relay policy for CodeRabbit/cubic/Codex/Cursor/Devin signals; blocker source-of-truth is live unresolved non-outdated review threads, not reviewer status completion alone.
 - `skills/*.md`: readable source; actual invocation requires a Busdriver/Claude-style skill runtime.
 
 ## Hook-Runtime Equivalence
@@ -386,7 +387,7 @@ Session-specific scaffold details live in `references/initial-relay-repo-scaffol
 
 For implementation details and pitfalls discovered while building the first private relay repo/status tooling, see `references/relay-v1-session-lessons.md`. Use it when updating `busdriver.json`, maintaining `hermes-busdriver-status`, changing the relay name, or adding locks/smoke checks.
 
-See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns after coding) and `references/user-preferences-profiles-mcp-agents.md` (direct remote action preference, three-memory-system coordination).
+See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns after coding), `references/user-preferences-profiles-mcp-agents.md` (direct remote action preference, three-memory-system coordination), and `references/june-2026-pr-reviewer-quality-evaluation.md` (June 2026 reviewer-quality report and reviewer-specific PR-grind policy).
 
 ## Verification Checklist
 

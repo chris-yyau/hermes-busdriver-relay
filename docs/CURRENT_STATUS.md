@@ -19,7 +19,7 @@ Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay
 Implemented:
 
 - `skills/busdriver-relay/SKILL.md`
-- `skills/busdriver-relay/references/*.md` including claude-mem push and user-preference/profile notes
+- `skills/busdriver-relay/references/*.md` including PR-grind delivery discipline, June 2026 reviewer-quality policy, claude-mem push, and user-preference/profile notes
 - `scripts/hermes-busdriver-status`
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
@@ -57,7 +57,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 94 passed
+contract tests: 99 passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7

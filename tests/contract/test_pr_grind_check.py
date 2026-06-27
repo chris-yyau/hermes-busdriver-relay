@@ -570,6 +570,35 @@ def test_resolved_current_head_comment_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_cubic_no_issues_review_body_is_not_actionable(tmp_path: Path):
+    checks_file = tmp_path / "checks.txt"
+    review_comments_file = tmp_path / "review-comments.json"
+    reviews_file = tmp_path / "reviews.json"
+    view_file = tmp_path / "view.json"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checks_file.write_text("unit\tpass\t1m\turl\n")
+    review_comments_file.write_text("[]")
+    reviews_file.write_text(json.dumps([{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**No issues found** across 5 files\n\n<sub>[Re-trigger cubic](https://www.cubic.dev/action/re-review/pr/owner/repo/5)</sub>", "user": {"login": "cubic-dev-ai[bot]"}}]))
+    view_file.write_text(json.dumps({"number": 7, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123def456"}))
+
+    cp = subprocess.run(
+        [sys.executable, str(CHECK), "--repo", str(repo), "--pr", "7", "--fixture-mode", "--checks-file", str(checks_file), "--review-comments-file", str(review_comments_file), "--reviews-file", str(reviews_file), "--view-json-file", str(view_file)],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["status"] == "clean"
+    assert data["actionable_comments"] == []
+
+
+def test_cubic_no_issues_single_file_review_body_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**No issues found** across 1 file reviewed.", "user": {"login": "cubic-dev-ai[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
+
+
 def test_generic_bot_review_summary_without_inline_comment_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -915,15 +944,15 @@ def test_head_changed_check_counts_keeps_stable_schema():
 
 
 
-def test_unresolved_outdated_thread_comment_remains_actionable():
+def test_unresolved_outdated_thread_comment_is_not_actionable_when_not_live():
     ns = runpy.run_path(str(CHECK))
     comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Unresolved outdated feedback", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
-    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set())
-    assert len(out) == 1
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), set(), {9}, set())
+    assert out == []
 
 
 
-def test_unresolved_outdated_thread_id_is_active_not_resolved(tmp_path: Path):
+def test_unresolved_outdated_thread_id_is_ignored_like_resolved(tmp_path: Path):
     ns = runpy.run_path(str(CHECK))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -949,8 +978,21 @@ def test_unresolved_outdated_thread_id_is_active_not_resolved(tmp_path: Path):
     ns["load_review_thread_comment_states"].__globals__["run"] = fake_run
     ns["load_review_thread_comment_states"].__globals__["owner_repo"] = lambda _repo: "owner/name"
     resolved, active = ns["load_review_thread_comment_states"](type("Args", (), {"resolved_review_comment_ids_file": None, "fixture_mode": False, "pr": "7"})(), repo)
-    assert resolved == set()
-    assert active == {123}
+    assert resolved == {123}
+    assert active == set()
+
+
+
+def test_devin_review_summary_without_live_inline_issue_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**Devin Review** found 1 new potential issue.\n\n<!-- devin-review-badge-begin -->", "user": {"login": "devin-ai-integration[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
+
+
+def test_devin_review_summary_plural_without_live_inline_issue_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**Devin Review** found 2 new potential issues.\n\n<!-- devin-review-badge-begin -->", "user": {"login": "devin-ai-integration[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
 
 
 
