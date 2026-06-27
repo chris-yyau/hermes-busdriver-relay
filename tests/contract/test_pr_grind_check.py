@@ -938,15 +938,15 @@ def test_head_changed_check_counts_keeps_stable_schema():
 
 
 
-def test_unresolved_outdated_thread_comment_remains_actionable():
+def test_unresolved_outdated_thread_comment_is_not_actionable_when_not_live():
     ns = runpy.run_path(str(CHECK))
     comments = [{"id": 123, "pull_request_review_id": 9, "commit_id": "oldsha123", "body": "Unresolved outdated feedback", "path": "src/app.py", "line": 4, "user": {"login": "reviewer"}}]
-    out = ns["actionable_comments"](comments, "abc123def456", None, set(), {123}, {9}, set())
-    assert len(out) == 1
+    out = ns["actionable_comments"](comments, "abc123def456", None, set(), set(), {9}, set())
+    assert out == []
 
 
 
-def test_unresolved_outdated_thread_id_is_active_not_resolved(tmp_path: Path):
+def test_unresolved_outdated_thread_id_is_neither_active_nor_resolved(tmp_path: Path):
     ns = runpy.run_path(str(CHECK))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -973,7 +973,7 @@ def test_unresolved_outdated_thread_id_is_active_not_resolved(tmp_path: Path):
     ns["load_review_thread_comment_states"].__globals__["owner_repo"] = lambda _repo: "owner/name"
     resolved, active = ns["load_review_thread_comment_states"](type("Args", (), {"resolved_review_comment_ids_file": None, "fixture_mode": False, "pr": "7"})(), repo)
     assert resolved == set()
-    assert active == {123}
+    assert active == set()
 
 
 

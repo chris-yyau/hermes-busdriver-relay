@@ -282,13 +282,18 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
         for node in threads.get("nodes") or []:
             if not isinstance(node, dict):
                 continue
-            target = resolved if node.get("isResolved") is True else active
+            if node.get("isResolved") is True:
+                target = resolved
+            elif node.get("isOutdated") is True:
+                target = None
+            else:
+                target = active
             comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
             if (comments_page.get("pageInfo") or {}).get("hasNextPage"):
                 raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
             for comment in (comments_page.get("nodes") or []):
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
-                if isinstance(cid, int):
+                if isinstance(cid, int) and target is not None:
                     target.add(cid)
         page_info = threads.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
