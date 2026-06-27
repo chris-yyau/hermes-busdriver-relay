@@ -119,7 +119,7 @@ def test_delivery_status_non_object_json_fails_closed(monkeypatch):
         returncode = 0
 
     monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
-    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None})())
+    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
 
     assert rc == 0
     assert data["ok"] is False
@@ -133,11 +133,15 @@ def test_delivery_status_timeout_fails_closed(monkeypatch):
         raise subprocess.TimeoutExpired(cmd=["helper"], timeout=180, output="partial", stderr="slow")
 
     monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
-    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None})())
+    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 5})())
 
     assert rc == 124
     assert data["ok"] is False
     assert data["error"] == "delivery_status_timeout"
+    assert data["returncode"] == 124
+    assert data["timeout_seconds"] == 5
+    assert data["stdout_tail"] == "partial"
+    assert data["stderr"] == "slow"
 
 
 def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):

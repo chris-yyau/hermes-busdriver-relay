@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
     parser.add_argument("--pr", help="Pull request number for post-PR status")
     parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through to delivery-status")
+    parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
     parser.add_argument("--mode", default="plan", choices=["plan", "execute"], help="Delivery mode; execute is not enabled")
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args()
@@ -48,14 +49,17 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
 
     try:
-        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=180)
+        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=args.delivery_status_timeout)
     except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else str(e.stdout or "")
+        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else str(e.stderr or "")
         return {
             "ok": False,
             "error": "delivery_status_timeout",
-            "timeout_seconds": 180,
-            "stdout_tail": str(e.stdout or "")[-2000:],
-            "stderr_tail": str(e.stderr or "")[-2000:],
+            "returncode": 124,
+            "timeout_seconds": args.delivery_status_timeout,
+            "stdout_tail": stdout[-2000:],
+            "stderr": stderr.strip(),
         }, 124
     try:
         data = json.loads(cp.stdout)
