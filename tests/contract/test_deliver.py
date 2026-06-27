@@ -169,6 +169,13 @@ def test_delivery_status_invalid_json_stderr_is_bounded(monkeypatch):
     assert len(data["stderr"]) <= 4000
 
 
+def test_tail_zero_limit_returns_empty_string():
+    ns = runpy.run_path(str(DELIVER))
+
+    assert ns["tail"]("abcdef", 0) == ""
+    assert ns["tail"](b"abcdef", 0) == ""
+
+
 def test_delivery_status_timeout_fails_closed(monkeypatch):
     ns = runpy.run_path(str(DELIVER))
 

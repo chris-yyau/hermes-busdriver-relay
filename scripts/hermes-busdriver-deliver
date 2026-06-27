@@ -57,6 +57,8 @@ def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
         text = value.decode(errors="replace")
     else:
         text = value or ""
+    if limit <= 0:
+        return ""
     return text[-limit:]
 
 
