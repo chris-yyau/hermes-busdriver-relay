@@ -176,6 +176,67 @@ def test_tail_zero_limit_returns_empty_string():
     assert ns["tail"](b"abcdef", 0) == ""
 
 
+def test_tail_redacts_common_secret_shapes():
+    ns = runpy.run_path(str(DELIVER))
+    secret = "ghp_" + "A" * 36
+
+    redacted = ns["tail"](f"Authorization: Bearer {secret}\napi_key={secret}\n")
+
+    assert secret not in redacted
+    assert "Authorization: Bearer [REDACTED]" in redacted
+    assert "api_key=[REDACTED]" in redacted
+
+
+def test_execute_verify_redacts_verifier_command_output_and_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    secret = "plain-secret-value-1234567890"
+    verifier_code = f'import sys; print("Authorization: Bearer {secret}"); sys.stderr.write("api_key={secret}\\n")'
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(verifier_code)} --token {secret}"
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        f"redaction={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+
+    serialized = json.dumps(data)
+    assert cp.returncode == 0
+    assert data["ok"] is True
+    assert secret not in serialized
+    verifier = data["verifiers"][0]
+    assert verifier["command"].endswith("--token [REDACTED]")
+    assert verifier["stdout_tail"] == "Authorization: Bearer [REDACTED]\n"
+    assert verifier["stderr_tail"] == "api_key=[REDACTED]\n"
+    artifact = Path(data["run_artifact_path"])
+    assert secret not in artifact.read_text()
+    assert_finalization_blocked(data["decision"])
+
+
+def test_delivery_status_error_tails_are_redacted(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    secret = "ghp_" + "C" * 36
+
+    class CP:
+        stdout = f"not-json {secret}"
+        stderr = f"Authorization: Bearer {secret}"
+        returncode = 0
+
+    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    data, _rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
+
+    serialized = json.dumps(data)
+    assert secret not in serialized
+    assert "Authorization: Bearer [REDACTED]" in data["stderr"]
+
+
 def test_delivery_status_timeout_fails_closed(monkeypatch):
     ns = runpy.run_path(str(DELIVER))
 
