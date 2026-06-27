@@ -26,6 +26,7 @@ Implemented:
 - `scripts/hermes-busdriver-gate`
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-smoke`
+- `scripts/hermes-busdriver-delivery-status`
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
@@ -34,6 +35,7 @@ Implemented:
 - `tests/contract/test_gate.py`
 - `tests/contract/test_agent_draft.py`
 - `tests/contract/test_agent_smoke.py`
+- `tests/contract/test_delivery_status.py`
 - `tests/contract/test_pr_grind_check.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
@@ -55,7 +57,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 89 passed
+contract tests: 100 passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7
