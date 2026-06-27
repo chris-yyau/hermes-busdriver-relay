@@ -30,14 +30,21 @@ FINALIZATION_POLICY = (
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+    try:
+        return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+    except FileNotFoundError as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", f"timeout after {timeout}s")
 
 
 def read_json(path: str | None, default: Any) -> Any:
     if not path:
         return default
-    data = json.loads(Path(path).expanduser().read_text())
-    return data
+    try:
+        return json.loads(Path(path).expanduser().read_text())
+    except Exception:  # noqa: BLE001 - status probe should not crash on optional fixtures
+        return default
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -59,7 +66,7 @@ def repo_status(repo_arg: str) -> dict[str, Any]:
     upstream_cp = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     status_lines = git(root, "status", "--porcelain=v1").stdout.splitlines()
     staged = [line for line in status_lines if line and line[0] != "?" and line[0] != " "]
-    unstaged = [line for line in status_lines if len(line) > 1 and line[1] != " "]
+    unstaged = [line for line in status_lines if len(line) > 1 and line[1] not in (" ", "?")]
     untracked = [line for line in status_lines if line.startswith("??")]
     merge_state = any((git_dir / name).exists() for name in ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "BISECT_LOG"])
     return {

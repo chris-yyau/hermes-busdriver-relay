@@ -79,6 +79,17 @@ def test_dirty_draft_status_is_read_only_and_non_finalizing(tmp_path: Path):
     assert snapshot_files(plugin) == before_plugin
 
 
+def test_untracked_files_are_not_reported_as_unstaged(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "new.txt").write_text("new\n")
+
+    data = invoke(repo, plugin)
+
+    assert data["repo"]["untracked_entries"] == ["?? new.txt"]
+    assert data["repo"]["unstaged_entries"] == []
+
+
 def test_pr_status_blocks_when_pr_grind_checker_missing(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -105,6 +116,35 @@ def test_pr_clean_fixture_is_still_read_only_not_merge_authority(tmp_path: Path)
     assert data["decision"]["finalization_allowed"] is False
     assert data["decision"]["merge_allowed"] is False
     assert "read-only" in data["decision"]["policy"].lower()
+
+
+def test_invalid_pr_grind_result_fixture_does_not_crash(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    pr_result = tmp_path / "bad-pr-grind-result.json"
+    pr_result.write_text("not-json\n")
+
+    data = invoke(repo, plugin, "--pr", "7", "--pr-grind-result-file", str(pr_result))
+
+    assert data["pr_grind"]["ok"] is True
+    assert data["pr_grind"]["result"] == {}
+    assert data["decision"]["status"] == "blocked"
+    assert "pr_not_clean" in data["decision"]["blockers"]
+
+
+def test_timed_out_pr_grind_checker_reports_structured_blocker(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    checker = tmp_path / "slow_checker.py"
+    checker.write_text("import time\ntime.sleep(5)\n")
+
+    data = invoke(repo, plugin, "--pr", "7", "--pr-grind-check-script", str(checker), "--pr-grind-timeout", "1")
+
+    assert data["pr_grind"]["ok"] is False
+    assert data["pr_grind"]["returncode"] == 124
+    assert "timeout after 1s" in data["pr_grind"]["stderr"]
+    assert data["decision"]["status"] == "blocked"
+    assert "pr_grind_checker_failed" in data["decision"]["blockers"]
 
 
 def test_blocking_marker_blocks_delivery(tmp_path: Path):
