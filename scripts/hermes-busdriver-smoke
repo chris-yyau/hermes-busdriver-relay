@@ -22,6 +22,7 @@ RUNTIME = ROOT / "scripts" / "hermes-busdriver-runtime-check"
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
 AGENT_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
 AGENT_SMOKE = ROOT / "scripts" / "hermes-busdriver-agent-smoke"
+DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PR_GRIND_CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
 
 
@@ -51,7 +52,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(PR_GRIND_CHECK)]))
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK)]))
     checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:

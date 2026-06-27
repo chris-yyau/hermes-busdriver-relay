@@ -37,6 +37,7 @@ scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
+scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
@@ -124,6 +125,18 @@ scripts/hermes-busdriver-agent-smoke \
 ```
 
 This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+
+### Delivery status
+
+```bash
+scripts/hermes-busdriver-delivery-status \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --pr 123 \
+  --pretty
+```
+
+This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
 ### PR-grind readiness check
 
