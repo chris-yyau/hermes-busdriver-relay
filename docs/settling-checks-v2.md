@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher and read-only PR-grind readiness checker.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, and read-only finalization handoff envelope.
 
 ## Current scope
 
@@ -9,7 +9,8 @@ Relay v2 supports:
 - read-only Busdriver status/runtime probes;
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
-- a read-only PR-grind readiness checker for explicit Hermes Delivery Mode.
+- a read-only PR-grind readiness checker for explicit Hermes Delivery Mode;
+- a read-only finalization readiness helper that emits a handoff envelope but never finalizes.
 
 It still does **not** provide an autonomous finalization launcher. Commit/PR/merge remains an operator-level Delivery Mode path that must run litmus/pre-PR-equivalent checks and a latest-head pr-grind loop.
 
@@ -18,7 +19,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft` and `hermes-busdriver-pr-grind-check` run standalone; no full finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher and PR-grind checker emit JSON schemas; no end-to-end delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, PR-grind checker, verify-only dispatcher, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -44,6 +45,14 @@ scripts/hermes-busdriver-smoke \
 ```
 
 ```bash
+scripts/hermes-busdriver-finalization-readiness \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --pr 123 \
+  --pretty
+```
+
+```bash
 scripts/hermes-busdriver-pr-grind-check \
   --repo /path/to/repo \
   --pr 123 \
@@ -53,8 +62,8 @@ scripts/hermes-busdriver-pr-grind-check \
 
 ## Remaining finalization work
 
-- `hermes-busdriver-deliver` / finalization dispatcher;
-- final delivery result envelope;
+- `hermes-busdriver-deliver` commit/push/PR/merge executor mode, if ever approved;
+- mutating final delivery result envelope;
 - programmatic litmus/pre-PR dual-review equivalent;
 - full pr-grind dispatcher loop with max-fix/max-wait, ack ledger, policy-gap bail categories, and latest-head re-poll after every push;
 - safe Busdriver marker interop only if Busdriver defines an integration surface.

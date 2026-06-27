@@ -39,6 +39,8 @@ scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
 scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher
+scripts/hermes-busdriver-finalization-readiness
+                                           Read-only finalization handoff envelope
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
@@ -158,6 +160,18 @@ scripts/hermes-busdriver-deliver \
 ```
 
 This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+
+### Finalization readiness handoff
+
+```bash
+scripts/hermes-busdriver-finalization-readiness \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --pr 123 \
+  --pretty
+```
+
+This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
 
 ### PR-grind readiness check
 

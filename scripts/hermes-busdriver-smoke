@@ -25,6 +25,7 @@ AGENT_SMOKE = ROOT / "scripts" / "hermes-busdriver-agent-smoke"
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PR_GRIND_CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
 DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
+FINALIZATION_READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
@@ -53,7 +54,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK), str(DELIVER)]))
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK), str(DELIVER), str(FINALIZATION_READINESS)]))
     checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
@@ -90,6 +91,25 @@ def main() -> int:
                     "mutating_launcher_allowed": eq.get("mutating_launcher_allowed"),
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-runtime-check --pretty for details>"
+            except Exception as e:  # noqa: BLE001
+                checks[-1]["summary_parse_error"] = str(e)
+
+        readiness_cmd = [sys.executable, str(FINALIZATION_READINESS), "--plugin-root", args.plugin_root]
+        if args.repo:
+            readiness_cmd += ["--repo", args.repo]
+        checks.append(run(readiness_cmd, timeout=90))
+        if checks[-1]["ok"]:
+            try:
+                readiness = json.loads(checks[-1]["stdout"])
+                dec = readiness.get("readiness") or {}
+                checks[-1]["summary"] = {
+                    "status": dec.get("status"),
+                    "ready": dec.get("ready"),
+                    "commit_allowed": dec.get("commit_allowed"),
+                    "merge_allowed": dec.get("merge_allowed"),
+                    "handoff_schema": (readiness.get("handoff_envelope") or {}).get("schema"),
+                }
+                checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-finalization-readiness --pretty for details>"
             except Exception as e:  # noqa: BLE001
                 checks[-1]["summary_parse_error"] = str(e)
 
