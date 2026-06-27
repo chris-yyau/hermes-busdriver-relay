@@ -55,10 +55,11 @@ tests/contract/                            Contract tests
 scripts/hermes-busdriver-status \
   --plugin-root /path/to/busdriver \
   --repo /path/to/repo \
+  --drift-baseline /path/to/busdriver-status-baseline.json \
   --pretty
 ```
 
-The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health, effective routes, critical file hashes, active marker summaries, relay lock state, and repo dirty state. It never writes `.claude/`, `.opencode/`, Busdriver, or the target repo.
+The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health, effective routes, critical file hashes, optional Busdriver drift-baseline compatibility, active marker summaries, relay lock state, and repo dirty state. It never writes `.claude/`, `.opencode/`, Busdriver, or the target repo. `--drift-baseline` only reads an existing status-style JSON baseline and marks finalization compatibility false on missing/invalid/drifted baselines; it does not create or update baselines.
 
 ### Hermes-owned single-flight lock
 

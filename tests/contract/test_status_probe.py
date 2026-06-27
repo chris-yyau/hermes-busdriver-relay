@@ -74,6 +74,17 @@ def run_status(*args: str) -> dict:
     return json.loads(proc.stdout)
 
 
+def assert_no_finalization_flags(drift: dict) -> None:
+    assert drift["finalization_flags"] == {
+        "commit_allowed": False,
+        "push_allowed": False,
+        "pr_allowed": False,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "marker_write_allowed": False,
+    }
+
+
 def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
@@ -111,3 +122,47 @@ def test_status_probe_reports_active_markers_without_writing(tmp_path):
     assert markers["active_count"] == 2
     assert markers["files"]["litmus-passed.local"]["exists"] is True
     assert markers["files"]["design-review-needed.local.md"]["preview_lines"] == ["PLAN.md"]
+
+
+def test_status_probe_compares_drift_baseline_without_writing(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    baseline = tmp_path / "baseline.json"
+    current = run_status("--plugin-root", str(fake))
+    baseline.write_text(
+        json.dumps(
+            {
+                "package": {"version": current["package"]["version"]},
+                "critical_file_hashes": current["critical_file_hashes"],
+            }
+        )
+    )
+    before = baseline.read_text()
+
+    compatible = run_status("--plugin-root", str(fake), "--drift-baseline", str(baseline))
+
+    assert baseline.read_text() == before
+    assert compatible["busdriver_drift"]["status"] == "compatible"
+    assert compatible["busdriver_drift"]["finalization_compatible"] is True
+    assert_no_finalization_flags(compatible["busdriver_drift"])
+    assert compatible["busdriver_drift"]["changed"] == []
+
+    (fake / "hooks" / "gate-scripts" / "pre-commit-gate.sh").write_text("# changed\n")
+    drifted = run_status("--plugin-root", str(fake), "--drift-baseline", str(baseline))
+
+    assert drifted["busdriver_drift"]["status"] == "drifted"
+    assert drifted["busdriver_drift"]["finalization_compatible"] is False
+    assert_no_finalization_flags(drifted["busdriver_drift"])
+    assert "hooks/gate-scripts/pre-commit-gate.sh" in drifted["busdriver_drift"]["changed"]
+    assert "baseline_drift" in drifted["busdriver_drift"]["finalization_disabled_reasons"]
+
+
+def test_status_probe_reports_missing_drift_baseline_as_unknown(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    data = run_status("--plugin-root", str(fake), "--drift-baseline", str(tmp_path / "missing.json"))
+
+    assert data["busdriver_drift"]["status"] == "baseline_missing"
+    assert data["busdriver_drift"]["finalization_compatible"] is False
+    assert_no_finalization_flags(data["busdriver_drift"])
+    assert "baseline_missing" in data["busdriver_drift"]["finalization_disabled_reasons"]

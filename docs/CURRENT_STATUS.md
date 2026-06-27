@@ -14,13 +14,13 @@ Last verified against Busdriver `1.71.1` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, and a **read-only finalization readiness / handoff envelope**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, and **read-only Busdriver drift-baseline compatibility reporting**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
 - `skills/busdriver-relay/SKILL.md`
 - `skills/busdriver-relay/references/*.md` including PR-grind delivery discipline, June 2026 reviewer-quality policy, claude-mem push, and user-preference/profile notes
-- `scripts/hermes-busdriver-status`
+- `scripts/hermes-busdriver-status` including optional read-only `--drift-baseline <json>` compatibility reporting
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-gate`
@@ -63,7 +63,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 151 passed
+contract tests: 153 passed
 py_compile: hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.1
