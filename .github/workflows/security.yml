@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:                          # Push trigger keeps path filter (no required-check issue)
       - '.github/**'
+      - 'scripts/**'            # extensionless source scripts (see .claude/CLAUDE.md)
       - '**/*.sh'
       - '**/*.py'
       - '**/*.yml'
@@ -68,7 +69,10 @@ jobs:
             exit 0
           }
           grep_status=0
-          grep -qE '\.(sh|py|yml|yaml|tf)$|\.github/|requirements.*\.txt|Dockerfile|pyproject\.toml' <<< "$changed_files" || grep_status=$?
+          # Note `(^|/)scripts/`: this repo's source files are the EXTENSIONLESS
+          # scripts under scripts/ (see .claude/CLAUDE.md) — an extension-only
+          # match would let a source-only PR skip the scanners.
+          grep -qE '\.(sh|py|yml|yaml|tf)$|(^|/)scripts/|\.github/|requirements.*\.txt|Dockerfile|pyproject\.toml' <<< "$changed_files" || grep_status=$?
           case "$grep_status" in
             0) echo "security=true" >> "$GITHUB_OUTPUT" ;;
             1) echo "security=false" >> "$GITHUB_OUTPUT" ;;

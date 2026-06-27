@@ -70,10 +70,13 @@ while IFS=$'\t' read -r name job wf; do
   if [[ "$found" != "1" ]]; then
     echo "DRIFT (a): job key '$job' not found in $wf (required '$name')"; drift=1; continue
   fi
-  # The effective check name is the job's own `name:` if present, else the job
-  # key. Exact string compare (no regex) against the job's DIRECT name field.
-  if [[ "$name" != "$job" && "$name" != "$actual_name" ]]; then
-    echo "DRIFT (a): required name '$name' not declared as job '$job' in $wf (job name='${actual_name:-<none>}')"; drift=1
+  # The effective check name GitHub reports is the job's own `name:` if present,
+  # else the job key — accept ONLY that. Accepting the job id when a `name:`
+  # exists would pass a lock entry branch protection can never satisfy (GitHub
+  # reports the name, not the id). Exact string compare (no regex).
+  effective="${actual_name:-$job}"
+  if [[ "$name" != "$effective" ]]; then
+    echo "DRIFT (a): required name '$name' is not the effective check name '$effective' for job '$job' in $wf"; drift=1
   fi
 done < <(jq -r '.required[] | select(.source_app=="github-actions") | [.name, .job, .workflow] | @tsv' "$LOCK" || true)
 

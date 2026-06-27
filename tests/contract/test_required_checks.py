@@ -58,6 +58,34 @@ def test_nested_step_with_name_does_not_false_pass(tmp_path):
     assert "DRIFT (a)" in r.stdout
 
 
+def test_job_id_lock_entry_is_drift_when_job_has_name(tmp_path):
+    # Job declares `name: Code security`, so GitHub's check context is that
+    # name, NOT the job id "scan". A lock entry naming the job id must be flagged
+    # as drift — branch protection could never satisfy a "scan" context.
+    wf = "jobs:\n  scan:\n    name: Code security\n    steps:\n      - run: true\n"
+    r = _run(
+        tmp_path,
+        {"required": [{"name": "scan", "source_app": "github-actions",
+                       "workflow": ".github/workflows/security.yml", "job": "scan"}]},
+        {"security.yml": wf},
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "DRIFT (a)" in r.stdout
+
+
+def test_job_id_lock_entry_is_clean_when_no_job_name(tmp_path):
+    # No direct `name:`, so the effective check context IS the job id "test".
+    wf = "jobs:\n  test:\n    steps:\n      - run: true\n"
+    r = _run(
+        tmp_path,
+        {"required": [{"name": "test", "source_app": "github-actions",
+                       "workflow": ".github/workflows/tests.yml", "job": "test"}]},
+        {"tests.yml": wf},
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "required-checks: clean" in r.stdout
+
+
 def test_regex_metacharacters_in_name_are_literal(tmp_path):
     # "a.b" must match only the literal job name, not "axb" via regex `.`.
     wf = "jobs:\n  scan:\n    name: axb\n    steps:\n      - run: true\n"
