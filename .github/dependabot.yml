@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      all-actions:
+        patterns:
+          - "*"
+  # No `pip` ecosystem: this repo is Python-stdlib-only with no dependency
+  # manifest at `/` (pyproject.toml declares no [project.dependencies], and the
+  # only pip installs are inline pinned versions in CI workflows, which
+  # Dependabot's pip ecosystem cannot track). Re-add a pip entry if a real
+  # requirements.txt / pyproject dependency set is introduced.
