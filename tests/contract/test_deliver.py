@@ -295,6 +295,22 @@ def test_failing_verifier_fails_closed_with_bounded_tails(tmp_path: Path):
     assert Path(data["run_artifact_path"]).exists()
 
 
+def test_timeout_verifier_stderr_tail_stays_bounded(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+
+    def raise_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["slow"], timeout=5, output="partial", stderr="e" * 5005)
+
+    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    result = ns["run_verifiers"](tmp_path, ["slow=python -c pass"], 5)[0]
+
+    assert result["returncode"] == 124
+    assert result["ok"] is False
+    assert result["stdout_tail"] == "partial"
+    assert result["stderr_tail"].startswith("timeout after 5s\n")
+    assert len(result["stderr_tail"]) <= 4000
+
+
 def test_missing_verifier_command_fails_closed_with_structured_error(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -315,6 +331,7 @@ def test_missing_verifier_command_fails_closed_with_structured_error(tmp_path: P
     verifier = data["verifiers"][0]
     assert cp.returncode == 1
     assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
     assert data["decision"]["reason"] == "verifier_failed"
     assert verifier["name"] == "missing"
     assert verifier["returncode"] == 127
@@ -349,6 +366,7 @@ def test_non_executable_verifier_fails_closed_with_structured_error(tmp_path: Pa
     verifier_result = data["verifiers"][0]
     assert cp.returncode == 1
     assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
     assert data["decision"]["reason"] == "verifier_failed"
     assert verifier_result["name"] == "permission"
     assert verifier_result["returncode"] == 127
@@ -405,6 +423,7 @@ def test_empty_verifier_command_fails_closed(tmp_path: Path):
 
     assert cp.returncode == 1
     assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
     assert data["decision"]["reason"] == "verifier_failed"
     assert data["verifiers"][0]["ok"] is False
     assert data["verifiers"][0]["stderr_tail"] == "empty verifier command"

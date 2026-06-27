@@ -165,13 +165,15 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
                 "stderr_tail": tail(cp.stderr),
             })
         except subprocess.TimeoutExpired as e:
+            timeout_prefix = f"timeout after {timeout}s\n"
+            stderr_tail = timeout_prefix + tail(e.stderr, max(0, TAIL_LIMIT - len(timeout_prefix)))
             results.append({
                 "name": name,
                 "command": command,
                 "returncode": 124,
                 "ok": False,
                 "stdout_tail": tail(e.stdout),
-                "stderr_tail": f"timeout after {timeout}s\n{tail(e.stderr)}".rstrip(),
+                "stderr_tail": stderr_tail.rstrip(),
             })
         except OSError as e:
             results.append({
