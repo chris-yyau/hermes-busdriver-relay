@@ -204,3 +204,36 @@ def test_active_finalization_lock_blocks_delivery_status_handoff(tmp_path: Path)
     assert data["decision"]["push_allowed"] is False
     assert data["decision"]["pr_allowed"] is False
     assert data["decision"]["merge_allowed"] is False
+
+
+def test_finalization_lock_matches_when_repo_is_invoked_through_symlink(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    state = tmp_path / "relay-state"
+    repo_link = tmp_path / "repo-link"
+    repo_link.symlink_to(repo, target_is_directory=True)
+    assert run([sys.executable, str(LOCK), "acquire", "--repo", str(repo), "--state-dir", str(state), "--operation", "finalization"]).returncode == 0
+
+    data = invoke_with_lock_status(repo_link, plugin, state)
+
+    assert data["repo"]["root"] == str(repo.resolve())
+    assert data["finalization_lock"]["active_for_repo_count"] == 1
+    assert "relay_finalization_lock_active" in data["decision"]["blockers"]
+
+
+def test_invalid_finalization_lock_status_blocks_delivery_handoff(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    state = tmp_path / "relay-state"
+    bad_lock = state / "locks" / "bad.lock" / "lock.json"
+    bad_lock.parent.mkdir(parents=True)
+    bad_lock.write_text("{not-json\n")
+    (repo / "draft.txt").write_text("draft\n")
+
+    data = invoke_with_lock_status(repo, plugin, state)
+
+    assert data["finalization_lock"]["ok"] is False
+    assert data["finalization_lock"]["status"] == "invalid_lock_entry"
+    assert data["decision"]["status"] == "blocked"
+    assert "relay_finalization_lock_status_unavailable" in data["decision"]["blockers"]
+    assert data["decision"]["finalization_allowed"] is False

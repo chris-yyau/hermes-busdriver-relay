@@ -62,7 +62,7 @@ def repo_status(repo_arg: str) -> dict[str, Any]:
     root_cp = git(repo, "rev-parse", "--show-toplevel")
     if root_cp.returncode != 0:
         return {"ok": False, "error": "not_a_git_repo", "path": str(repo), "stderr": root_cp.stderr.strip()}
-    root = Path(root_cp.stdout.strip())
+    root = Path(root_cp.stdout.strip()).resolve()
     git_dir_cp = git(root, "rev-parse", "--git-dir")
     git_dir = Path(git_dir_cp.stdout.strip()) if git_dir_cp.returncode == 0 else root / ".git"
     if not git_dir.is_absolute():
@@ -208,16 +208,35 @@ def finalization_lock_summary(lock_status: dict[str, Any] | None, repo: dict[str
     summary: dict[str, Any] = {
         "operation": FINALIZATION_LOCK_OPERATION,
         "available": bool(lock_status and lock_status.get("available", True)),
+        "ok": True,
+        "status": "not_collected" if lock_status is None else "ok",
         "active_for_repo": [],
         "active_for_repo_count": 0,
         "stale_for_repo_count": 0,
     }
-    if not lock_status or not repo.get("ok"):
+    if lock_status is None:
+        return summary
+    if not summary["available"] or lock_status.get("ok") is False:
+        summary["ok"] = False
+        summary["status"] = "unavailable" if not summary["available"] else "collection_failed"
+        return summary
+    if not repo.get("ok"):
+        return summary
+    locks = lock_status.get("locks")
+    if not isinstance(locks, list):
+        summary["ok"] = False
+        summary["status"] = "invalid_lock_status"
         return summary
     repo_root = repo.get("root")
-    for lock in lock_status.get("locks") or []:
+    for lock in locks:
         if not isinstance(lock, dict):
-            continue
+            summary["ok"] = False
+            summary["status"] = "invalid_lock_entry"
+            return summary
+        if lock.get("parse_error"):
+            summary["ok"] = False
+            summary["status"] = "invalid_lock_entry"
+            return summary
         lock_repo = lock.get("repo") if isinstance(lock.get("repo"), dict) else {}
         if lock_repo.get("root") != repo_root or lock.get("operation") != FINALIZATION_LOCK_OPERATION:
             continue
@@ -297,7 +316,9 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
             blockers.append("git_merge_rebase_cherry_pick_state_active")
         if markers.get("blocking"):
             blockers.append("blocking_busdriver_marker_present")
-        if finalization_lock.get("active_for_repo_count", 0):
+        if finalization_lock.get("ok") is False:
+            blockers.append("relay_finalization_lock_status_unavailable")
+        elif finalization_lock.get("active_for_repo_count", 0):
             blockers.append("relay_finalization_lock_active")
 
     if not busdriver.get("ok"):
