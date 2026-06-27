@@ -593,6 +593,12 @@ def test_cubic_no_issues_review_body_is_not_actionable(tmp_path: Path):
     assert data["actionable_comments"] == []
 
 
+def test_cubic_no_issues_single_file_review_body_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**No issues found** across 1 file reviewed.", "user": {"login": "cubic-dev-ai[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
+
+
 def test_generic_bot_review_summary_without_inline_comment_is_not_actionable(tmp_path: Path):
     checks_file = tmp_path / "checks.txt"
     review_comments_file = tmp_path / "review-comments.json"
@@ -980,6 +986,12 @@ def test_unresolved_outdated_thread_id_is_ignored_like_resolved(tmp_path: Path):
 def test_devin_review_summary_without_live_inline_issue_is_not_actionable():
     ns = runpy.run_path(str(CHECK))
     reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**Devin Review** found 1 new potential issue.\n\n<!-- devin-review-badge-begin -->", "user": {"login": "devin-ai-integration[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
+
+
+def test_devin_review_summary_plural_without_live_inline_issue_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "**Devin Review** found 2 new potential issues.\n\n<!-- devin-review-badge-begin -->", "user": {"login": "devin-ai-integration[bot]"}}]
     assert ns["actionable_reviews"](reviews, "abc123def456") == []
 
 

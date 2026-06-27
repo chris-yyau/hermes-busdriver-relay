@@ -28,8 +28,8 @@ NON_ACTIONABLE = re.compile(
 PROGRESS_COMMENT = re.compile(r"currently processing new changes|review in progress by coderabbit", re.I)
 BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabbit", re.I)
 BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
-CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files\b", re.I)
-DEVIN_REVIEW_SUMMARY = re.compile(r"\*\*Devin Review\*\*\s+found\s+\d+\s+new potential issue", re.I)
+CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files?\b", re.I)
+DEVIN_REVIEW_SUMMARY = re.compile(r"\*\*Devin Review\*\*\s+found\s+\d+\s+new potential issues?", re.I)
 
 
 def is_cubic_no_issues_review(body: str, user_login: str | None) -> bool:
