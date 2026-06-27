@@ -432,6 +432,7 @@ def test_empty_verifier_command_fails_closed(tmp_path: Path):
     assert data["ok"] is False
     assert data["decision"]["status"] == "blocked"
     assert data["decision"]["reason"] == "verifier_failed"
+    assert data["verifiers"][0]["name"] == "empty"
     assert data["verifiers"][0]["ok"] is False
     assert data["verifiers"][0]["stderr_tail"] == "empty verifier command"
     assert Path(data["run_artifact_path"]).exists()
@@ -461,6 +462,36 @@ def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
     assert data["run_artifact_path"] is None
     assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in ["finalization_allowed", "commit_allowed", "push_allowed", "pr_allowed", "merge_allowed", "deploy_allowed", "release_allowed", "publish_allowed"]}}
     assert data["steps"][0] == {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"}
+    assert_finalization_blocked(data["decision"])
+
+
+def test_malformed_verifier_command_preserves_user_label(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        "quoted=python -c 'unterminated",
+        artifact_dir=artifact_dir,
+    )
+
+    verifier = data["verifiers"][0]
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "verifier_failed"
+    assert verifier["name"] == "quoted"
+    assert verifier["returncode"] == 2
+    assert verifier["ok"] is False
+    assert "No closing quotation" in verifier["stderr_tail"]
+    assert Path(data["run_artifact_path"]).exists()
     assert_finalization_blocked(data["decision"])
 
 

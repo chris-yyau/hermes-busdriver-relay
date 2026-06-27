@@ -138,6 +138,13 @@ def parse_verifier(item: str, index: int) -> tuple[str, str]:
     return f"verifier_{index}", command
 
 
+def verifier_error_name(item: str, index: int) -> str:
+    if VERIFIER_LABEL.match(item):
+        name, _command = item.split("=", 1)
+        return name.strip() or f"verifier_{index}"
+    return f"verifier_{index}"
+
+
 def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for index, item in enumerate(verifiers, start=1):
@@ -148,7 +155,7 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
                 raise ValueError("empty verifier command")
         except ValueError as e:
             results.append({
-                "name": f"verifier_{index}",
+                "name": verifier_error_name(item, index),
                 "command": item,
                 "returncode": 2,
                 "ok": False,
