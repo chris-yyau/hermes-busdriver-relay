@@ -27,6 +27,7 @@ FINALIZATION_POLICY = (
     "Use explicit Hermes Delivery Mode only after current Busdriver litmus/pre-PR "
     "semantics and a clean pr-grind-equivalent loop have been verified."
 )
+FINALIZATION_LOCK_OPERATION = "finalization"
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -203,6 +204,31 @@ def load_lock_status(args: argparse.Namespace) -> dict[str, Any] | None:
         return {"available": True, "ok": False, "parse_error": str(e), "stdout_tail": cp.stdout[-2000:]}
 
 
+def finalization_lock_summary(lock_status: dict[str, Any] | None, repo: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "operation": FINALIZATION_LOCK_OPERATION,
+        "available": bool(lock_status and lock_status.get("available", True)),
+        "active_for_repo": [],
+        "active_for_repo_count": 0,
+        "stale_for_repo_count": 0,
+    }
+    if not lock_status or not repo.get("ok"):
+        return summary
+    repo_root = repo.get("root")
+    for lock in lock_status.get("locks") or []:
+        if not isinstance(lock, dict):
+            continue
+        lock_repo = lock.get("repo") if isinstance(lock.get("repo"), dict) else {}
+        if lock_repo.get("root") != repo_root or lock.get("operation") != FINALIZATION_LOCK_OPERATION:
+            continue
+        if lock.get("stale") is True:
+            summary["stale_for_repo_count"] += 1
+            continue
+        summary["active_for_repo"].append(lock)
+    summary["active_for_repo_count"] = len(summary["active_for_repo"])
+    return summary
+
+
 def latest_agent_runs(args: argparse.Namespace, repo: dict[str, Any]) -> list[dict[str, Any]]:
     if args.no_agent_runs:
         return []
@@ -256,7 +282,7 @@ def run_pr_grind_check(args: argparse.Namespace, repo: dict[str, Any], busdriver
         return {"available": True, "ok": False, "script": str(script), "parse_error": str(e), "stdout_tail": cp.stdout[-4000:]}
 
 
-def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], pr_grind: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
+def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], finalization_lock: dict[str, Any], pr_grind: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
     stage = "unknown"
@@ -271,6 +297,8 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
             blockers.append("git_merge_rebase_cherry_pick_state_active")
         if markers.get("blocking"):
             blockers.append("blocking_busdriver_marker_present")
+        if finalization_lock.get("active_for_repo_count", 0):
+            blockers.append("relay_finalization_lock_active")
 
     if not busdriver.get("ok"):
         blockers.append("busdriver_plugin_unavailable")
@@ -349,8 +377,9 @@ def main() -> int:
     capabilities = relay_capabilities()
     pr_grind = run_pr_grind_check(args, repo, busdriver)
     locks = load_lock_status(args)
+    finalization_lock = finalization_lock_summary(locks, repo)
     runs = latest_agent_runs(args, repo)
-    decision = delivery_decision(repo, busdriver, markers, pr_grind, args.pr)
+    decision = delivery_decision(repo, busdriver, markers, finalization_lock, pr_grind, args.pr)
 
     result = {
         "schema": SCHEMA,
@@ -360,6 +389,7 @@ def main() -> int:
         "markers": markers,
         "relay_capabilities": capabilities,
         "lock_status": locks,
+        "finalization_lock": finalization_lock,
         "recent_agent_runs": runs,
         "pr_grind": pr_grind,
         "decision": decision,

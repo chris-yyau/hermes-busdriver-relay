@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.1` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, and **read-only Busdriver drift-baseline compatibility reporting**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, and **read-only finalization lock/status blocking**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -63,8 +63,8 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 153 passed
-py_compile: hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-delivery-status, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
+contract tests: 155 passed
+py_compile: hermes-busdriver-status, hermes-busdriver-lock, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.1
 hook_event_count 7
@@ -73,6 +73,9 @@ runtime_check.hook_manifest_available True
 runtime_check.gate_hooks_declared True
 runtime_check.inside_claude_code_hook_invocation False
 runtime_check.mutating_launcher_allowed False
+finalization_readiness.handoff_schema hermes-busdriver-handoff/v0
+finalization_readiness.commit_allowed False
+finalization_readiness.merge_allowed False
 clean temp repo preflight.agent_implementation_draft_allowed True
 clean temp repo preflight.commit_allowed False
 clean temp repo preflight.push_allowed False

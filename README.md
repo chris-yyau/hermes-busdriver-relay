@@ -69,7 +69,7 @@ scripts/hermes-busdriver-lock status --pretty
 scripts/hermes-busdriver-lock release --repo /path/to/repo --operation repo-mutation --token <token>
 ```
 
-Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo.
+Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo. Use operation `finalization` for explicit finalization handoff/Delivery Mode single-flight coordination; read-only delivery-status/finalization-readiness report an active per-repo `finalization` lock as a blocker and still keep all finalization authority false.
 
 ### Hook-runtime equivalence check
 
@@ -141,7 +141,7 @@ scripts/hermes-busdriver-delivery-status \
   --pretty
 ```
 
-This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
+This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, finalization-lock blocking state, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
 ### Delivery dispatcher
 
@@ -169,6 +169,7 @@ This is the first fail-closed dispatcher envelope for executable Delivery Mode. 
 scripts/hermes-busdriver-finalization-readiness \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
+  --relay-state-dir ~/.hermes/busdriver-relay \
   --pr 123 \
   --pretty
 ```
