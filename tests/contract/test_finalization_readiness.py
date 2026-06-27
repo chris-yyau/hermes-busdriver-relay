@@ -151,6 +151,59 @@ def test_clean_pr_grind_fixture_generates_merge_handoff_but_no_merge_authority(t
     assert not (repo / ".opencode").exists()
 
 
+def test_non_clean_pr_fixture_reports_delivery_blocker(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    pr_result = tmp_path / "pr-wait.json"
+    pr_result.write_text(json.dumps({"status": "wait", "clean": False, "checks": {"failed": 0, "pending": 1}, "actionable_comments": []}))
+
+    cp, data = invoke(repo, plugin, user_config, "--pr", "7", "--pr-grind-result-file", str(pr_result))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    assert "pr_checks_or_reviewer_bots_pending" in data["readiness"]["blockers"]
+    assert_no_finalization_authority(data["readiness"])
+
+
+def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
+    mod = __import__("runpy").run_path(str(READINESS))
+    args = __import__("types").SimpleNamespace(pr="7", target="auto")
+    delivery = {
+        "ok": True,
+        "decision": {"status": "no_local_delivery_candidate", "blockers": [], "warnings": []},
+        "repo": {"dirty": False},
+    }
+    phase0 = {
+        "status_schema": "hermes-busdriver-status/v0",
+        "plugin_root": {"exists": True},
+        "hooks": {"exists": True},
+        "repo": {"is_git_repo": True},
+        "relay_locks": {"active_for_repo_count": 0},
+        "user_config": {"exists": True},
+        "resolve_cli": {"ok": True},
+        "minimum_gate_scripts": {},
+    }
+
+    data = mod["readiness"](args, delivery, phase0)
+
+    assert data["ready"] is False
+    assert data["status"] == "pr_not_clean_read_only"
+    assert "pr-grind is not clean" in data["next_action"]
+    assert_no_finalization_authority(data)
+
+
+def test_child_nonzero_json_is_forced_to_not_ok(tmp_path: Path):
+    child = tmp_path / "child.py"
+    child.write_text("import json, sys\nprint(json.dumps({'ok': True}))\nsys.exit(2)\n")
+
+    data, returncode = __import__("runpy").run_path(str(READINESS))["run_json"]([sys.executable, str(child)], 10)
+
+    assert returncode == 2
+    assert data["ok"] is False
+
+
 def test_missing_phase0_hooks_block_handoff_even_when_worktree_dirty(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver", hooks=False)

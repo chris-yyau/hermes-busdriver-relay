@@ -33,6 +33,13 @@ def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
     return {"cmd": cmd, "returncode": p.returncode, "ok": p.returncode == 0, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
 
 
+def mark_summary_parse_error(check: dict[str, Any], error: Exception) -> None:
+    check["summary_parse_error"] = str(error)
+    check["ok"] = False
+    if check.get("returncode") == 0:
+        check["returncode"] = 1
+
+
 def pytest_cmd() -> list[str]:
     probe = subprocess.run([sys.executable, "-c", "import pytest"], text=True, capture_output=True)
     if probe.returncode == 0:
@@ -74,7 +81,7 @@ def main() -> int:
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-status --pretty for details>"
             except Exception as e:  # noqa: BLE001
-                checks[-1]["summary_parse_error"] = str(e)
+                mark_summary_parse_error(checks[-1], e)
 
         runtime_cmd = [sys.executable, str(RUNTIME), "--plugin-root", args.plugin_root]
         if args.repo:
@@ -92,7 +99,7 @@ def main() -> int:
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-runtime-check --pretty for details>"
             except Exception as e:  # noqa: BLE001
-                checks[-1]["summary_parse_error"] = str(e)
+                mark_summary_parse_error(checks[-1], e)
 
         readiness_cmd = [sys.executable, str(FINALIZATION_READINESS), "--plugin-root", args.plugin_root]
         if args.repo:
@@ -111,7 +118,7 @@ def main() -> int:
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-finalization-readiness --pretty for details>"
             except Exception as e:  # noqa: BLE001
-                checks[-1]["summary_parse_error"] = str(e)
+                mark_summary_parse_error(checks[-1], e)
 
         if args.repo:
             gate_cmd = [sys.executable, str(GATE), "preflight", "--plugin-root", args.plugin_root, "--repo", args.repo]
@@ -129,7 +136,7 @@ def main() -> int:
                     }
                     checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-gate preflight --pretty for details>"
                 except Exception as e:  # noqa: BLE001
-                    checks[-1]["summary_parse_error"] = str(e)
+                    mark_summary_parse_error(checks[-1], e)
 
     ok = all(c["ok"] for c in checks)
     result = {"schema": "hermes-busdriver-smoke/v0", "ok": ok, "checks": checks}

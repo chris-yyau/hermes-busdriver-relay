@@ -86,7 +86,7 @@ def run_json(cmd: list[str], timeout: int) -> tuple[dict[str, Any], int]:
     if not isinstance(data, dict):
         return {"ok": False, "error": "invalid_json_type", "cmd": cmd, "returncode": cp.returncode}, cp.returncode
     if cp.returncode != 0:
-        data.setdefault("ok", False)
+        data["ok"] = False
         data["returncode"] = cp.returncode
         data["stderr"] = cp.stderr[-4000:]
     return data, cp.returncode
@@ -201,6 +201,9 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
             state = "ready_for_merge_handoff"
             handoff_ready = True
             next_action = "Hand this envelope to Busdriver/Claude or an explicit operator finalizer; this helper must not merge."
+        elif args.pr:
+            state = "pr_not_clean_read_only"
+            next_action = "PR was supplied but read-only pr-grind is not clean; wait for checks/reviewers or fix actionable feedback, then re-run."
         elif repo.get("dirty"):
             state = "ready_for_commit_or_pr_handoff"
             handoff_ready = True
