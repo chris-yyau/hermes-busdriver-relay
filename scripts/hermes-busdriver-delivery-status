@@ -34,8 +34,13 @@ def run(cmd: list[str], cwd: Path | None = None, timeout: int = 60) -> subproces
         return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
     except FileNotFoundError as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 124, "", f"timeout after {timeout}s")
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr_tail = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        stderr = f"timeout after {timeout}s"
+        if stderr_tail:
+            stderr = f"{stderr}: {stderr_tail}"
+        return subprocess.CompletedProcess(cmd, 124, stdout, stderr)
 
 
 def read_json(path: str | None, default: Any) -> Any:

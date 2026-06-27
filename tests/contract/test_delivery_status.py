@@ -136,12 +136,13 @@ def test_timed_out_pr_grind_checker_reports_structured_blocker(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     checker = tmp_path / "slow_checker.py"
-    checker.write_text("import time\ntime.sleep(5)\n")
+    checker.write_text('import time\nprint("partial stdout", flush=True)\ntime.sleep(5)\n')
 
     data = invoke(repo, plugin, "--pr", "7", "--pr-grind-check-script", str(checker), "--pr-grind-timeout", "1")
 
     assert data["pr_grind"]["ok"] is False
     assert data["pr_grind"]["returncode"] == 124
+    assert data["pr_grind"]["stdout_tail"] == "partial stdout\n"
     assert "timeout after 1s" in data["pr_grind"]["stderr"]
     assert data["decision"]["status"] == "blocked"
     assert "pr_grind_checker_failed" in data["decision"]["blockers"]
