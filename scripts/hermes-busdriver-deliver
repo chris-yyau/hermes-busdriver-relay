@@ -21,6 +21,14 @@ SCHEMA = "hermes-busdriver-deliver/v0"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
 VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
+REDACTION = "[REDACTED]"
+SENSITIVE_PATTERNS = [
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
 BLOCKED_FLAGS = {
     "finalization_allowed": False,
     "commit_allowed": False,
@@ -31,6 +39,22 @@ BLOCKED_FLAGS = {
     "release_allowed": False,
     "publish_allowed": False,
 }
+
+
+def redact_text(text: str) -> str:
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_value(item) for key, item in value.items()}
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +82,7 @@ def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
         text = value.decode(errors="replace")
     else:
         text = value or ""
+    text = redact_text(text)
     if limit <= 0:
         return ""
     return text[-limit:]
@@ -348,12 +373,13 @@ def main() -> int:
         "decision": result_decision,
         "run_artifact_path": None,
     }
+    result = redact_value(result)
     if args.mode == "execute" and args.operation == "verify":
         try:
             write_artifact(result)
         except OSError as e:
             result["ok"] = False
-            result["run_artifact_error"] = str(e)
+            result["run_artifact_error"] = redact_text(str(e))
             result["decision"] = decision("blocked", "artifact_write_failed")
             result["steps"] = steps_for("artifact_write_failed")
             returncode = 1
