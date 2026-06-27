@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Read-only bounded PR-grind polling loop for Hermes Delivery Mode.
+
+This helper repeatedly invokes `hermes-busdriver-pr-grind-check` until the latest
+PR HEAD is clean, needs a fix, is blocked, or a bounded wait budget is exhausted.
+It never writes Busdriver markers, never pushes fixes, and never merges; it only
+emits a deterministic envelope that an explicit operator finalizer can inspect.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
+SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
+FINALIZATION_FLAGS = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Read-only bounded PR-grind polling loop")
+    ap.add_argument("--repo", default=".", help="Target git repo/worktree")
+    ap.add_argument("--pr", required=True, help="Pull request number")
+    ap.add_argument("--plugin-root", help="Busdriver plugin root passed through to the checker")
+    ap.add_argument("--check-script", help="Path to hermes-busdriver-pr-grind-check")
+    ap.add_argument("--check-timeout", type=float, default=180.0)
+    ap.add_argument("--max-wait-seconds", type=float, default=300.0, help="Bounded wait budget for check/reviewer-bot pending states")
+    ap.add_argument("--poll-interval", type=float, default=30.0, help="Seconds between wait polls; tests may pass 0")
+    ap.add_argument("--max-polls", type=int, default=20, help="Safety cap on checker invocations")
+    ap.add_argument("--max-fix-rounds", type=int, default=0, help="Recorded for policy visibility only; fixing is read-only/disabled")
+    ap.add_argument(
+        "--fixture-result-file",
+        action="append",
+        default=[],
+        help="Offline test fixture result JSON. May be repeated to simulate polling rounds.",
+    )
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+    if args.max_wait_seconds < 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "negative_max_wait_seconds"}))
+    if args.poll_interval < 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "negative_poll_interval"}))
+    if args.max_polls < 1:
+        raise SystemExit(json.dumps({"ok": False, "error": "invalid_max_polls"}))
+    if args.max_fix_rounds != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "fix_rounds_not_supported_in_read_only_loop"}))
+    return args
+
+
+def tail(value: str | bytes | None, limit: int = 4000) -> str:
+    text = value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+    return text[-limit:]
+
+
+def run_check(args: argparse.Namespace, fixture_index: int) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if args.fixture_result_file:
+        index = min(fixture_index, len(args.fixture_result_file) - 1)
+        path = Path(args.fixture_result_file[index]).expanduser()
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:  # noqa: BLE001 - fixture parse errors should become structured policy gaps
+            return None, {"ok": False, "source": "fixture", "path": str(path), "error": "fixture_parse_failed", "detail": str(e)}
+        return data, {"ok": True, "source": "fixture", "path": str(path)}
+
+    script = Path(args.check_script).expanduser() if args.check_script else CHECK
+    cmd = [sys.executable, str(script), "--repo", args.repo, "--pr", str(args.pr)]
+    if args.plugin_root:
+        cmd += ["--plugin-root", args.plugin_root]
+    try:
+        cp = subprocess.run(cmd, text=True, capture_output=True, timeout=args.check_timeout, check=False)
+    except subprocess.TimeoutExpired as e:
+        return None, {
+            "ok": False,
+            "source": str(script),
+            "returncode": 124,
+            "error": "check_timeout",
+            "stdout_tail": tail(e.stdout),
+            "stderr_tail": tail(e.stderr),
+        }
+    except OSError as e:
+        return None, {"ok": False, "source": str(script), "returncode": 127, "error": type(e).__name__, "stderr_tail": tail(str(e))}
+
+    if cp.returncode != 0:
+        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_failed", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr)}
+    try:
+        data = json.loads(cp.stdout)
+    except json.JSONDecodeError as e:
+        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_invalid_json", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr), "detail": str(e)}
+    if not isinstance(data, dict):
+        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_json_not_object"}
+    return data, {"ok": True, "source": str(script), "returncode": cp.returncode}
+
+
+def summarize_iteration(result: dict[str, Any], meta: dict[str, Any], index: int, elapsed: float) -> dict[str, Any]:
+    checks = result.get("checks") if isinstance(result.get("checks"), dict) else {}
+    comments = result.get("actionable_comments") if isinstance(result.get("actionable_comments"), list) else []
+    decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+    return {
+        "iteration": index,
+        "elapsed_seconds": round(elapsed, 3),
+        "source": meta.get("source"),
+        "status": result.get("status"),
+        "clean": result.get("clean"),
+        "head": result.get("head"),
+        "base": result.get("base"),
+        "blockers": result.get("blockers") if isinstance(result.get("blockers"), list) else [],
+        "checks": {
+            "failed": checks.get("failed"),
+            "pending": checks.get("pending"),
+            "mode": checks.get("mode"),
+            "kept": checks.get("kept"),
+            "source": checks.get("source"),
+        },
+        "actionable_comment_count": len(comments),
+        "decision_reason": decision.get("reason"),
+    }
+
+
+def is_head_changed(result: dict[str, Any]) -> bool:
+    decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+    blockers = result.get("blockers") if isinstance(result.get("blockers"), list) else []
+    return decision.get("reason") == "head_changed" or any(str(item).startswith("head_changed_during_collection:") for item in blockers)
+
+
+def final_decision(status: str, reason: str, pr_clean: bool = False) -> dict[str, Any]:
+    return {
+        "status": status,
+        "reason": reason,
+        "pr_grind_clean": pr_clean,
+        "fixing_allowed": False,
+        "fix_rounds_attempted": 0,
+        "marker_write_allowed": False,
+        "ack_ledger_policy": "delegated_to_pr_grind_check_read_only; no ack or Busdriver marker writes",
+        **FINALIZATION_FLAGS,
+    }
+
+
+def result_envelope(args: argparse.Namespace, ok: bool, status: str, reason: str, iterations: list[dict[str, Any]], policy_gaps: list[str], latest: dict[str, Any] | None, started: float) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "version": 1,
+        "ok": ok,
+        "repo": str(Path(args.repo).expanduser()),
+        "pr": int(args.pr) if str(args.pr).isdigit() else args.pr,
+        "status": status,
+        "clean": status == "clean",
+        "latest_head": latest.get("head") if isinstance(latest, dict) else None,
+        "iterations": iterations,
+        "policy_gaps": policy_gaps,
+        "limits": {
+            "max_wait_seconds": args.max_wait_seconds,
+            "poll_interval": args.poll_interval,
+            "max_polls": args.max_polls,
+            "max_fix_rounds": args.max_fix_rounds,
+        },
+        "read_only": True,
+        "decision": final_decision(status, reason, pr_clean=status == "clean"),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    started = time.monotonic()
+    iterations: list[dict[str, Any]] = []
+    policy_gaps: list[str] = []
+    latest: dict[str, Any] | None = None
+    fixture_index = 0
+
+    for index in range(1, args.max_polls + 1):
+        now = time.monotonic()
+        elapsed = now - started
+        if index > 1 and elapsed >= args.max_wait_seconds:
+            envelope = result_envelope(args, False, "wait", "max_wait_exhausted", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        data, meta = run_check(args, fixture_index)
+        fixture_index += 1
+        if data is None:
+            policy_gaps.append(str(meta.get("error") or "check_unavailable"))
+            envelope = result_envelope(args, False, "blocked", "checker_failed", iterations, policy_gaps, latest, started)
+            envelope["checker_error"] = meta
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 2
+
+        latest = data
+        iterations.append(summarize_iteration(data, meta, index, elapsed))
+        status = str(data.get("status") or "")
+        if not status:
+            policy_gaps.append("missing_pr_grind_status")
+            envelope = result_envelope(args, False, "blocked", "policy_gap", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        if data.get("clean") is True or status == "clean":
+            envelope = result_envelope(args, True, "clean", "latest_pr_head_clean_read_only", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 0
+        if status == "needs_fix":
+            envelope = result_envelope(args, False, "needs_fix", "actionable_feedback_present_read_only_no_fix", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        if status == "blocked" and not is_head_changed(data):
+            envelope = result_envelope(args, False, "blocked", "pr_grind_blocked", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+
+        if status != "wait" and not (status == "blocked" and is_head_changed(data)):
+            policy_gaps.append(f"unrecognized_status:{status}")
+            envelope = result_envelope(args, False, "blocked", "policy_gap", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+
+        # `wait` and `head_changed` are the only statuses that may be re-polled.
+        if time.monotonic() - started >= args.max_wait_seconds or index >= args.max_polls:
+            reason = "max_wait_exhausted" if index < args.max_polls else "max_polls_exhausted"
+            envelope = result_envelope(args, False, "wait", reason, iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        if args.poll_interval:
+            remaining = args.max_wait_seconds - (time.monotonic() - started)
+            time.sleep(max(0.0, min(args.poll_interval, remaining)))
+
+    envelope = result_envelope(args, False, "wait", "max_polls_exhausted", iterations, policy_gaps, latest, started)
+    print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

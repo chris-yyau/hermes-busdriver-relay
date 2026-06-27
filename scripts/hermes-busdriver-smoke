@@ -24,12 +24,32 @@ AGENT_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
 AGENT_SMOKE = ROOT / "scripts" / "hermes-busdriver-agent-smoke"
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PR_GRIND_CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
+PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
 DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
+FINALIZATION_READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
-    p = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+    try:
+        p = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        return {
+            "cmd": cmd,
+            "returncode": 124,
+            "ok": False,
+            "stdout": stdout.strip(),
+            "stderr": (stderr.strip() or f"timed out after {timeout}s"),
+        }
     return {"cmd": cmd, "returncode": p.returncode, "ok": p.returncode == 0, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
+
+
+def mark_summary_parse_error(check: dict[str, Any], error: Exception) -> None:
+    check["summary_parse_error"] = str(error)
+    check["ok"] = False
+    if check.get("returncode") == 0:
+        check["returncode"] = 1
 
 
 def pytest_cmd() -> list[str]:
@@ -53,7 +73,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK), str(DELIVER)]))
+    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK), str(PR_GRIND_LOOP), str(DELIVER), str(FINALIZATION_READINESS)]))
     checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
@@ -73,7 +93,7 @@ def main() -> int:
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-status --pretty for details>"
             except Exception as e:  # noqa: BLE001
-                checks[-1]["summary_parse_error"] = str(e)
+                mark_summary_parse_error(checks[-1], e)
 
         runtime_cmd = [sys.executable, str(RUNTIME), "--plugin-root", args.plugin_root]
         if args.repo:
@@ -91,7 +111,26 @@ def main() -> int:
                 }
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-runtime-check --pretty for details>"
             except Exception as e:  # noqa: BLE001
-                checks[-1]["summary_parse_error"] = str(e)
+                mark_summary_parse_error(checks[-1], e)
+
+        readiness_cmd = [sys.executable, str(FINALIZATION_READINESS), "--plugin-root", args.plugin_root]
+        if args.repo:
+            readiness_cmd += ["--repo", args.repo]
+        checks.append(run(readiness_cmd, timeout=90))
+        if checks[-1]["ok"]:
+            try:
+                readiness = json.loads(checks[-1]["stdout"])
+                dec = readiness.get("readiness") or {}
+                checks[-1]["summary"] = {
+                    "status": dec.get("status"),
+                    "ready": dec.get("ready"),
+                    "commit_allowed": dec.get("commit_allowed"),
+                    "merge_allowed": dec.get("merge_allowed"),
+                    "handoff_schema": (readiness.get("handoff_envelope") or {}).get("schema"),
+                }
+                checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-finalization-readiness --pretty for details>"
+            except Exception as e:  # noqa: BLE001
+                mark_summary_parse_error(checks[-1], e)
 
         if args.repo:
             gate_cmd = [sys.executable, str(GATE), "preflight", "--plugin-root", args.plugin_root, "--repo", args.repo]
@@ -109,7 +148,7 @@ def main() -> int:
                     }
                     checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-gate preflight --pretty for details>"
                 except Exception as e:  # noqa: BLE001
-                    checks[-1]["summary_parse_error"] = str(e)
+                    mark_summary_parse_error(checks[-1], e)
 
     ok = all(c["ok"] for c in checks)
     result = {"schema": "hermes-busdriver-smoke/v0", "ok": ok, "checks": checks}

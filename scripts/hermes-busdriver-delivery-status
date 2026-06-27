@@ -177,6 +177,7 @@ def relay_capabilities() -> dict[str, Any]:
         "gate": ROOT / "scripts" / "hermes-busdriver-gate",
         "agent_draft": ROOT / "scripts" / "hermes-busdriver-agent-draft",
         "pr_grind_check": ROOT / "scripts" / "hermes-busdriver-pr-grind-check",
+        "pr_grind_loop": ROOT / "scripts" / "hermes-busdriver-pr-grind-loop",
         "delivery_status": ROOT / "scripts" / "hermes-busdriver-delivery-status",
     }
     return {name: {"path": str(path), "available": path.exists()} for name, path in scripts.items()}

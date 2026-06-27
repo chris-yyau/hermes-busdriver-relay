@@ -38,8 +38,11 @@ scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate 
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
-scripts/hermes-busdriver-deliver           Fail-closed Delivery Mode dispatcher skeleton
+scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher
+scripts/hermes-busdriver-finalization-readiness
+                                           Read-only finalization handoff envelope
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
+scripts/hermes-busdriver-pr-grind-loop     Read-only bounded PR-grind polling loop
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
 ```
@@ -139,7 +142,7 @@ scripts/hermes-busdriver-delivery-status \
 
 This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
-### Delivery dispatcher skeleton
+### Delivery dispatcher
 
 ```bash
 scripts/hermes-busdriver-deliver \
@@ -147,9 +150,29 @@ scripts/hermes-busdriver-deliver \
   --plugin-root /path/to/busdriver \
   --pr 123 \
   --pretty
+
+scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --mode execute \
+  --operation verify \
+  --verifier 'tests=pytest -q' \
+  --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. In this slice it is still plan/status only: it calls the read-only delivery-status probe, returns ordered delivery steps, and keeps commit, push, PR creation, merge, deploy, release, and publish disabled. `--mode execute` is intentionally unsupported and returns blocked rather than performing side effects.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+
+### Finalization readiness handoff
+
+```bash
+scripts/hermes-busdriver-finalization-readiness \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --pr 123 \
+  --pretty
+```
+
+This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
 
 ### PR-grind readiness check
 
@@ -162,6 +185,20 @@ scripts/hermes-busdriver-pr-grind-check \
 ```
 
 This is a read-only Delivery Mode helper. It checks the latest PR HEAD, mergeability, relevant `gh pr checks` output using Busdriver `scripts/relevant-check-status.sh` when available, and current-head review comments. It returns `clean`, `wait`, `needs_fix`, or `blocked`; it does **not** write `pr-grind-clean.local`, create commits, push, merge, or replace Busdriver's dispatcher-owned `pr-grind` loop.
+
+### PR-grind bounded loop
+
+```bash
+scripts/hermes-busdriver-pr-grind-loop \
+  --repo /path/to/repo \
+  --pr 123 \
+  --plugin-root /path/to/busdriver \
+  --max-wait-seconds 300 \
+  --poll-interval 30 \
+  --pretty
+```
+
+This read-only loop repeatedly invokes `hermes-busdriver-pr-grind-check` until the latest PR HEAD is clean, needs a fix, is blocked, or the wait/poll budget expires. It re-polls after latest-head drift, records the ack-ledger policy as delegated to the checker, and refuses fix rounds (`--max-fix-rounds` must remain `0`). It never commits, pushes, writes Busdriver markers, or merges; even a clean result keeps finalization authority false for explicit operator finalization.
 
 ### Safe smoke checks
 
