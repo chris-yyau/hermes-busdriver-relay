@@ -38,6 +38,7 @@ scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate 
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
+scripts/hermes-busdriver-deliver           Fail-closed Delivery Mode dispatcher skeleton
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-smoke             Safe smoke runner
 tests/contract/                            Contract tests
@@ -137,6 +138,18 @@ scripts/hermes-busdriver-delivery-status \
 ```
 
 This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
+
+### Delivery dispatcher skeleton
+
+```bash
+scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --pr 123 \
+  --pretty
+```
+
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. In this slice it is still plan/status only: it calls the read-only delivery-status probe, returns ordered delivery steps, and keeps commit, push, PR creation, merge, deploy, release, and publish disabled. `--mode execute` is intentionally unsupported and returns blocked rather than performing side effects.
 
 ### PR-grind readiness check
 

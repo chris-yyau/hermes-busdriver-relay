@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Fail-closed Hermes delivery dispatcher skeleton."""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
+SCHEMA = "hermes-busdriver-deliver/v0"
+BLOCKED_FLAGS = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Fail-closed Hermes Delivery Mode dispatcher")
+    parser.add_argument("--repo", help="Target git repo/worktree to inspect")
+    parser.add_argument("--plugin-root", help="Busdriver plugin root")
+    parser.add_argument("--pr", help="Pull request number for post-PR status")
+    parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through to delivery-status")
+    parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
+    parser.add_argument("--mode", default="plan", choices=["plan", "execute"], help="Delivery mode; execute is not enabled")
+    parser.add_argument("--pretty", action="store_true")
+    return parser.parse_args()
+
+
+def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    cmd = [sys.executable, str(DELIVERY_STATUS)]
+    if args.repo:
+        cmd += ["--repo", args.repo]
+    if args.plugin_root:
+        cmd += ["--plugin-root", args.plugin_root]
+    if args.pr:
+        cmd += ["--pr", args.pr]
+    if args.pr_grind_result_file:
+        cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
+
+    try:
+        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=args.delivery_status_timeout)
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else str(e.stdout or "")
+        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else str(e.stderr or "")
+        return {
+            "ok": False,
+            "error": "delivery_status_timeout",
+            "returncode": 124,
+            "timeout_seconds": args.delivery_status_timeout,
+            "stdout_tail": stdout[-2000:],
+            "stderr": stderr.strip()[-2000:],
+        }, 124
+    try:
+        data = json.loads(cp.stdout)
+    except json.JSONDecodeError as e:
+        data = {
+            "ok": False,
+            "error": "delivery_status_invalid_json",
+            "parse_error": str(e),
+            "returncode": cp.returncode,
+            "stderr": cp.stderr.strip(),
+            "stdout_tail": cp.stdout[-2000:],
+        }
+    if not isinstance(data, dict):
+        data = {
+            "ok": False,
+            "error": "delivery_status_invalid_json_type",
+            "returncode": cp.returncode,
+            "stderr": cp.stderr.strip(),
+            "stdout_tail": cp.stdout[-2000:],
+        }
+    if cp.returncode != 0:
+        data["ok"] = False
+        data["returncode"] = cp.returncode
+        data["stderr"] = cp.stderr.strip()
+    return data, cp.returncode
+
+
+def pr_summary(pr: str | None, delivery_status: dict[str, Any]) -> dict[str, Any] | None:
+    if not pr:
+        return None
+    pr_grind = delivery_status.get("pr_grind") or {}
+    result = pr_grind.get("result") or {}
+    return {
+        "number": pr,
+        "available": pr_grind.get("available"),
+        "ok": pr_grind.get("ok"),
+        "status": result.get("status"),
+        "clean": result.get("clean"),
+    }
+
+
+def steps_for(reason: str | None) -> list[dict[str, str]]:
+    if reason == "delivery_status_failed":
+        return [
+            {"name": "delivery_status", "status": "blocked", "reason": "helper_failed"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "execute_unsupported":
+        return [
+            {"name": "execute", "status": "blocked", "reason": "execute_mode_not_enabled"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    return [
+        {"name": "review_delivery_status", "status": "pending", "reason": "plan_only"},
+        {"name": "commit", "status": "blocked", "reason": "finalization_disabled"},
+        {"name": "push", "status": "blocked", "reason": "finalization_disabled"},
+        {"name": "pr", "status": "blocked", "reason": "finalization_disabled"},
+        {"name": "merge", "status": "blocked", "reason": "finalization_disabled"},
+        {"name": "deploy", "status": "blocked", "reason": "finalization_disabled"},
+    ]
+
+
+def decision(status: str, reason: str) -> dict[str, Any]:
+    return {"status": status, "reason": reason, **BLOCKED_FLAGS}
+
+
+def main() -> int:
+    args = parse_args()
+    delivery_status, status_rc = run_delivery_status(args)
+
+    reason = None
+    result_ok = bool(delivery_status.get("ok"))
+    result_decision = decision("plan_only", "read_only_plan")
+    if not result_ok:
+        reason = "delivery_status_failed"
+        result_decision = decision("blocked", reason)
+    elif args.mode != "plan":
+        reason = "execute_unsupported"
+        result_ok = False
+        result_decision = decision("blocked", "execute_mode_not_enabled")
+
+    result = {
+        "schema": SCHEMA,
+        "ok": result_ok,
+        "mode": args.mode,
+        "repo": delivery_status.get("repo"),
+        "pr": pr_summary(args.pr, delivery_status),
+        "delivery_status": delivery_status,
+        "steps": steps_for(reason),
+        "decision": result_decision,
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    if reason == "execute_unsupported":
+        return 2
+    return 0 if result_ok else (status_rc or 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

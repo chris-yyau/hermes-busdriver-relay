@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.0` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, and a **read-only PR-grind readiness checker**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has a deterministic checker for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, and a **fail-closed delivery dispatcher skeleton**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/plan envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
@@ -27,6 +27,7 @@ Implemented:
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-smoke`
 - `scripts/hermes-busdriver-delivery-status`
+- `scripts/hermes-busdriver-deliver`
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
@@ -36,6 +37,7 @@ Implemented:
 - `tests/contract/test_agent_draft.py`
 - `tests/contract/test_agent_smoke.py`
 - `tests/contract/test_delivery_status.py`
+- `tests/contract/test_deliver.py`
 - `tests/contract/test_pr_grind_check.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
@@ -57,7 +59,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 100 passed
+contract tests: 110 passed
 smoke_ok True
 package_version 1.71.0
 hook_event_count 7
@@ -76,6 +78,7 @@ clean temp repo preflight.pr_allowed False
 
 These are not missing work; they are blocked by design until stronger equivalent finalization gates exist:
 
+- `hermes-busdriver-deliver` commit/push/PR/merge execution mode
 - `hermes-busdriver-codex-goal` with commit authority
 - repo-mutating Codex (others temporarily deferred) launcher finalization
 - `.claude/hermes/jobs` queue

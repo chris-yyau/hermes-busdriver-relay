@@ -30,6 +30,7 @@ BOT_SUMMARY_COMMENT = re.compile(r"auto-generated comment: summarize by coderabb
 BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", re.I)
 CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files?\b", re.I)
 DEVIN_REVIEW_SUMMARY = re.compile(r"\*\*Devin Review\*\*\s+found\s+\d+\s+new potential issues?", re.I)
+DEVIN_NO_ISSUES_REVIEW = re.compile(r"^\s*(?:#+\s*)?(?:(?:✅|✔️|✔)\s*)?Devin Review:\s*No Issues Found\b", re.I)
 
 
 def is_cubic_no_issues_review(body: str, user_login: str | None) -> bool:
@@ -55,6 +56,8 @@ def is_ignorable_bot_summary(body: str, user_login: str | None) -> bool:
 
 def is_ignorable_review_body(body: str, user_login: str | None) -> bool:
     login = (user_login or "").lower()
+    if "devin" in login and DEVIN_NO_ISSUES_REVIEW.search(body):
+        return True
     if "devin" in login and DEVIN_REVIEW_SUMMARY.search(body):
         return True
     if "bot" not in login or "here are some automated review suggestions" not in body.lower():
