@@ -41,8 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
     parser.add_argument("--mode", default="plan", choices=["plan", "execute"], help="Delivery mode; only execute verify is enabled")
-    parser.add_argument("--operation", default="plan", help="Delivery operation; execute supports only verify")
-    parser.add_argument("--verifier", action="append", default=[], help="NAME=COMMAND or COMMAND. May be repeated for execute verify.")
+    parser.add_argument("--operation", default="plan", choices=["plan", "verify"], help="Delivery operation; execute supports only verify")
+    parser.add_argument(
+        "--verifier",
+        action="append",
+        default=[],
+        help="Trusted NAME=COMMAND or COMMAND executed locally with shell=False; launch errors fail closed. May be repeated for execute verify.",
+    )
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args()
 
@@ -168,6 +173,15 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
                 "stdout_tail": tail(e.stdout),
                 "stderr_tail": f"timeout after {timeout}s\n{tail(e.stderr)}".rstrip(),
             })
+        except OSError as e:
+            results.append({
+                "name": name,
+                "command": command,
+                "returncode": 127,
+                "ok": False,
+                "stdout_tail": "",
+                "stderr_tail": tail(f"{type(e).__name__}: {e}"),
+            })
     return results
 
 
@@ -180,8 +194,12 @@ def artifact_path() -> Path:
 def write_artifact(result: dict[str, Any]) -> None:
     path = artifact_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     result["run_artifact_path"] = str(path)
+    try:
+        path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    except OSError:
+        result["run_artifact_path"] = None
+        raise
 
 
 def steps_for(reason: str | None) -> list[dict[str, str]]:

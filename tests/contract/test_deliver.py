@@ -71,6 +71,14 @@ def assert_finalization_blocked(decision: dict) -> None:
         assert decision[key] is False
 
 
+def test_verifier_help_warns_commands_execute_locally():
+    cp = run([sys.executable, str(DELIVER), "--help"])
+
+    assert cp.returncode == 0
+    assert "shell=False" in cp.stdout
+    assert "launch errors fail closed" in cp.stdout
+
+
 def test_default_plan_mode_is_read_only_status_envelope(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -250,7 +258,9 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     assert artifact.parent == artifact_dir
     assert artifact.exists()
     assert repo not in artifact.parents
-    assert json.loads(artifact.read_text())["verifiers"][0]["name"] == "smoke"
+    artifact_data = json.loads(artifact.read_text())
+    assert artifact_data["run_artifact_path"] == str(artifact)
+    assert artifact_data["verifiers"][0]["name"] == "smoke"
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
 
@@ -283,6 +293,70 @@ def test_failing_verifier_fails_closed_with_bounded_tails(tmp_path: Path):
     assert len(data["verifiers"][0]["stdout_tail"]) <= 4000
     assert len(data["verifiers"][0]["stderr_tail"]) <= 4000
     assert Path(data["run_artifact_path"]).exists()
+
+
+def test_missing_verifier_command_fails_closed_with_structured_error(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        "missing=definitely-missing-hermes-verifier-command",
+        artifact_dir=artifact_dir,
+    )
+
+    verifier = data["verifiers"][0]
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["reason"] == "verifier_failed"
+    assert verifier["name"] == "missing"
+    assert verifier["returncode"] == 127
+    assert verifier["ok"] is False
+    assert verifier["stdout_tail"] == ""
+    assert "FileNotFoundError" in verifier["stderr_tail"]
+    assert len(verifier["stderr_tail"]) <= 4000
+    assert Path(data["run_artifact_path"]).exists()
+    assert_finalization_blocked(data["decision"])
+
+
+def test_non_executable_verifier_fails_closed_with_structured_error(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    verifier = tmp_path / "not-executable"
+    verifier.write_text("#!/bin/sh\necho should-not-run\n")
+    verifier.chmod(0o644)
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--verifier",
+        f"permission={verifier}",
+        artifact_dir=artifact_dir,
+    )
+
+    verifier_result = data["verifiers"][0]
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["reason"] == "verifier_failed"
+    assert verifier_result["name"] == "permission"
+    assert verifier_result["returncode"] == 127
+    assert verifier_result["ok"] is False
+    assert verifier_result["stdout_tail"] == ""
+    assert "PermissionError" in verifier_result["stderr_tail"]
+    assert Path(data["run_artifact_path"]).exists()
+    assert_finalization_blocked(data["decision"])
 
 
 def test_verifier_command_with_equals_not_at_label_prefix_is_not_split(tmp_path: Path):
@@ -375,7 +449,7 @@ def test_unsupported_execute_operation_fails_closed_without_verifier(tmp_path: P
         "--mode",
         "execute",
         "--operation",
-        "commit",
+        "plan",
         "--verifier",
         f"trip=printf ran > {shlex.quote(str(marker))}",
     )
@@ -388,6 +462,36 @@ def test_unsupported_execute_operation_fails_closed_without_verifier(tmp_path: P
     assert data["run_artifact_path"] is None
     assert not marker.exists()
     assert_finalization_blocked(data["decision"])
+
+
+def test_invalid_operation_is_rejected_by_argparse_without_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    env = os.environ.copy()
+    env[ARTIFACT_ENV] = str(artifact_dir)
+
+    cp = run(
+        [
+            sys.executable,
+            str(DELIVER),
+            "--repo",
+            str(repo),
+            "--plugin-root",
+            str(plugin),
+            "--mode",
+            "execute",
+            "--operation",
+            "commit",
+        ],
+        env=env,
+    )
+
+    assert cp.returncode == 2
+    assert cp.stdout == ""
+    assert "invalid choice" in cp.stderr
+    assert "commit" in cp.stderr
+    assert not artifact_dir.exists()
 
 
 def test_delivery_status_failure_prevents_verifier_execution(tmp_path: Path):
