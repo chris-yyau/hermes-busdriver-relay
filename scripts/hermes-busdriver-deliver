@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -206,10 +207,27 @@ def write_artifact(result: dict[str, Any]) -> None:
     path = artifact_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     result["run_artifact_path"] = str(path)
+    tmp_path: Path | None = None
     try:
-        path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            json.dump(result, tmp, indent=2, sort_keys=True)
+            tmp.write("\n")
+        os.replace(tmp_path, path)
     except OSError:
         result["run_artifact_path"] = None
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         raise
 
 

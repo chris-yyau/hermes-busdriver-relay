@@ -439,6 +439,28 @@ def test_empty_verifier_command_fails_closed(tmp_path: Path):
     assert_finalization_blocked(data["decision"])
 
 
+def test_artifact_write_failure_cleans_temp_file_and_clears_path(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    artifact_dir = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+
+    def fail_replace(_src, _dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(ns["os"], "replace", fail_replace)
+    result = {"schema": "test", "run_artifact_path": None}
+
+    try:
+        ns["write_artifact"](result)
+    except OSError as e:
+        assert str(e) == "replace failed"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected write_artifact to raise")
+
+    assert result["run_artifact_path"] is None
+    assert list(artifact_dir.iterdir()) == []
+
+
 def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
