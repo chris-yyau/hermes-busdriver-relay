@@ -47,7 +47,16 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.pr_grind_result_file:
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
 
-    cp = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    try:
+        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "error": "delivery_status_timeout",
+            "timeout_seconds": 180,
+            "stdout_tail": str(e.stdout or "")[-2000:],
+            "stderr_tail": str(e.stderr or "")[-2000:],
+        }, 124
     try:
         data = json.loads(cp.stdout)
     except json.JSONDecodeError as e:
@@ -55,6 +64,14 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "ok": False,
             "error": "delivery_status_invalid_json",
             "parse_error": str(e),
+            "returncode": cp.returncode,
+            "stderr": cp.stderr.strip(),
+            "stdout_tail": cp.stdout[-2000:],
+        }
+    if not isinstance(data, dict):
+        data = {
+            "ok": False,
+            "error": "delivery_status_invalid_json_type",
             "returncode": cp.returncode,
             "stderr": cp.stderr.strip(),
             "stdout_tail": cp.stdout[-2000:],

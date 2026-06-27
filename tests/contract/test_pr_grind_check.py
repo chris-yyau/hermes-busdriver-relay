@@ -995,6 +995,12 @@ def test_devin_review_summary_plural_without_live_inline_issue_is_not_actionable
     assert ns["actionable_reviews"](reviews, "abc123def456") == []
 
 
+def test_devin_no_issues_review_body_is_not_actionable():
+    ns = runpy.run_path(str(CHECK))
+    reviews = [{"id": 9, "commit_id": "abc123def456", "state": "COMMENTED", "body": "## ✅ Devin Review: No Issues Found\n\nDevin Review analyzed this PR and found no bugs or issues to report.", "user": {"login": "devin-ai-integration[bot]"}}]
+    assert ns["actionable_reviews"](reviews, "abc123def456") == []
+
+
 
 def test_fallback_check_counts_treats_failing_as_failed():
     ns = runpy.run_path(str(CHECK))

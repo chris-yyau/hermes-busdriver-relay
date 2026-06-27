@@ -1,5 +1,6 @@
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -105,7 +106,38 @@ def test_plan_mode_never_authorizes_clean_status(tmp_path: Path):
     assert data["ok"] is True
     assert data["delivery_status"]["repo"]["dirty"] is False
     assert data["mode"] == "plan"
+    assert data["decision"]["status"] == "plan_only"
     assert_finalization_blocked(data["decision"])
+
+
+def test_delivery_status_non_object_json_fails_closed(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+
+    class CP:
+        stdout = "[]"
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None})())
+
+    assert rc == 0
+    assert data["ok"] is False
+    assert data["error"] == "delivery_status_invalid_json_type"
+
+
+def test_delivery_status_timeout_fails_closed(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+
+    def raise_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["helper"], timeout=180, output="partial", stderr="slow")
+
+    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None})())
+
+    assert rc == 124
+    assert data["ok"] is False
+    assert data["error"] == "delivery_status_timeout"
 
 
 def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):
