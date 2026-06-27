@@ -59,7 +59,7 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "returncode": 124,
             "timeout_seconds": args.delivery_status_timeout,
             "stdout_tail": stdout[-2000:],
-            "stderr": stderr.strip(),
+            "stderr": stderr.strip()[-2000:],
         }, 124
     try:
         data = json.loads(cp.stdout)
