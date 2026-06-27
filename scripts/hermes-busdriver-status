@@ -189,6 +189,110 @@ def critical_file_hashes(root: Path, hook_refs: list[str]) -> dict[str, Any]:
     return out
 
 
+def drift_baseline_status(baseline_arg: str | None, package: dict[str, Any], hashes: dict[str, Any]) -> dict[str, Any] | None:
+    if not baseline_arg:
+        return None
+    path = Path(baseline_arg).expanduser().resolve()
+    flags = {
+        "commit_allowed": False,
+        "push_allowed": False,
+        "pr_allowed": False,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "marker_write_allowed": False,
+    }
+    base: dict[str, Any] = {
+        "schema": "hermes-busdriver-drift/v0",
+        "baseline_path": str(path),
+        "baseline_exists": path.exists(),
+        "read_only": True,
+        "finalization_flags": flags,
+    }
+    if not path.exists():
+        return {
+            **base,
+            "status": "baseline_missing",
+            "finalization_compatible": False,
+            "finalization_disabled_reasons": ["baseline_missing"],
+            "parse_error": None,
+            "package_version_changed": False,
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "missing": [],
+        }
+
+    data, err = read_json(path)
+    if not isinstance(data, dict):
+        return {
+            **base,
+            "status": "baseline_invalid",
+            "finalization_compatible": False,
+            "finalization_disabled_reasons": ["baseline_invalid"],
+            "parse_error": err or "baseline root is not a JSON object",
+            "package_version_changed": False,
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "missing": [],
+        }
+
+    expected_hashes = data.get("critical_file_hashes")
+    if not isinstance(expected_hashes, dict):
+        return {
+            **base,
+            "status": "baseline_invalid",
+            "finalization_compatible": False,
+            "finalization_disabled_reasons": ["baseline_invalid"],
+            "parse_error": "missing critical_file_hashes object",
+            "package_version_changed": False,
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "missing": [],
+        }
+
+    expected_package = data.get("package") if isinstance(data.get("package"), dict) else {}
+    expected_version = expected_package.get("version")
+    current_version = package.get("version")
+    package_version_changed = expected_version is not None and expected_version != current_version
+    expected_keys = set(expected_hashes)
+    current_keys = set(hashes)
+    added = sorted(current_keys - expected_keys)
+    removed = sorted(expected_keys - current_keys)
+    changed: list[str] = []
+    missing: list[str] = []
+    for rel in sorted(expected_keys & current_keys):
+        expected = expected_hashes.get(rel) if isinstance(expected_hashes.get(rel), dict) else {}
+        current = hashes.get(rel) if isinstance(hashes.get(rel), dict) else {}
+        if expected.get("exists") is True and current.get("exists") is not True:
+            missing.append(rel)
+        if expected.get("sha256") != current.get("sha256") or expected.get("exists") != current.get("exists"):
+            changed.append(rel)
+
+    reasons: list[str] = []
+    if package_version_changed:
+        reasons.append("package_version_changed")
+    if added or removed or changed or missing:
+        reasons.append("baseline_drift")
+    compatible = not reasons
+    return {
+        **base,
+        "status": "compatible" if compatible else "drifted",
+        "finalization_compatible": compatible,
+        "finalization_disabled_reasons": reasons,
+        "parse_error": None,
+        "baseline_package_version": expected_version,
+        "current_package_version": current_version,
+        "package_version_changed": package_version_changed,
+        "compared_count": len(expected_keys & current_keys),
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "missing": missing,
+    }
+
+
 def effective_routes(user_cfg: dict[str, Any], resolved_cli: dict[str, Any]) -> dict[str, Any]:
     routes = user_cfg.get("routes", {}) if isinstance(user_cfg, dict) else {}
     clis = ((resolved_cli.get("data") or {}).get("clis") or {}) if resolved_cli.get("ok") else {}
@@ -345,6 +449,7 @@ def main() -> int:
     ap.add_argument("--repo", help="Project repo/worktree to inspect read-only")
     ap.add_argument("--relay-state-dir", help="Hermes Busdriver Relay state dir for lock summary")
     ap.add_argument("--operation", default="repo-mutation", help="Operation class for lock summary")
+    ap.add_argument("--drift-baseline", help="Read-only Busdriver drift baseline JSON to compare against")
     ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = ap.parse_args()
 
@@ -357,18 +462,21 @@ def main() -> int:
     cfg_data, _cfg_err = read_json(Path(cfg_status["path"]))
     if not isinstance(cfg_data, dict):
         cfg_data = {}
+    package = package_status(root)
+    hashes = critical_file_hashes(root, hook_refs)
     out = {
         "status_schema": "hermes-busdriver-status/v0",
         "read_only": True,
         "plugin_root": {"path": str(root), "exists": root.exists()},
         "state_dir": args.state_dir,
-        "package": package_status(root),
+        "package": package,
         "user_config": cfg_status,
         "hooks": hooks,
         "hook_script_refs": {rel: (root / rel).exists() for rel in hook_refs},
         "key_entrypoints": file_presence(root, KEY_ENTRYPOINTS),
         "minimum_gate_scripts": file_presence(root, MIN_GATE_SCRIPTS),
-        "critical_file_hashes": critical_file_hashes(root, hook_refs),
+        "critical_file_hashes": hashes,
+        "busdriver_drift": drift_baseline_status(args.drift_baseline, package, hashes),
         "resolve_cli": resolver,
         "effective_routes": effective_routes(cfg_data, resolver),
         "repo": repo,
