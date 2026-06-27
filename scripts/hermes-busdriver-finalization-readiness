@@ -134,8 +134,11 @@ def summarize_pr(pr: str | None, delivery: dict[str, Any]) -> dict[str, Any] | N
 
 def phase0_blockers(phase0: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
-    if phase0.get("status_schema") != "hermes-busdriver-status/v0":
+    if phase0.get("returncode", 0) != 0 or phase0.get("ok") is False:
         blockers.append("phase0_status_failed")
+    if phase0.get("status_schema") != "hermes-busdriver-status/v0":
+        if "phase0_status_failed" not in blockers:
+            blockers.append("phase0_status_failed")
         return blockers
     if not ((phase0.get("plugin_root") or {}).get("exists")):
         blockers.append("phase0_busdriver_plugin_unavailable")
@@ -197,19 +200,25 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
     handoff_ready = False
 
     if not blockers:
-        if args.pr and delivery_decision.get("status") == "pr_clean_read_only":
-            state = "ready_for_merge_handoff"
-            handoff_ready = True
-            next_action = "Hand this envelope to Busdriver/Claude or an explicit operator finalizer; this helper must not merge."
-        elif args.pr:
-            state = "pr_not_clean_read_only"
-            next_action = "PR was supplied but read-only pr-grind is not clean; wait for checks/reviewers or fix actionable feedback, then re-run."
-        elif repo.get("dirty"):
-            state = "ready_for_commit_or_pr_handoff"
-            handoff_ready = True
-            next_action = "Hand this envelope to Busdriver/Claude for current litmus/pre-PR semantics; this helper must not commit, push, or create a PR."
+        if target == "merge":
+            if args.pr and delivery_decision.get("status") == "pr_clean_read_only":
+                state = "ready_for_merge_handoff"
+                handoff_ready = True
+                next_action = "Hand this envelope to Busdriver/Claude or an explicit operator finalizer; this helper must not merge."
+            elif args.pr:
+                state = "pr_not_clean_read_only"
+                next_action = "PR was supplied but read-only pr-grind is not clean; wait for checks/reviewers or fix actionable feedback, then re-run."
+            else:
+                next_action = "Merge handoff target requires --pr plus a clean read-only pr-grind result."
+        elif target in {"commit", "pr", "commit_or_pr"}:
+            if repo.get("dirty"):
+                state = "ready_for_commit_or_pr_handoff"
+                handoff_ready = True
+                next_action = "Hand this envelope to Busdriver/Claude for current litmus/pre-PR semantics; this helper must not commit, push, or create a PR."
+            else:
+                next_action = "Commit/PR handoff target requires a dirty worktree to finalize."
         else:
-            next_action = "No dirty worktree or PR was supplied; continue draft work or pass --pr for PR readiness."
+            next_action = "No dirty worktree or clean PR was supplied for the requested target; continue draft work or pass --pr for PR readiness."
 
     return {
         "ready": handoff_ready,
@@ -274,7 +283,7 @@ def main() -> int:
     ready = readiness(args, delivery, phase0)
     result = {
         "schema": SCHEMA,
-        "ok": bool(delivery.get("ok") and phase0.get("status_schema") == "hermes-busdriver-status/v0"),
+        "ok": bool(delivery.get("ok") and phase0.get("status_schema") == "hermes-busdriver-status/v0" and delivery_rc == 0 and phase0_rc == 0),
         "read_only": True,
         "delivery_status_returncode": delivery_rc,
         "phase0_status_returncode": phase0_rc,

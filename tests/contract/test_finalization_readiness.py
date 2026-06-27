@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
 
 
-def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False)
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False, timeout=timeout)
 
 
 def init_repo(path: Path) -> Path:
@@ -79,7 +79,11 @@ def invoke(repo: Path, plugin: Path, user_config: Path, *extra: str) -> tuple[su
             *extra,
         ]
     )
-    return cp, json.loads(cp.stdout)
+    try:
+        data = json.loads(cp.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"readiness output was not JSON (returncode={cp.returncode})\nstdout:\n{cp.stdout}\nstderr:\n{cp.stderr}") from e
+    return cp, data
 
 
 def assert_no_finalization_authority(authority: dict) -> None:
@@ -192,6 +196,38 @@ def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
     assert data["status"] == "pr_not_clean_read_only"
     assert "pr-grind is not clean" in data["next_action"]
     assert_no_finalization_authority(data)
+
+
+def test_explicit_delivery_target_does_not_emit_commit_handoff_for_dirty_repo(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--target", "delivery")
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["target"] == "delivery"
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "no_finalization_candidate"
+    assert_no_finalization_authority(data["readiness"])
+
+
+def test_phase0_nonzero_json_blocks_readiness():
+    mod = __import__("runpy").run_path(str(READINESS))
+    phase0 = {
+        "status_schema": "hermes-busdriver-status/v0",
+        "ok": False,
+        "returncode": 2,
+        "plugin_root": {"exists": True},
+        "hooks": {"exists": True},
+        "repo": {"is_git_repo": True},
+        "relay_locks": {"active_for_repo_count": 0},
+    }
+
+    blockers = mod["phase0_blockers"](phase0)
+
+    assert "phase0_status_failed" in blockers
 
 
 def test_child_nonzero_json_is_forced_to_not_ok(tmp_path: Path):
