@@ -127,7 +127,7 @@ jobs:
           fi
 
           existing_comments=$(gh pr view "$PR_URL" --json comments \
-              --jq '.comments[] | select(.author.login == "github-actions[bot]") | .body' 2>&1) || {
+              --jq '.comments[] | select(.author.login == "github-actions" or .author.login == "github-actions[bot]") | .body' 2>&1) || {
             echo "::warning::gh pr view failed — posting comment without dedup check (fail-closed)"
             echo "$existing_comments" >&2
             existing_comments=""
