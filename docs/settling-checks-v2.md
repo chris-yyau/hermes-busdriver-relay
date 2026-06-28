@@ -25,7 +25,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
 | H6 read-only status check | Implemented | Status/runtime/PR-grind readiness probes are read-only. |
-| H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/drifted baselines while keeping all finalization flags false. No automatic restore/enable state machine yet. |
+| H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/unsupported-schema/drifted baselines while keeping all finalization flags false. No automatic restore/enable state machine yet. |
 | H8 state-dir/plugin-root portability | Partial | Status/gate/smoke accept plugin root and state dir; PR-grind checker can use live Busdriver `relevant-check-status.sh`. |
 | H9 marker freshness | Partial | Status reports marker metadata; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
 | H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |

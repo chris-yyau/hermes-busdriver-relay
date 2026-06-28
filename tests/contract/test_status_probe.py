@@ -192,6 +192,61 @@ def test_status_probe_compares_drift_baseline_without_writing(tmp_path):
     assert "baseline_drift" in drifted["busdriver_drift"]["finalization_disabled_reasons"]
 
 
+def test_status_probe_accepts_supported_drift_baseline_schemas(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    current = run_status("--plugin-root", str(fake))
+
+    for key, value in [
+        ("status_schema", "hermes-busdriver-status/v0"),
+        ("schema", "hermes-busdriver-drift/v0"),
+    ]:
+        baseline = tmp_path / f"{key}.json"
+        baseline.write_text(
+            json.dumps(
+                {
+                    key: value,
+                    "package": {"version": current["package"]["version"]},
+                    "critical_file_hashes": current["critical_file_hashes"],
+                }
+            )
+        )
+
+        data = run_status("--plugin-root", str(fake), "--drift-baseline", str(baseline))
+
+        assert data["busdriver_drift"]["status"] == "compatible"
+        assert data["busdriver_drift"]["finalization_compatible"] is True
+        assert_no_finalization_flags(data["busdriver_drift"])
+
+
+def test_status_probe_rejects_unsupported_drift_baseline_schema(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    current = run_status("--plugin-root", str(fake))
+    for key, value in [
+        ("status_schema", "hermes-busdriver-status/v999"),
+        ("schema", "hermes-busdriver-drift/v999"),
+    ]:
+        baseline = tmp_path / f"bad-{key}.json"
+        baseline.write_text(
+            json.dumps(
+                {
+                    key: value,
+                    "package": {"version": current["package"]["version"]},
+                    "critical_file_hashes": current["critical_file_hashes"],
+                }
+            )
+        )
+
+        data = run_status("--plugin-root", str(fake), "--drift-baseline", str(baseline))
+
+        assert data["busdriver_drift"]["status"] == "baseline_invalid"
+        assert data["busdriver_drift"]["finalization_compatible"] is False
+        assert_no_finalization_flags(data["busdriver_drift"])
+        assert "baseline_invalid" in data["busdriver_drift"]["finalization_disabled_reasons"]
+        assert data["busdriver_drift"]["parse_error"] == f"unsupported {key}: {value}"
+
+
 def test_status_probe_reports_missing_drift_baseline_as_unknown(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
