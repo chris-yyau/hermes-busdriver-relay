@@ -71,6 +71,32 @@ def assert_finalization_blocked(decision: dict) -> None:
         assert decision[key] is False
 
 
+def assert_run_authority_blocked(run: dict) -> None:
+    authority = run["authority"]
+    for key in [
+        "finalization_allowed",
+        "commit_allowed",
+        "push_allowed",
+        "pr_allowed",
+        "merge_allowed",
+        "deploy_allowed",
+        "release_allowed",
+        "publish_allowed",
+    ]:
+        assert authority[key] is False
+
+
+def assert_delivery_run_envelope(run: dict, run_id: str, phase: str, status: str, reason: str) -> None:
+    assert run["schema"] == "hermes-busdriver-delivery-run/v0"
+    assert run["run_id"] == run_id
+    assert run["phase"] == phase
+    assert run["status"] == status
+    assert run["reason"] == reason
+    assert isinstance(run["created_at"], str)
+    assert run["version"] == 1
+    assert_run_authority_blocked(run)
+
+
 def test_verifier_help_warns_commands_execute_locally():
     cp = run([sys.executable, str(DELIVER), "--help"])
 
@@ -101,6 +127,21 @@ def test_default_plan_mode_is_read_only_status_envelope(tmp_path: Path):
     assert [step["status"] for step in data["steps"]] == ["pending", "blocked", "blocked", "blocked", "blocked", "blocked"]
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
+
+
+def test_plan_mode_emits_durable_delivery_run_envelope_without_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+
+    cp, data = invoke(repo, plugin, "--run-id", "plan-123")
+
+    assert cp.returncode == 0
+    assert_delivery_run_envelope(data["run"], "plan-123", "plan", "plan_only", "read_only_plan")
+    assert data["run"]["repo_root"] == str(repo)
+    assert data["run"]["pr_number"] is None
+    assert data["run"]["artifacts"] == []
+    assert data["run_artifact_path"] is None
+    assert_finalization_blocked(data["decision"])
 
 
 def test_execute_mode_without_verify_operation_is_blocked_and_has_no_repo_side_effects(tmp_path: Path):
@@ -302,6 +343,8 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
         "execute",
         "--operation",
         "verify",
+        "--run-id",
+        "verify-123",
         "--verifier",
         f"smoke={verifier_cmd}",
         artifact_dir=artifact_dir,
@@ -311,6 +354,7 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     assert data["ok"] is True
     assert data["operation"] == "verify"
     assert data["decision"]["status"] == "verified"
+    assert_delivery_run_envelope(data["run"], "verify-123", "verify", "verified", "verified")
     assert_finalization_blocked(data["decision"])
     assert data["verifiers"] == [
         {
@@ -325,9 +369,13 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     artifact = Path(data["run_artifact_path"])
     assert artifact.parent == artifact_dir
     assert artifact.exists()
+    assert "verify-123" in artifact.name
+    assert data["run"]["artifacts"] == [{"kind": "result", "path": str(artifact)}]
     assert repo not in artifact.parents
     artifact_data = json.loads(artifact.read_text())
     assert artifact_data["run_artifact_path"] == str(artifact)
+    assert artifact_data["run"]["run_id"] == "verify-123"
+    assert artifact_data["run"]["artifacts"] == [{"kind": "result", "path": str(artifact)}]
     assert artifact_data["verifiers"][0]["name"] == "smoke"
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
@@ -543,6 +591,10 @@ def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
     assert cp.returncode == 1
     assert data["ok"] is False
     assert data["run_artifact_path"] is None
+    assert data["run"]["phase"] == "verify"
+    assert data["run"]["status"] == "blocked"
+    assert data["run"]["reason"] == "artifact_write_failed"
+    assert data["run"]["artifacts"] == []
     assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in ["finalization_allowed", "commit_allowed", "push_allowed", "pr_allowed", "merge_allowed", "deploy_allowed", "release_allowed", "publish_allowed"]}}
     assert data["steps"][0] == {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"}
     assert_finalization_blocked(data["decision"])

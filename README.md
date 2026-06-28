@@ -110,7 +110,7 @@ scripts/hermes-busdriver-gate preflight \
 scripts/hermes-busdriver-gate postflight \
   --repo /path/to/repo \
   --baseline-file "$BASELINE" \
-  --verifier 'tests=pytest -q'
+  --verifier 'tests=uvx --from pytest pytest -q'
 ```
 
 The gate runner is the first Hermes-side equivalent gate layer. Passing v1 gates allows agent implementation draft work only. It explicitly keeps `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` false.
@@ -124,7 +124,7 @@ scripts/hermes-busdriver-agent-draft \
   --agent codex \
   --prompt-file /path/to/task.md \
   --scope-include 'src/**' \
-  --verifier 'tests=pytest -q' \
+  --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
 ```
 
@@ -171,11 +171,12 @@ scripts/hermes-busdriver-deliver \
   --plugin-root /path/to/busdriver \
   --mode execute \
   --operation verify \
-  --verifier 'tests=pytest -q' \
+  --run-id local-verify-001 \
+  --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
 
 ### Finalization readiness handoff
 
