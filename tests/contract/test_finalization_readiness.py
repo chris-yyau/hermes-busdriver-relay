@@ -170,6 +170,35 @@ def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Pat
     assert_no_finalization_authority(data["decision"])
 
 
+def test_readiness_handoff_includes_non_dispatchable_relay_role_warning(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    cfg = relay_config(tmp_path / "relay-config.json", [])
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        user_config,
+        "--relay-role",
+        "relay.pr.backstop",
+        "--relay-config",
+        str(cfg),
+    )
+
+    assert cp.returncode == 0, cp.stderr
+    handoff = data["handoff_envelope"]
+    handoff_role = handoff["evidence"]["relay_role_resolution"]
+    assert handoff_role["ok"] is False
+    assert handoff_role["result"]["dispatch_allowed"] is False
+    assert "relay_role_not_dispatchable" in handoff["evidence"]["delivery_decision"]["warnings"]
+    assert data["readiness"]["ready"] is True
+    assert data["readiness"]["status"] == "ready_for_commit_or_pr_handoff"
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
 def test_clean_pr_grind_fixture_generates_merge_handoff_but_no_merge_authority(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")

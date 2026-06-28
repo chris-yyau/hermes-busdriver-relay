@@ -302,6 +302,25 @@ def run_pr_grind_check(args: argparse.Namespace, repo: dict[str, Any], busdriver
         return {"available": True, "ok": False, "script": str(script), "parse_error": str(e), "stdout_tail": cp.stdout[-4000:]}
 
 
+def relay_role_authority_is_safe(result: dict[str, Any], requested_role: str) -> bool:
+    decision = result.get("decision")
+    return (
+        result.get("schema") == "hermes-busdriver-relay-role/v0"
+        and result.get("role") == requested_role
+        and result.get("read_only") is True
+        and result.get("ok") is True
+        and result.get("dispatch_allowed") is True
+        and result.get("mutation_allowed") is False
+        and result.get("finalization_allowed") is False
+        and result.get("not_busdriver_native_claude_runtime") is True
+        and isinstance(decision, dict)
+        and decision.get("dispatch_allowed") is True
+        and decision.get("mutation_allowed") is False
+        and decision.get("finalization_allowed") is False
+        and decision.get("not_busdriver_native_claude_runtime") is True
+    )
+
+
 def run_relay_role_resolution(args: argparse.Namespace) -> dict[str, Any] | None:
     if not args.relay_role:
         return None
@@ -321,8 +340,10 @@ def run_relay_role_resolution(args: argparse.Namespace) -> dict[str, Any] | None
         return {**base, "ok": False, "parse_error": str(e), "stdout_tail": cp.stdout[-4000:], "stderr": cp.stderr[-4000:]}
     if not isinstance(result, dict):
         return {**base, "ok": False, "reason": "relay_role_result_not_object", "result": result, "stderr": cp.stderr[-4000:]}
-    ok = cp.returncode == 0 and result.get("ok") is True and result.get("dispatch_allowed") is True
-    return {**base, "ok": ok, "result": result, "stderr": cp.stderr[-4000:] if cp.stderr else ""}
+    authority_safe = relay_role_authority_is_safe(result, args.relay_role)
+    ok = cp.returncode == 0 and authority_safe
+    reason = None if ok else ("relay_role_authority_flags_unsafe" if cp.returncode == 0 else "relay_role_not_dispatchable")
+    return {**base, "ok": ok, "reason": reason, "result": result, "stderr": cp.stderr[-4000:] if cp.stderr else ""}
 
 
 def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], finalization_lock: dict[str, Any], pr_grind: dict[str, Any] | None, relay_role: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
