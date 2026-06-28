@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.1` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with durable `hermes-busdriver-delivery-run/v0` envelopes and redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, and durable run identity/artifact handoff.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, and redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, and durable run identity/artifact handoff.
 
 Implemented:
 
@@ -65,7 +65,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 184 passed
+contract tests: 188 passed
 py_compile: hermes-busdriver-status, hermes-busdriver-relay-role, hermes-busdriver-lock, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.1
