@@ -7,6 +7,7 @@ This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state 
 Relay v2 supports:
 
 - read-only Busdriver status/runtime probes, including optional Busdriver drift-baseline comparison;
+- read-only configurable relay-equivalent reviewer/voice/arbiter/backstop status roles under a separate relay config JSON;
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
@@ -31,7 +32,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |
 | H11 external side effects | Partial | Draft paths block side effects; Delivery Mode PR/merge side effects require explicit user intent and clean checks. |
 | H12 sensitive payload | Improved | Verify-only delivery redacts common secret shapes from verifier commands, stdout/stderr tails, helper-error tails, and persisted artifacts; finalization/status paths still avoid advisory/model payloads. |
-| H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization. |
+| H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization; status reports configurable relay equivalents from relay config without claiming Busdriver-native Claude runtime authority. |
 
 ## Commands
 

@@ -43,6 +43,59 @@ DEFAULT_ROLE_ROUTES = {
     "council.researcher": ["grok", "droid"],
 }
 
+DEFAULT_RELAY_CODING_AGENT = "codex"
+DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = True
+DEFAULT_RELAY_EQUIVALENT_ROUTES = {
+    "relay.litmus.reviewer": {
+        "native_busdriver_role": "litmus reviewer",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.blueprint.reviewer_1": {
+        "native_busdriver_role": "blueprint reviewer 1",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.blueprint.reviewer_2": {
+        "native_busdriver_role": "blueprint reviewer 2",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.blueprint.reviewer_3": {
+        "native_busdriver_role": "blueprint reviewer 3",
+        "route": ["grok", "gpt-5.5", "codex"],
+    },
+    "relay.blueprint.arbiter": {
+        "native_busdriver_role": "blueprint arbiter",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.pr.lead": {
+        "native_busdriver_role": "PR lead reviewer",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.pr.backstop": {
+        "native_busdriver_role": "PR security/bugs backstop",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.council.architect": {
+        "native_busdriver_role": "council architect",
+        "route": ["hermes-primary", "codex"],
+    },
+    "relay.council.pragmatist": {
+        "native_busdriver_role": "council pragmatist",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.council.critic": {
+        "native_busdriver_role": "council critic",
+        "route": ["gpt-5.5", "codex"],
+    },
+    "relay.council.researcher": {
+        "native_busdriver_role": "council researcher",
+        "route": ["grok", "gpt-5.5", "codex"],
+    },
+    "relay.council.skeptic": {
+        "native_busdriver_role": "council skeptic",
+        "route": ["gpt-5.5", "codex"],
+    },
+}
+
 MARKER_FILES = [
     "design-review-needed.local.md",
     "skip-design-review.local",
@@ -131,6 +184,27 @@ def user_config_status(state_dir: str, user_config: str | None = None) -> dict[s
         "route_keys": sorted(routes.keys()) if isinstance(routes, dict) else [],
         "ultra_oracle_enabled_keys": sorted((data.get("ultraOracle") or {}).keys()) if isinstance(data, dict) else [],
     }
+
+
+def relay_config_status(relay_config: str | None = None, relay_state_dir: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    cfg = Path(relay_config).expanduser() if relay_config else relay_state_root(relay_state_dir) / "config.json"
+    if not cfg.exists():
+        return {
+            "path": str(cfg),
+            "exists": False,
+            "parse_error": None,
+            "route_keys": [],
+        }, {}
+    data, err = read_json(cfg)
+    shape_error = None if err or isinstance(data, dict) else "config_must_be_object"
+    routes = data.get("routes", {}) if isinstance(data, dict) else {}
+    return {
+        "path": str(cfg),
+        "exists": True,
+        "parse_error": err,
+        "shape_error": shape_error,
+        "route_keys": sorted(routes.keys()) if isinstance(routes, dict) else [],
+    }, data if isinstance(data, dict) else {}
 
 
 def hook_inventory(root: Path) -> dict[str, Any]:
@@ -342,6 +416,88 @@ def effective_routes(user_cfg: dict[str, Any], resolved_cli: dict[str, Any]) -> 
     return result
 
 
+def relay_equivalent_roles(
+    relay_cfg: dict[str, Any], relay_config_parse_error: str | None = None, relay_config_shape_error: str | None = None
+) -> dict[str, Any]:
+    if not isinstance(relay_cfg, dict):
+        relay_cfg = {}
+    routes_config_error = None
+    raw_routes = relay_cfg.get("routes", {})
+    if relay_config_parse_error:
+        routes_config_error = "config_parse_error"
+        routes = {}
+    elif relay_config_shape_error:
+        routes_config_error = relay_config_shape_error
+        routes = {}
+    elif "routes" in relay_cfg and not isinstance(raw_routes, dict):
+        routes_config_error = "routes_must_be_object"
+        routes = {}
+    else:
+        routes = raw_routes
+    configured_coding_agent = relay_cfg.get("coding_agent")
+    coding_agent_config_error = None
+    if "coding_agent" in relay_cfg and (not isinstance(configured_coding_agent, str) or not configured_coding_agent):
+        coding_agent_config_error = "coding_agent_must_be_non_empty_string"
+    coding_agent = configured_coding_agent if coding_agent_config_error is None and isinstance(configured_coding_agent, str) else DEFAULT_RELAY_CODING_AGENT
+    configured_avoid = relay_cfg.get("avoid_coding_agent_for_review")
+    avoid_config_error = None
+    if "avoid_coding_agent_for_review" in relay_cfg and not isinstance(configured_avoid, bool):
+        avoid_config_error = "avoid_coding_agent_for_review_must_be_boolean"
+    avoid = configured_avoid if avoid_config_error is None and isinstance(configured_avoid, bool) else DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW
+    roles: dict[str, Any] = {}
+    for role, defaults in DEFAULT_RELAY_EQUIVALENT_ROUTES.items():
+        default_route = defaults["route"]
+        configured = routes.get(role, default_route)
+        config_error = None
+        if routes_config_error is not None:
+            route = []
+            config_error = routes_config_error
+        elif isinstance(configured, str):
+            route = [configured] if configured else []
+        elif isinstance(configured, list):
+            if all(isinstance(x, str) and x for x in configured):
+                route = list(configured)
+            else:
+                route = []
+                config_error = "route_entries_must_be_non_empty_strings"
+        else:
+            if role in routes:
+                route = []
+                config_error = "route_must_be_string_or_array"
+            else:
+                route = list(default_route)
+        if not route and config_error is None:
+            config_error = "empty_route"
+        selected = next((agent for agent in route if not avoid or agent != coding_agent), route[0] if route else None)
+        same_as_coding_agent = selected == coding_agent
+        roles[role] = {
+            "native_busdriver_role": defaults["native_busdriver_role"],
+            "configured_route": route,
+            "default_route": list(default_route),
+            "source": "relay_config" if role in routes or routes_config_error is not None else "default",
+            "selected_agent": selected,
+            "same_as_coding_agent": same_as_coding_agent,
+            "degraded": bool(config_error) or (avoid and same_as_coding_agent),
+            "config_error": config_error,
+            "configurable": True,
+            "not_busdriver_native_claude_runtime": True,
+            "finalization_allowed": False,
+            "mutation_allowed": False,
+        }
+    return {
+        "coding_agent": coding_agent,
+        "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
+        "coding_agent_config_error": coding_agent_config_error,
+        "avoid_coding_agent_for_review": avoid,
+        "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",
+        "avoid_coding_agent_for_review_config_error": avoid_config_error,
+        "routes_config_error": routes_config_error,
+        "relay_config_parse_error": relay_config_parse_error,
+        "relay_config_shape_error": relay_config_shape_error,
+        "roles": roles,
+    }
+
+
 def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[str, Any] | None:
     if repo_status is None:
         return None
@@ -485,6 +641,7 @@ def main() -> int:
     ap.add_argument("--plugin-root", help="Busdriver plugin root (default: env or ~/.claude/plugins/marketplaces/busdriver)")
     ap.add_argument("--state-dir", default=os.environ.get("BUSDRIVER_STATE_DIR", ".claude"), help="Busdriver state dir name (default: .claude)")
     ap.add_argument("--user-config", help="Busdriver user config path (default: ~/<state-dir>/busdriver.json)")
+    ap.add_argument("--relay-config", help="Hermes relay config JSON path (default: <relay-state-dir>/config.json)")
     ap.add_argument("--repo", help="Project repo/worktree to inspect read-only")
     ap.add_argument("--relay-state-dir", help="Hermes Busdriver Relay state dir for lock summary")
     ap.add_argument("--operation", default="repo-mutation", help="Operation class for lock summary")
@@ -501,6 +658,7 @@ def main() -> int:
     cfg_data, _cfg_err = read_json(Path(cfg_status["path"]))
     if not isinstance(cfg_data, dict):
         cfg_data = {}
+    relay_cfg_status, relay_cfg_data = relay_config_status(args.relay_config, args.relay_state_dir)
     package = package_status(root)
     hashes = critical_file_hashes(root, hook_refs)
     out = {
@@ -510,6 +668,7 @@ def main() -> int:
         "state_dir": args.state_dir,
         "package": package,
         "user_config": cfg_status,
+        "relay_config": relay_cfg_status,
         "hooks": hooks,
         "hook_script_refs": {rel: (root / rel).exists() for rel in hook_refs},
         "key_entrypoints": file_presence(root, KEY_ENTRYPOINTS),
@@ -518,6 +677,9 @@ def main() -> int:
         "busdriver_drift": drift_baseline_status(args.drift_baseline, package, hashes),
         "resolve_cli": resolver,
         "effective_routes": effective_routes(cfg_data, resolver),
+        "relay_equivalent_roles": relay_equivalent_roles(
+            relay_cfg_data, relay_cfg_status.get("parse_error"), relay_cfg_status.get("shape_error")
+        ),
         "repo": repo,
         "active_markers": active_markers(repo, args.state_dir),
         "relay_locks": relay_lock_summary(repo, args.operation, args.relay_state_dir),
