@@ -196,11 +196,13 @@ def relay_config_status(relay_config: str | None = None, relay_state_dir: str | 
             "route_keys": [],
         }, {}
     data, err = read_json(cfg)
+    shape_error = None if err or isinstance(data, dict) else "config_must_be_object"
     routes = data.get("routes", {}) if isinstance(data, dict) else {}
     return {
         "path": str(cfg),
         "exists": True,
         "parse_error": err,
+        "shape_error": shape_error,
         "route_keys": sorted(routes.keys()) if isinstance(routes, dict) else [],
     }, data if isinstance(data, dict) else {}
 
@@ -414,29 +416,57 @@ def effective_routes(user_cfg: dict[str, Any], resolved_cli: dict[str, Any]) -> 
     return result
 
 
-def relay_equivalent_roles(relay_cfg: dict[str, Any]) -> dict[str, Any]:
+def relay_equivalent_roles(
+    relay_cfg: dict[str, Any], relay_config_parse_error: str | None = None, relay_config_shape_error: str | None = None
+) -> dict[str, Any]:
     if not isinstance(relay_cfg, dict):
         relay_cfg = {}
-    routes = relay_cfg.get("routes", {})
-    if not isinstance(routes, dict):
+    routes_config_error = None
+    raw_routes = relay_cfg.get("routes", {})
+    if relay_config_parse_error:
+        routes_config_error = "config_parse_error"
         routes = {}
-    coding_agent = str(relay_cfg.get("coding_agent") or DEFAULT_RELAY_CODING_AGENT)
-    avoid = relay_cfg.get("avoid_coding_agent_for_review", DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW)
-    avoid = bool(avoid)
+    elif relay_config_shape_error:
+        routes_config_error = relay_config_shape_error
+        routes = {}
+    elif "routes" in relay_cfg and not isinstance(raw_routes, dict):
+        routes_config_error = "routes_must_be_object"
+        routes = {}
+    else:
+        routes = raw_routes
+    configured_coding_agent = relay_cfg.get("coding_agent")
+    coding_agent_config_error = None
+    if "coding_agent" in relay_cfg and (not isinstance(configured_coding_agent, str) or not configured_coding_agent):
+        coding_agent_config_error = "coding_agent_must_be_non_empty_string"
+    coding_agent = configured_coding_agent if coding_agent_config_error is None and isinstance(configured_coding_agent, str) else DEFAULT_RELAY_CODING_AGENT
+    configured_avoid = relay_cfg.get("avoid_coding_agent_for_review")
+    avoid_config_error = None
+    if "avoid_coding_agent_for_review" in relay_cfg and not isinstance(configured_avoid, bool):
+        avoid_config_error = "avoid_coding_agent_for_review_must_be_boolean"
+    avoid = configured_avoid if avoid_config_error is None and isinstance(configured_avoid, bool) else DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW
     roles: dict[str, Any] = {}
     for role, defaults in DEFAULT_RELAY_EQUIVALENT_ROUTES.items():
         default_route = defaults["route"]
         configured = routes.get(role, default_route)
         config_error = None
-        if isinstance(configured, str):
-            route = [configured]
+        if routes_config_error is not None:
+            route = []
+            config_error = routes_config_error
+        elif isinstance(configured, str):
+            route = [configured] if configured else []
         elif isinstance(configured, list):
-            route = [str(x) for x in configured]
+            if all(isinstance(x, str) and x for x in configured):
+                route = list(configured)
+            else:
+                route = []
+                config_error = "route_entries_must_be_non_empty_strings"
         else:
-            route = list(default_route)
             if role in routes:
+                route = []
                 config_error = "route_must_be_string_or_array"
-        if not route:
+            else:
+                route = list(default_route)
+        if not route and config_error is None:
             config_error = "empty_route"
         selected = next((agent for agent in route if not avoid or agent != coding_agent), route[0] if route else None)
         same_as_coding_agent = selected == coding_agent
@@ -444,7 +474,7 @@ def relay_equivalent_roles(relay_cfg: dict[str, Any]) -> dict[str, Any]:
             "native_busdriver_role": defaults["native_busdriver_role"],
             "configured_route": route,
             "default_route": list(default_route),
-            "source": "relay_config" if role in routes else "default",
+            "source": "relay_config" if role in routes or routes_config_error is not None else "default",
             "selected_agent": selected,
             "same_as_coding_agent": same_as_coding_agent,
             "degraded": bool(config_error) or (avoid and same_as_coding_agent),
@@ -456,9 +486,14 @@ def relay_equivalent_roles(relay_cfg: dict[str, Any]) -> dict[str, Any]:
         }
     return {
         "coding_agent": coding_agent,
-        "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg else "default",
+        "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
+        "coding_agent_config_error": coding_agent_config_error,
         "avoid_coding_agent_for_review": avoid,
-        "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg else "default",
+        "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",
+        "avoid_coding_agent_for_review_config_error": avoid_config_error,
+        "routes_config_error": routes_config_error,
+        "relay_config_parse_error": relay_config_parse_error,
+        "relay_config_shape_error": relay_config_shape_error,
         "roles": roles,
     }
 
@@ -642,7 +677,9 @@ def main() -> int:
         "busdriver_drift": drift_baseline_status(args.drift_baseline, package, hashes),
         "resolve_cli": resolver,
         "effective_routes": effective_routes(cfg_data, resolver),
-        "relay_equivalent_roles": relay_equivalent_roles(relay_cfg_data),
+        "relay_equivalent_roles": relay_equivalent_roles(
+            relay_cfg_data, relay_cfg_status.get("parse_error"), relay_cfg_status.get("shape_error")
+        ),
         "repo": repo,
         "active_markers": active_markers(repo, args.state_dir),
         "relay_locks": relay_lock_summary(repo, args.operation, args.relay_state_dir),

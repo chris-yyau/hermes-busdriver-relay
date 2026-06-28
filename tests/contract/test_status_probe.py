@@ -92,7 +92,7 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     user_config = tmp_path / "busdriver.json"
     user_config.write_text(json.dumps({"version": "1", "routes": {"council.pragmatist": ["agy", "droid"]}}))
     before = sorted(p.relative_to(fake).as_posix() for p in fake.rglob("*"))
-    data = run_status("--plugin-root", str(fake), "--user-config", str(user_config))
+    data = run_status("--plugin-root", str(fake), "--user-config", str(user_config), "--relay-config", str(tmp_path / "missing-relay-config.json"))
     after = sorted(p.relative_to(fake).as_posix() for p in fake.rglob("*"))
     assert before == after
     assert data["read_only"] is True
@@ -208,6 +208,134 @@ def test_status_probe_marks_empty_relay_equivalent_route_degraded(tmp_path):
     assert backstop["config_error"] == "empty_route"
     assert backstop["finalization_allowed"] is False
     assert backstop["mutation_allowed"] is False
+
+
+def test_status_probe_marks_invalid_relay_equivalent_route_entries_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": {"bad": "type"},
+        "avoid_coding_agent_for_review": "false",
+        "routes": {"relay.pr.backstop": [None, "", "codex"]},
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert relay["coding_agent"] == "codex"
+    assert relay["avoid_coding_agent_for_review"] is True
+    assert relay["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
+    assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"
+    assert relay["coding_agent_source"] == "default"
+    assert relay["avoid_coding_agent_for_review_source"] == "default"
+    backstop = relay["roles"]["relay.pr.backstop"]
+    assert backstop["configured_route"] == []
+    assert backstop["selected_agent"] is None
+    assert backstop["degraded"] is True
+    assert backstop["config_error"] == "route_entries_must_be_non_empty_strings"
+    assert backstop["finalization_allowed"] is False
+    assert backstop["mutation_allowed"] is False
+
+
+def test_status_probe_marks_invalid_relay_equivalent_route_type_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "routes": {"relay.pr.backstop": {"bad": "type"}},
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    backstop = data["relay_equivalent_roles"]["roles"]["relay.pr.backstop"]
+    assert backstop["configured_route"] == []
+    assert backstop["selected_agent"] is None
+    assert backstop["degraded"] is True
+    assert backstop["config_error"] == "route_must_be_string_or_array"
+    assert backstop["finalization_allowed"] is False
+    assert backstop["mutation_allowed"] is False
+
+
+def test_status_probe_marks_invalid_relay_routes_container_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "routes": [],
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert relay["routes_config_error"] == "routes_must_be_object"
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == []
+        assert entry["selected_agent"] is None
+        assert entry["degraded"] is True
+        assert entry["config_error"] == "routes_must_be_object"
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
+def test_status_probe_marks_malformed_relay_config_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text("{not json")
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert data["relay_config"]["parse_error"]
+    assert relay["relay_config_parse_error"]
+    assert relay["routes_config_error"] == "config_parse_error"
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == []
+        assert entry["selected_agent"] is None
+        assert entry["degraded"] is True
+        assert entry["config_error"] == "config_parse_error"
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
+def test_status_probe_marks_invalid_relay_config_shape_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps([]))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert data["relay_config"]["shape_error"] == "config_must_be_object"
+    assert relay["relay_config_shape_error"] == "config_must_be_object"
+    assert relay["routes_config_error"] == "config_must_be_object"
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == []
+        assert entry["selected_agent"] is None
+        assert entry["degraded"] is True
+        assert entry["config_error"] == "config_must_be_object"
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
+def test_status_probe_relay_config_unexpected_values_do_not_raise(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    cases = [
+        {"coding_agent": 1, "avoid_coding_agent_for_review": "false", "routes": []},
+        {"coding_agent": "", "avoid_coding_agent_for_review": None, "routes": {"relay.pr.backstop": [None]}},
+        {"routes": {"relay.pr.backstop": {"bad": "type"}}},
+    ]
+    for index, payload in enumerate(cases):
+        relay_config = tmp_path / f"relay-config-{index}.json"
+        relay_config.write_text(json.dumps(payload))
+        data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+        assert data["relay_equivalent_roles"]["roles"]
+        assert any(entry["degraded"] for entry in data["relay_equivalent_roles"]["roles"].values())
 
 
 def test_status_probe_reports_active_markers_without_writing(tmp_path):
