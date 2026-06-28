@@ -14,13 +14,14 @@ Last verified against Busdriver `1.71.1` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, and **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed verify-only delivery dispatcher with redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, and a **read-only dispatcher-facing relay role resolver**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/handoff envelopes for latest-HEAD checks/comments/mergeability.
 
 Implemented:
 
 - `skills/busdriver-relay/SKILL.md`
 - `skills/busdriver-relay/references/*.md` including PR-grind delivery discipline, June 2026 reviewer-quality policy, claude-mem push, and user-preference/profile notes
 - `scripts/hermes-busdriver-status` including optional read-only `--drift-baseline <json>` compatibility reporting and relay-namespaced configurable equivalent reviewer/voice/arbiter/backstop status roles from a separate relay config JSON
+- `scripts/hermes-busdriver-relay-role` for read-only fail-closed selection of one configured relay equivalent role
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-gate`
@@ -33,6 +34,7 @@ Implemented:
 - `scripts/hermes-busdriver-pr-grind-loop`
 - `scripts/hermes-busdriver-smoke`
 - `tests/contract/test_status_probe.py`
+- `tests/contract/test_relay_role.py`
 - `tests/contract/test_lock.py`
 - `tests/contract/test_runtime_check.py`
 - `tests/contract/test_gate.py`
@@ -63,8 +65,8 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 155 passed
-py_compile: hermes-busdriver-status, hermes-busdriver-lock, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
+contract tests: 172 passed
+py_compile: hermes-busdriver-status, hermes-busdriver-relay-role, hermes-busdriver-lock, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.71.1
 hook_event_count 7

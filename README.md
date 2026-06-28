@@ -32,6 +32,7 @@ docs/settling-checks-v2.md                 H1-H13 v2 status map
 skills/busdriver-relay/SKILL.md            Hermes skill source
 skills/busdriver-relay/references/         Skill reference notes
 scripts/hermes-busdriver-status            Read-only status probe
+scripts/hermes-busdriver-relay-role        Read-only relay equivalent role resolver
 scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
@@ -59,7 +60,18 @@ scripts/hermes-busdriver-status \
   --pretty
 ```
 
-The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health, effective routes, critical file hashes, optional Busdriver drift-baseline compatibility, active marker summaries, relay lock state, and repo dirty state. It never writes `.claude/`, `.opencode/`, Busdriver, or the target repo. `--drift-baseline` only reads an existing status-style JSON baseline and marks finalization compatibility false on missing/invalid/drifted baselines; it does not create or update baselines.
+The status probe is read-only. It reports Busdriver root/config/hook/entrypoint health, effective routes, critical file hashes, optional Busdriver drift-baseline compatibility, active marker summaries, relay lock state, repo dirty state, and relay-equivalent roles from a separate relay config JSON. It never writes `.claude/`, `.opencode/`, Busdriver, or the target repo. `--drift-baseline` only reads an existing status-style JSON baseline and marks finalization compatibility false on missing/invalid/drifted baselines; it does not create or update baselines.
+
+### Relay equivalent role resolver
+
+```bash
+scripts/hermes-busdriver-relay-role \
+  --role relay.pr.backstop \
+  --relay-config ~/.hermes/busdriver-relay/config.json \
+  --pretty
+```
+
+This helper is read-only and selects one configured logical Hermes/model agent for a relay role. It is the dispatcher-facing version of the status probe's `relay_equivalent_roles` block: a valid role exits `0` with `status=resolved`, while unknown/degraded/malformed config exits nonzero and keeps `dispatch_allowed=false`, `mutation_allowed=false`, and `finalization_allowed=false`. Use `--list-roles` to inspect supported role names.
 
 ### Hermes-owned single-flight lock
 
