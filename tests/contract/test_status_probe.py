@@ -103,6 +103,111 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["critical_file_hashes"]["hooks/hooks.json"]["sha256"]
     assert data["effective_routes"]["council.pragmatist"]["resolved"] == "droid"
     assert data["effective_routes"]["blueprint-review.reviewer_3"]["resolved"] == "grok"
+    assert data["relay_config"]["exists"] is False
+    assert data["relay_config"]["route_keys"] == []
+    relay = data["relay_equivalent_roles"]
+    assert relay["coding_agent"] == "codex"
+    assert relay["avoid_coding_agent_for_review"] is True
+    assert set(relay["roles"]) == {
+        "relay.litmus.reviewer",
+        "relay.blueprint.reviewer_1",
+        "relay.blueprint.reviewer_2",
+        "relay.blueprint.reviewer_3",
+        "relay.blueprint.arbiter",
+        "relay.pr.lead",
+        "relay.pr.backstop",
+        "relay.council.architect",
+        "relay.council.pragmatist",
+        "relay.council.critic",
+        "relay.council.researcher",
+        "relay.council.skeptic",
+    }
+    arbiter = relay["roles"]["relay.blueprint.arbiter"]
+    assert arbiter["native_busdriver_role"] == "blueprint arbiter"
+    assert arbiter["configured_route"] == ["gpt-5.5", "codex"]
+    assert arbiter["default_route"] == ["gpt-5.5", "codex"]
+    assert arbiter["source"] == "default"
+    assert arbiter["selected_agent"] == "gpt-5.5"
+    assert arbiter["same_as_coding_agent"] is False
+    assert arbiter["configurable"] is True
+    assert arbiter["not_busdriver_native_claude_runtime"] is True
+    assert arbiter["finalization_allowed"] is False
+    assert arbiter["mutation_allowed"] is False
+
+
+def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    user_config = tmp_path / "busdriver.json"
+    relay_config = tmp_path / "relay-config.json"
+    role_names = [
+        "relay.litmus.reviewer",
+        "relay.blueprint.reviewer_1",
+        "relay.blueprint.reviewer_2",
+        "relay.blueprint.reviewer_3",
+        "relay.blueprint.arbiter",
+        "relay.pr.lead",
+        "relay.pr.backstop",
+        "relay.council.architect",
+        "relay.council.pragmatist",
+        "relay.council.critic",
+        "relay.council.researcher",
+        "relay.council.skeptic",
+    ]
+    user_config.write_text(json.dumps({"version": "1", "routes": {"council.pragmatist": ["agy", "droid"]}}))
+    relay_config.write_text(json.dumps({
+            "coding_agent": "opencode",
+            "avoid_coding_agent_for_review": True,
+            "routes": {role: ["opencode", "codex"] for role in role_names},
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--user-config", str(user_config), "--relay-config", str(relay_config))
+
+    assert data["user_config"]["route_keys"] == ["council.pragmatist"]
+    assert data["relay_config"]["path"] == str(relay_config)
+    assert data["relay_config"]["route_keys"] == sorted(role_names)
+    assert set(data["effective_routes"]) == {
+        "litmus.reviewer",
+        "blueprint-review.reviewer_1",
+        "blueprint-review.reviewer_2",
+        "blueprint-review.reviewer_3",
+        "council.pragmatist",
+        "council.critic",
+        "council.researcher",
+    }
+    relay = data["relay_equivalent_roles"]
+    assert relay["coding_agent"] == "opencode"
+    assert relay["coding_agent_source"] == "relay_config"
+    for role in role_names:
+        entry = relay["roles"][role]
+        assert entry["configured_route"] == ["opencode", "codex"]
+        assert entry["source"] == "relay_config"
+        assert entry["selected_agent"] == "codex"
+        assert entry["same_as_coding_agent"] is False
+        assert entry["degraded"] is False
+        assert entry["config_error"] is None
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
+def test_status_probe_marks_empty_relay_equivalent_route_degraded(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "routes": {"relay.pr.backstop": []},
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    backstop = data["relay_equivalent_roles"]["roles"]["relay.pr.backstop"]
+    assert backstop["configured_route"] == []
+    assert backstop["selected_agent"] is None
+    assert backstop["degraded"] is True
+    assert backstop["config_error"] == "empty_route"
+    assert backstop["finalization_allowed"] is False
+    assert backstop["mutation_allowed"] is False
 
 
 def test_status_probe_reports_active_markers_without_writing(tmp_path):
