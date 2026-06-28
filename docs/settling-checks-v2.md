@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, and read-only finalization handoff envelope.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, and read-only finalization handoff envelope.
 
 ## Current scope
 
@@ -13,6 +13,7 @@ Relay v2 supports:
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
+- a verify-only delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes and Hermes-owned result artifacts;
 - a read-only finalization readiness helper that emits a handoff envelope but never finalizes;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
@@ -23,7 +24,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, verify-only dispatcher, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, verify-only dispatcher with durable `hermes-busdriver-delivery-run/v0` envelopes, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -90,6 +91,17 @@ scripts/hermes-busdriver-pr-grind-loop \
   --plugin-root /path/to/busdriver \
   --max-wait-seconds 300 \
   --poll-interval 30 \
+  --pretty
+```
+
+```bash
+scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --mode execute \
+  --operation verify \
+  --run-id local-verify-001 \
+  --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
 ```
 

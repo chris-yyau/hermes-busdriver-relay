@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 SCHEMA = "hermes-busdriver-deliver/v0"
+RUN_SCHEMA = "hermes-busdriver-delivery-run/v0"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
 VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
 REDACTION = "[REDACTED]"
+ARTIFACT_TOKEN = re.compile(r"[^A-Za-z0-9_.-]+")
 SENSITIVE_PATTERNS = [
     (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
@@ -67,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
     parser.add_argument("--mode", default="plan", choices=["plan", "execute"], help="Delivery mode; only execute verify is enabled")
     parser.add_argument("--operation", default="plan", choices=["plan", "verify"], help="Delivery operation; execute supports only verify")
+    parser.add_argument("--run-id", help="Optional durable delivery run id echoed in the envelope and artifact filename")
     parser.add_argument(
         "--verifier",
         action="append",
@@ -222,16 +226,61 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
     return results
 
 
-def artifact_path() -> Path:
+def new_run_id() -> str:
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def artifact_token(run_id: str) -> str:
+    token = ARTIFACT_TOKEN.sub("-", run_id).strip(".-")
+    return token[:96] or "run"
+
+
+def delivery_phase(args: argparse.Namespace, reason: str | None) -> str:
+    if reason == "delivery_status_failed":
+        return "delivery_status"
+    if args.mode == "execute" and args.operation == "verify":
+        return "verify"
+    if args.mode == "execute":
+        return "execute"
+    return "plan"
+
+
+def delivery_run(
+    args: argparse.Namespace,
+    delivery_status: dict[str, Any],
+    result_decision: dict[str, Any],
+    reason: str | None,
+) -> dict[str, Any]:
+    repo = delivery_status.get("repo") if isinstance(delivery_status.get("repo"), dict) else {}
+    return {
+        "schema": RUN_SCHEMA,
+        "version": 1,
+        "run_id": args.run_id or new_run_id(),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "phase": delivery_phase(args, reason),
+        "status": result_decision.get("status"),
+        "reason": result_decision.get("reason"),
+        "repo_root": repo.get("root"),
+        "pr_number": args.pr,
+        "authority": {key: result_decision[key] for key in BLOCKED_FLAGS},
+        "artifacts": [],
+    }
+
+
+def artifact_path(run_id: str) -> Path:
     base = Path(os.environ.get(ARTIFACT_ENV, "~/.hermes/busdriver-relay/delivery-runs")).expanduser()
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return base / f"{stamp}-{os.getpid()}.json"
+    return base / f"{stamp}-{artifact_token(run_id)}-{os.getpid()}.json"
 
 
 def write_artifact(result: dict[str, Any]) -> None:
-    path = artifact_path()
+    run = result.get("run") if isinstance(result.get("run"), dict) else {}
+    run_id = str(run.get("run_id") or new_run_id())
+    path = artifact_path(run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     result["run_artifact_path"] = str(path)
+    if isinstance(result.get("run"), dict):
+        result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -248,6 +297,8 @@ def write_artifact(result: dict[str, Any]) -> None:
         os.replace(tmp_path, path)
     except OSError:
         result["run_artifact_path"] = None
+        if isinstance(result.get("run"), dict):
+            result["run"]["artifacts"] = []
         if tmp_path is not None:
             try:
                 tmp_path.unlink()
@@ -371,6 +422,7 @@ def main() -> int:
         "verifiers": verifiers,
         "steps": steps_for(reason),
         "decision": result_decision,
+        "run": delivery_run(args, delivery_status, result_decision, reason),
         "run_artifact_path": None,
     }
     result = redact_value(result)
@@ -381,6 +433,11 @@ def main() -> int:
             result["ok"] = False
             result["run_artifact_error"] = redact_text(str(e))
             result["decision"] = decision("blocked", "artifact_write_failed")
+            if isinstance(result.get("run"), dict):
+                result["run"]["status"] = "blocked"
+                result["run"]["reason"] = "artifact_write_failed"
+                result["run"]["authority"] = {key: False for key in BLOCKED_FLAGS}
+                result["run"]["artifacts"] = []
             result["steps"] = steps_for("artifact_write_failed")
             returncode = 1
 
