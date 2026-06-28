@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Resolve one relay-owned equivalent role from relay config.
+
+Read-only helper for dispatchers: it selects the configured logical
+Hermes/model agent for a relay role and fails closed when the config is invalid
+or the selected role is degraded. It never launches an agent and never grants
+mutation/finalization authority.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
+
+
+def fail_closed_payload(reason: str, role: str | None = None, details: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "schema": "hermes-busdriver-relay-role/v0",
+        "version": 1,
+        "read_only": True,
+        "role": role,
+        "status": "invalid_args",
+        "ok": False,
+        "reason": reason,
+        "details": details or [],
+        "dispatch_allowed": False,
+        "mutation_allowed": False,
+        "finalization_allowed": False,
+        "not_busdriver_native_claude_runtime": True,
+        "selected": None,
+        "decision": {
+            "dispatch_allowed": False,
+            "mutation_allowed": False,
+            "finalization_allowed": False,
+            "not_busdriver_native_claude_runtime": True,
+            "reason": reason,
+        },
+    }
+
+
+def print_payload(payload: dict[str, Any], pretty: bool) -> None:
+    print(json.dumps(payload, indent=2 if pretty else None, sort_keys=pretty))
+
+
+def load_status_payload(args: argparse.Namespace) -> tuple[dict[str, Any] | None, str | None]:
+    cmd = [sys.executable, str(STATUS_SCRIPT)]
+    if args.relay_config:
+        cmd.extend(["--relay-config", args.relay_config])
+    if args.relay_state_dir:
+        cmd.extend(["--relay-state-dir", args.relay_state_dir])
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        return None, "status_probe_timeout"
+    if proc.returncode != 0:
+        return None, f"status_probe_failed:{proc.returncode}"
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"status_probe_invalid_json:{exc}"
+    if not isinstance(data, dict):
+        return None, "status_probe_non_object"
+    return data, None
+
+
+def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, dict[str, Any] | None, str]:
+    roles = relay_roles.get("roles", {}) if isinstance(relay_roles, dict) else {}
+    if not isinstance(roles, dict):
+        return "degraded", False, None, "status_probe_invalid_roles_shape"
+    if role not in roles:
+        return "unknown_role", False, None, "unknown_role"
+    selected = roles[role]
+    if not isinstance(selected, dict):
+        return "degraded", False, None, "status_probe_invalid_role_shape"
+    top_level_config_error = (
+        relay_roles.get("relay_config_parse_error")
+        or relay_roles.get("relay_config_shape_error")
+        or relay_roles.get("routes_config_error")
+        or relay_roles.get("coding_agent_config_error")
+        or relay_roles.get("avoid_coding_agent_for_review_config_error")
+    )
+    if top_level_config_error:
+        return "degraded", False, selected, top_level_config_error
+    degraded = selected.get("degraded")
+    if not isinstance(degraded, bool):
+        return "degraded", False, selected, "status_probe_invalid_role_degraded_shape"
+    selected_agent = selected.get("selected_agent")
+    if selected_agent is not None and not (isinstance(selected_agent, str) and selected_agent.strip()):
+        return "degraded", False, selected, "status_probe_invalid_selected_agent_shape"
+    if degraded or not selected_agent:
+        config_error = selected.get("config_error")
+        reason = config_error if isinstance(config_error, str) and config_error else "selected_agent_unavailable"
+        return "degraded", False, selected, reason
+    return "resolved", True, selected, "selected_agent_available"
+
+
+def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    status_payload, status_error = load_status_payload(args)
+    if status_error or status_payload is None:
+        return fail_closed_payload(status_error or "status_probe_unavailable", args.role), 2
+    relay_cfg_status = status_payload.get("relay_config")
+    if not isinstance(relay_cfg_status, dict):
+        return fail_closed_payload("status_probe_invalid_relay_config_shape", args.role), 2
+    relay_roles = status_payload.get("relay_equivalent_roles")
+    if not isinstance(relay_roles, dict):
+        return fail_closed_payload("status_probe_invalid_relay_roles_shape", args.role), 2
+    roles = relay_roles.get("roles", {})
+    if not isinstance(roles, dict):
+        return fail_closed_payload("status_probe_invalid_roles_shape", args.role), 2
+    known_roles = sorted(roles.keys())
+    if args.list_roles:
+        return {
+            "schema": "hermes-busdriver-relay-role/v0",
+            "version": 1,
+            "read_only": True,
+            "status": "listed",
+            "ok": True,
+            "dispatch_allowed": False,
+            "not_busdriver_native_claude_runtime": True,
+            "relay_config": relay_cfg_status,
+            "coding_agent": relay_roles.get("coding_agent"),
+            "avoid_coding_agent_for_review": relay_roles.get("avoid_coding_agent_for_review"),
+            "roles": known_roles,
+            "mutation_allowed": False,
+            "finalization_allowed": False,
+        }, 0
+
+    state, ok, selected, reason = role_status(relay_roles, args.role)
+    payload = {
+        "schema": "hermes-busdriver-relay-role/v0",
+        "version": 1,
+        "read_only": True,
+        "role": args.role,
+        "status": state,
+        "ok": ok,
+        "reason": reason,
+        "dispatch_allowed": ok,
+        "mutation_allowed": False,
+        "finalization_allowed": False,
+        "not_busdriver_native_claude_runtime": True,
+        "relay_config": relay_cfg_status,
+        "coding_agent": relay_roles.get("coding_agent"),
+        "coding_agent_source": relay_roles.get("coding_agent_source"),
+        "coding_agent_config_error": relay_roles.get("coding_agent_config_error"),
+        "avoid_coding_agent_for_review": relay_roles.get("avoid_coding_agent_for_review"),
+        "avoid_coding_agent_for_review_source": relay_roles.get("avoid_coding_agent_for_review_source"),
+        "avoid_coding_agent_for_review_config_error": relay_roles.get("avoid_coding_agent_for_review_config_error"),
+        "routes_config_error": relay_roles.get("routes_config_error"),
+        "relay_config_parse_error": relay_roles.get("relay_config_parse_error"),
+        "relay_config_shape_error": relay_roles.get("relay_config_shape_error"),
+        "known_roles": known_roles,
+        "selected": selected,
+        "decision": {
+            "dispatch_allowed": ok,
+            "mutation_allowed": False,
+            "finalization_allowed": False,
+            "not_busdriver_native_claude_runtime": True,
+            "reason": reason,
+        },
+    }
+    if state == "resolved":
+        return payload, 0
+    if state == "unknown_role":
+        return payload, 64
+    return payload, 2
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Resolve a read-only relay equivalent role from relay config",
+        exit_on_error=False,
+        allow_abbrev=False,
+    )
+    ap.add_argument("--role", help="Relay role name, e.g. relay.pr.backstop")
+    ap.add_argument("--list-roles", action="store_true", help="List known relay roles and exit")
+    ap.add_argument("--relay-config", help="Relay config JSON path; defaults to ~/.hermes/busdriver-relay/config.json")
+    ap.add_argument("--relay-state-dir", help="Relay state dir for default config lookup; defaults to ~/.hermes/busdriver-relay")
+    ap.add_argument("--pretty", action="store_true")
+    try:
+        args, unknown = ap.parse_known_args()
+    except argparse.ArgumentError as exc:
+        print_payload(fail_closed_payload("argument_parse_error", details=[str(exc)]), "--pretty" in sys.argv)
+        return 64
+    if unknown:
+        print_payload(fail_closed_payload("unknown_arguments", details=unknown), args.pretty)
+        return 64
+    if args.list_roles and args.role:
+        print_payload(fail_closed_payload("role_and_list_roles_are_mutually_exclusive", args.role), args.pretty)
+        return 64
+    if not args.list_roles and not args.role:
+        print_payload(fail_closed_payload("role_required_unless_list_roles"), args.pretty)
+        return 64
+    payload, code = build_payload(args)
+    print_payload(payload, args.pretty)
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
