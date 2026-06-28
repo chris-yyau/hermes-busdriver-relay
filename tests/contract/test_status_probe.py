@@ -119,9 +119,22 @@ def test_status_probe_reports_active_markers_without_writing(tmp_path):
     after = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*"))
     assert before == after
     markers = data["active_markers"]
+    repo_status = data["repo"]
     assert markers["active_count"] == 2
-    assert markers["files"]["litmus-passed.local"]["exists"] is True
+    litmus_marker = markers["files"]["litmus-passed.local"]
+    design_marker = markers["files"]["design-review-needed.local.md"]
+    assert litmus_marker["exists"] is True
     assert markers["files"]["design-review-needed.local.md"]["preview_lines"] == ["PLAN.md"]
+    assert "freshness" in litmus_marker
+    assert "freshness" in design_marker
+    freshness = litmus_marker["freshness"]
+    assert freshness["compared_to_repo_head"] == repo_status["head"]
+    assert freshness["repo_branch"] == repo_status["branch"]
+    assert freshness["repo_dirty"] == repo_status["dirty"]
+    assert freshness["marker_mtime"] == litmus_marker["mtime"]
+    assert freshness["marker_age_sec"] == litmus_marker["age_sec"]
+    assert freshness["repo_head_commit_time"] == repo_status["head_commit_time"]
+    assert freshness["marker_mtime_after_repo_head_commit_time"] is None
 
 
 def test_status_probe_compares_drift_baseline_without_writing(tmp_path):
