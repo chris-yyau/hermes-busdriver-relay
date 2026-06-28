@@ -28,7 +28,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/drifted baselines while keeping all finalization flags false. No automatic restore/enable state machine yet. |
 | H8 state-dir/plugin-root portability | Partial | Status/gate/smoke accept plugin root and state dir; PR-grind checker can use live Busdriver `relevant-check-status.sh`. |
 | H9 marker freshness | Partial | Status reports marker metadata; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
-| H10 concurrency | Implemented scaffolding | `hermes-busdriver-lock` supports per-repo operations; finalization-specific lock class still future work. |
+| H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |
 | H11 external side effects | Partial | Draft paths block side effects; Delivery Mode PR/merge side effects require explicit user intent and clean checks. |
 | H12 sensitive payload | Improved | Verify-only delivery redacts common secret shapes from verifier commands, stdout/stderr tails, helper-error tails, and persisted artifacts; finalization/status paths still avoid advisory/model payloads. |
 | H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization. |
@@ -49,6 +49,7 @@ scripts/hermes-busdriver-smoke \
 scripts/hermes-busdriver-finalization-readiness \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
+  --relay-state-dir /path/to/hermes-relay-state \
   --pr 123 \
   --pretty
 ```

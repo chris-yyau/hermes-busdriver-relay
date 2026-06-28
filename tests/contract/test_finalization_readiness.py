@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
+LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -253,5 +254,24 @@ def test_missing_phase0_hooks_block_handoff_even_when_worktree_dirty(tmp_path: P
     assert data["readiness"]["ready"] is False
     assert data["readiness"]["status"] == "blocked"
     assert "phase0_hooks_unavailable" in data["readiness"]["blockers"]
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+def test_active_finalization_lock_blocks_handoff_readiness(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    relay_state = tmp_path / "relay-state"
+    assert run([sys.executable, str(LOCK), "acquire", "--repo", str(repo), "--state-dir", str(relay_state), "--operation", "finalization"]).returncode == 0
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--relay-state-dir", str(relay_state))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    assert "relay_finalization_lock_active" in data["readiness"]["blockers"]
+    assert data["delivery_status"]["finalization_lock"]["active_for_repo_count"] == 1
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
