@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -110,18 +111,52 @@ def test_status_probe_reports_active_markers_without_writing(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, text=True, capture_output=True)
+    (repo / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, text=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    head_time = int(
+        subprocess.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            cwd=repo,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    )
     state = repo / ".claude"
     state.mkdir()
     (state / "litmus-passed.local").write_text("PASS-test\n")
     (state / "design-review-needed.local.md").write_text("PLAN.md\n")
+    os.utime(state / "litmus-passed.local", (head_time, head_time))
+    os.utime(state / "design-review-needed.local.md", (head_time + 1, head_time + 1))
     before = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*"))
     data = run_status("--plugin-root", str(fake), "--repo", str(repo))
     after = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*"))
     assert before == after
     markers = data["active_markers"]
+    repo_status = data["repo"]
     assert markers["active_count"] == 2
-    assert markers["files"]["litmus-passed.local"]["exists"] is True
+    litmus_marker = markers["files"]["litmus-passed.local"]
+    design_marker = markers["files"]["design-review-needed.local.md"]
+    assert litmus_marker["exists"] is True
     assert markers["files"]["design-review-needed.local.md"]["preview_lines"] == ["PLAN.md"]
+    assert "freshness" in litmus_marker
+    assert "freshness" in design_marker
+    freshness = litmus_marker["freshness"]
+    assert freshness["compared_to_repo_head"] == repo_status["head"]
+    assert freshness["repo_branch"] == repo_status["branch"]
+    assert freshness["repo_dirty"] == repo_status["dirty"]
+    assert freshness["marker_mtime"] == litmus_marker["mtime"]
+    assert freshness["marker_age_sec"] == litmus_marker["age_sec"]
+    assert freshness["repo_head_commit_time"] == repo_status["head_commit_time"]
+    assert freshness["marker_mtime_after_repo_head_commit_time"] is False
+    assert design_marker["freshness"]["marker_mtime_after_repo_head_commit_time"] is True
 
 
 def test_status_probe_compares_drift_baseline_without_writing(tmp_path):

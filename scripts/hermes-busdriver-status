@@ -324,21 +324,37 @@ def effective_routes(user_cfg: dict[str, Any], resolved_cli: dict[str, Any]) -> 
 
 
 def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[str, Any] | None:
-    if not repo_status or not repo_status.get("is_git_repo") or not repo_status.get("root"):
+    if repo_status is None:
+        return None
+    if not repo_status.get("is_git_repo") or not repo_status.get("root"):
         return None
     root = Path(repo_status["root"])
     state = root / state_dir
     markers: dict[str, Any] = {"state_dir": str(state), "exists": state.exists(), "files": {}}
     now = time.time()
+    repo_head_commit_time = repo_status.get("head_commit_time")
     for name in MARKER_FILES:
         path = state / name
         if path.exists():
             st = path.stat()
+            marker_mtime = int(st.st_mtime)
+            marker_age_sec = int(now - st.st_mtime)
             entry: dict[str, Any] = {
                 "exists": True,
                 "size": st.st_size,
-                "mtime": int(st.st_mtime),
-                "age_sec": int(now - st.st_mtime),
+                "mtime": marker_mtime,
+                "age_sec": marker_age_sec,
+                "freshness": {
+                    "compared_to_repo_head": repo_status.get("head"),
+                    "repo_branch": repo_status.get("branch"),
+                    "repo_dirty": repo_status.get("dirty"),
+                    "marker_mtime": marker_mtime,
+                    "marker_age_sec": marker_age_sec,
+                    "repo_head_commit_time": repo_head_commit_time,
+                    "marker_mtime_after_repo_head_commit_time": None
+                    if repo_head_commit_time is None
+                    else marker_mtime > repo_head_commit_time,
+                },
             }
             if st.st_size <= 4096 and path.is_file() and name not in {"bypass-log.jsonl"}:
                 try:
@@ -373,6 +389,7 @@ def git_status(repo: str | None) -> dict[str, Any] | None:
     branch = run(["git", "branch", "--show-current"], cwd=root)
     status = run(["git", "status", "--porcelain=v1"], cwd=root)
     head = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
+    head_time = run(["git", "show", "-s", "--format=%ct", "HEAD"], cwd=root)
     git_dir = run(["git", "rev-parse", "--git-dir"], cwd=root)
     git_dir_path = (root / git_dir["stdout"]).resolve() if git_dir["ok"] and not Path(git_dir["stdout"]).is_absolute() else Path(git_dir["stdout"]) if git_dir["ok"] else None
     states = {}
@@ -390,6 +407,9 @@ def git_status(repo: str | None) -> dict[str, Any] | None:
         "root": str(root),
         "branch": branch["stdout"],
         "head": head["stdout"],
+        "head_commit_time": int(head_time["stdout"])
+        if head_time["ok"] and head_time["stdout"].isdigit()
+        else None,
         "dirty": bool(lines),
         "porcelain": lines,
         "states": states,
