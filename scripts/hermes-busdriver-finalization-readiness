@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", default=".", help="Target git repo/worktree to inspect read-only")
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
     parser.add_argument("--state-dir", default=".claude", help="Busdriver state dir name for Phase-0 marker/config discovery")
+    parser.add_argument("--relay-state-dir", help="Hermes relay state dir for lock/run lookup")
     parser.add_argument("--user-config", help="Busdriver user config path for Phase-0 discovery")
     parser.add_argument("--pr", help="Pull request number for post-PR readiness")
     parser.add_argument("--target", default="auto", choices=["auto", "commit", "pr", "merge", "delivery"], help="Finalization handoff target to evaluate")
@@ -96,6 +97,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
     cmd = [sys.executable, str(DELIVERY_STATUS), "--repo", args.repo]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
+    if args.relay_state_dir:
+        cmd += ["--state-dir", args.relay_state_dir]
     if args.pr:
         cmd += ["--pr", args.pr]
     if args.pr_grind_check_script:
@@ -109,6 +112,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
 
 def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     cmd = [sys.executable, str(PHASE0_STATUS), "--repo", args.repo, "--state-dir", args.state_dir, "--operation", "repo-mutation"]
+    if args.relay_state_dir:
+        cmd += ["--relay-state-dir", args.relay_state_dir]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
     if args.user_config:
@@ -262,6 +267,7 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "delivery_status_schema": delivery.get("schema"),
             "phase0_status_schema": phase0.get("status_schema"),
             "delivery_decision": delivery.get("decision"),
+            "finalization_lock": delivery.get("finalization_lock"),
         },
         "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
         "required_next_actions": [
