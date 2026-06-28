@@ -237,6 +237,25 @@ def drift_baseline_status(baseline_arg: str | None, package: dict[str, Any], has
             "missing": [],
         }
 
+    for key, expected in {
+        "status_schema": "hermes-busdriver-status/v0",
+        "schema": "hermes-busdriver-drift/v0",
+    }.items():
+        declared = data.get(key)
+        if declared is not None and declared != expected:
+            return {
+                **base,
+                "status": "baseline_invalid",
+                "finalization_compatible": False,
+                "finalization_disabled_reasons": ["baseline_invalid"],
+                "parse_error": f"unsupported {key}: {declared}",
+                "package_version_changed": False,
+                "added": [],
+                "removed": [],
+                "changed": [],
+                "missing": [],
+            }
+
     expected_hashes = data.get("critical_file_hashes")
     if not isinstance(expected_hashes, dict):
         return {
