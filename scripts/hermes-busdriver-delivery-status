@@ -174,6 +174,7 @@ def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
 def relay_capabilities() -> dict[str, Any]:
     scripts = {
         "status": ROOT / "scripts" / "hermes-busdriver-status",
+        "relay_role": ROOT / "scripts" / "hermes-busdriver-relay-role",
         "runtime_check": ROOT / "scripts" / "hermes-busdriver-runtime-check",
         "gate": ROOT / "scripts" / "hermes-busdriver-gate",
         "agent_draft": ROOT / "scripts" / "hermes-busdriver-agent-draft",
@@ -301,7 +302,30 @@ def run_pr_grind_check(args: argparse.Namespace, repo: dict[str, Any], busdriver
         return {"available": True, "ok": False, "script": str(script), "parse_error": str(e), "stdout_tail": cp.stdout[-4000:]}
 
 
-def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], finalization_lock: dict[str, Any], pr_grind: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
+def run_relay_role_resolution(args: argparse.Namespace) -> dict[str, Any] | None:
+    if not args.relay_role:
+        return None
+    script = Path(args.relay_role_script).expanduser() if args.relay_role_script else ROOT / "scripts" / "hermes-busdriver-relay-role"
+    if not script.exists():
+        return {"available": False, "ok": False, "script": str(script), "role": args.relay_role, "reason": "hermes-busdriver-relay-role not available in this branch"}
+    cmd = [sys.executable, str(script), "--role", args.relay_role]
+    if args.relay_config:
+        cmd += ["--relay-config", args.relay_config]
+    if args.state_dir:
+        cmd += ["--relay-state-dir", args.state_dir]
+    cp = run(cmd, timeout=args.relay_role_timeout)
+    base: dict[str, Any] = {"available": True, "script": str(script), "role": args.relay_role, "returncode": cp.returncode}
+    try:
+        result = json.loads(cp.stdout)
+    except Exception as e:  # noqa: BLE001
+        return {**base, "ok": False, "parse_error": str(e), "stdout_tail": cp.stdout[-4000:], "stderr": cp.stderr[-4000:]}
+    if not isinstance(result, dict):
+        return {**base, "ok": False, "reason": "relay_role_result_not_object", "result": result, "stderr": cp.stderr[-4000:]}
+    ok = cp.returncode == 0 and result.get("ok") is True and result.get("dispatch_allowed") is True
+    return {**base, "ok": ok, "result": result, "stderr": cp.stderr[-4000:] if cp.stderr else ""}
+
+
+def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: dict[str, Any], finalization_lock: dict[str, Any], pr_grind: dict[str, Any] | None, relay_role: dict[str, Any] | None, pr: str | None) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
     stage = "unknown"
@@ -325,6 +349,12 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
         blockers.append("busdriver_plugin_unavailable")
     elif not busdriver.get("pr_grind_sources_available"):
         warnings.append("busdriver_pr_grind_sources_incomplete")
+
+    if relay_role is not None:
+        if not relay_role.get("available"):
+            warnings.append("relay_role_resolver_unavailable")
+        elif not relay_role.get("ok"):
+            warnings.append("relay_role_not_dispatchable")
 
     if pr:
         if pr_grind is None:
@@ -386,6 +416,10 @@ def main() -> int:
     ap.add_argument("--pr-grind-result-file", help="Fixture/result JSON from hermes-busdriver-pr-grind-check")
     ap.add_argument("--pr-grind-timeout", type=int, default=180)
     ap.add_argument("--state-dir", help="Hermes busdriver-relay state dir for lock/run lookup")
+    ap.add_argument("--relay-role", help="Optionally resolve one relay equivalent role into the status envelope")
+    ap.add_argument("--relay-config", help="Relay config JSON path to pass to hermes-busdriver-relay-role")
+    ap.add_argument("--relay-role-script", help="Path to hermes-busdriver-relay-role; defaults to this relay repo's scripts dir")
+    ap.add_argument("--relay-role-timeout", type=int, default=90)
     ap.add_argument("--max-agent-runs", type=int, default=3)
     ap.add_argument("--no-agent-runs", action="store_true")
     ap.add_argument("--no-lock-status", action="store_true")
@@ -397,10 +431,11 @@ def main() -> int:
     markers = marker_status(repo)
     capabilities = relay_capabilities()
     pr_grind = run_pr_grind_check(args, repo, busdriver)
+    relay_role = run_relay_role_resolution(args)
     locks = load_lock_status(args)
     finalization_lock = finalization_lock_summary(locks, repo)
     runs = latest_agent_runs(args, repo)
-    decision = delivery_decision(repo, busdriver, markers, finalization_lock, pr_grind, args.pr)
+    decision = delivery_decision(repo, busdriver, markers, finalization_lock, pr_grind, relay_role, args.pr)
 
     result = {
         "schema": SCHEMA,
@@ -413,6 +448,7 @@ def main() -> int:
         "finalization_lock": finalization_lock,
         "recent_agent_runs": runs,
         "pr_grind": pr_grind,
+        "relay_role_resolution": relay_role,
         "decision": decision,
     }
     print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))

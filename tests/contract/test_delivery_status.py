@@ -57,6 +57,15 @@ def invoke_with_lock_status(repo: Path, plugin: Path, state: Path, *extra: str) 
     return json.loads(cp.stdout)
 
 
+def relay_config(path: Path, route: object) -> Path:
+    path.write_text(json.dumps({
+        "coding_agent": "opencode",
+        "avoid_coding_agent_for_review": True,
+        "routes": {"relay.pr.backstop": route},
+    }))
+    return path
+
+
 def snapshot_files(path: Path) -> dict[str, str]:
     out = {}
     for root, _dirs, files in os.walk(path):
@@ -95,6 +104,46 @@ def test_untracked_files_are_not_reported_as_unstaged(tmp_path: Path):
 
     assert data["repo"]["untracked_entries"] == ["?? new.txt"]
     assert data["repo"]["unstaged_entries"] == []
+
+
+def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    cfg = relay_config(tmp_path / "relay-config.json", ["opencode", "codex"])
+
+    data = invoke(repo, plugin, "--relay-role", "relay.pr.backstop", "--relay-config", str(cfg))
+
+    assert data["relay_capabilities"]["relay_role"]["available"] is True
+    role = data["relay_role_resolution"]
+    assert role["available"] is True
+    assert role["ok"] is True
+    assert role["returncode"] == 0
+    assert role["result"]["role"] == "relay.pr.backstop"
+    assert role["result"]["selected"]["selected_agent"] == "codex"
+    assert role["result"]["dispatch_allowed"] is True
+    assert role["result"]["mutation_allowed"] is False
+    assert role["result"]["finalization_allowed"] is False
+    assert data["decision"]["finalization_allowed"] is False
+    assert data["decision"]["merge_allowed"] is False
+    assert "relay_role_not_dispatchable" not in data["decision"]["warnings"]
+
+
+def test_delivery_status_reports_unresolved_relay_role_as_warning(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    cfg = relay_config(tmp_path / "relay-config.json", [])
+
+    data = invoke(repo, plugin, "--relay-role", "relay.pr.backstop", "--relay-config", str(cfg))
+
+    role = data["relay_role_resolution"]
+    assert role["available"] is True
+    assert role["ok"] is False
+    assert role["returncode"] == 2
+    assert role["result"]["dispatch_allowed"] is False
+    assert role["result"]["selected"]["config_error"] == "empty_route"
+    assert "relay_role_not_dispatchable" in data["decision"]["warnings"]
+    assert data["decision"]["finalization_allowed"] is False
+    assert data["decision"]["merge_allowed"] is False
 
 
 def test_pr_status_blocks_when_pr_grind_checker_missing(tmp_path: Path):

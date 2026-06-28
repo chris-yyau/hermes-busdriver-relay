@@ -149,11 +149,13 @@ This creates a throwaway git repo and calls the selected real agent through `her
 scripts/hermes-busdriver-delivery-status \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
+  --relay-role relay.pr.backstop \
+  --relay-config ~/.hermes/busdriver-relay/config.json \
   --pr 123 \
   --pretty
 ```
 
-This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, finalization-lock blocking state, and optional PR-grind readiness output. It never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
+This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, finalization-lock blocking state, optional PR-grind readiness output, and optional relay-role resolution from `hermes-busdriver-relay-role`. Relay-role resolution is advisory status only: a non-dispatchable role is reported as a warning, and the envelope still never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
 ### Delivery dispatcher
 
@@ -182,11 +184,13 @@ scripts/hermes-busdriver-finalization-readiness \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
   --relay-state-dir ~/.hermes/busdriver-relay \
+  --relay-role relay.pr.backstop \
+  --relay-config ~/.hermes/busdriver-relay/config.json \
   --pr 123 \
   --pretty
 ```
 
-This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
+This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. When `--relay-role` is supplied, the handoff evidence includes the same fail-closed resolver output from delivery status. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
 
 ### PR-grind readiness check
 

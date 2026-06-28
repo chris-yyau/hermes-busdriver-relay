@@ -66,6 +66,15 @@ def fake_user_config(path: Path) -> Path:
     return path
 
 
+def relay_config(path: Path, route: object) -> Path:
+    path.write_text(json.dumps({
+        "coding_agent": "opencode",
+        "avoid_coding_agent_for_review": True,
+        "routes": {"relay.pr.backstop": route},
+    }))
+    return path
+
+
 def invoke(repo: Path, plugin: Path, user_config: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], dict]:
     cp = run(
         [
@@ -129,6 +138,36 @@ def test_dirty_tree_generates_read_only_commit_or_pr_handoff_without_side_effect
     assert_no_finalization_authority(handoff["authority"])
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
+
+
+def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    cfg = relay_config(tmp_path / "relay-config.json", ["opencode", "codex"])
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        user_config,
+        "--relay-role",
+        "relay.pr.backstop",
+        "--relay-config",
+        str(cfg),
+    )
+
+    assert cp.returncode == 0, cp.stderr
+    role = data["delivery_status"]["relay_role_resolution"]
+    assert role["ok"] is True
+    assert role["result"]["selected"]["selected_agent"] == "codex"
+    assert role["result"]["dispatch_allowed"] is True
+    handoff_role = data["handoff_envelope"]["evidence"]["relay_role_resolution"]
+    assert handoff_role["ok"] is True
+    assert handoff_role["result"]["mutation_allowed"] is False
+    assert handoff_role["result"]["finalization_allowed"] is False
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
 
 
 def test_clean_pr_grind_fixture_generates_merge_handoff_but_no_merge_authority(tmp_path: Path):
