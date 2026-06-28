@@ -53,6 +53,12 @@ def test_runtime_check_blocks_mutating_launcher_in_normal_shell(tmp_path):
     assert data["runtime_equivalence"]["hermes_shell_is_claude_hook_runtime"] is False
     assert data["runtime_equivalence"]["claude_hooks_will_intercept_inner_shell_commands"] is False
     assert data["runtime_equivalence"]["mutating_launcher_allowed"] is False
+    sources = data["runtime_equivalence"]["authorization_sources"]
+    assert sources["claude_hook_runtime"]["observed"] is False
+    assert sources["claude_hook_runtime"]["authorized_here"] is False
+    assert sources["explicit_equivalent_gate_runner"]["available"] is True
+    assert sources["explicit_equivalent_gate_runner"]["authorized_here"] is False
+    assert sources["local_non_finalizing_draft"]["authorized_here"] is False
 
 
 def test_runtime_check_detects_claude_hook_shaped_stdin_but_still_does_not_allow_mutation(tmp_path):
@@ -64,3 +70,9 @@ def test_runtime_check_detects_claude_hook_shaped_stdin_but_still_does_not_allow
     assert data["runtime_equivalence"]["inside_claude_code_hook_invocation"] is True
     # The checker itself remains a read-only reporter; it never grants launcher authority.
     assert data["runtime_equivalence"]["mutating_launcher_allowed"] is False
+    sources = data["runtime_equivalence"]["authorization_sources"]
+    assert sources["claude_hook_runtime"]["observed"] is True
+    assert sources["claude_hook_runtime"]["authorized_here"] is False
+    assert sources["explicit_equivalent_gate_runner"]["available"] is True
+    assert sources["explicit_equivalent_gate_runner"]["authorized_here"] is False
+    assert sources["local_non_finalizing_draft"]["authorized_here"] is False

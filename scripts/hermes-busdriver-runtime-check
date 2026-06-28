@@ -133,6 +133,8 @@ def main() -> int:
     inside_hook_invocation = bool(hook_input.get("looks_like_claude_hook_input"))
     has_manifest = manifest["exists"] and not manifest.get("parse_error")
     has_gate_hooks = bool(manifest.get("gated_hooks"))
+    gate_runner = Path(__file__).resolve().with_name("hermes-busdriver-gate")
+    gate_runner_available = gate_runner.is_file() and os.access(gate_runner, os.X_OK)
 
     result = {
         "schema": SCHEMA,
@@ -152,6 +154,23 @@ def main() -> int:
             "hermes_shell_is_claude_hook_runtime": False,
             "claude_hooks_will_intercept_inner_shell_commands": False,
             "mutating_launcher_allowed": False,
+            "authorization_sources": {
+                "claude_hook_runtime": {
+                    "observed": inside_hook_invocation,
+                    "authorized_here": False,
+                    "reason": "hook-shaped stdin is observed only; runtime-check does not grant mutation",
+                },
+                "explicit_equivalent_gate_runner": {
+                    "available": gate_runner_available,
+                    "path": str(gate_runner),
+                    "authorized_here": False,
+                    "reason": "use hermes-busdriver-gate/agent-draft, not raw runtime-check",
+                },
+                "local_non_finalizing_draft": {
+                    "authorized_here": False,
+                    "reason": "allowed only through draft gate pattern, not read-only runtime-check",
+                },
+            },
             "reason": "Claude Code hooks are harness-level tool interceptors. A normal Hermes-launched shell process can read Busdriver scripts but does not itself become the Claude Code PreToolUse/PostToolUse runtime, and inner commands inside that process are not intercepted by Claude Code hooks.",
             "allowed_now": ["read-only status", "route/gate inventory", "marker summary", "Hermes-owned locks", "smoke tests"],
             "blocked_until_one_of": [
