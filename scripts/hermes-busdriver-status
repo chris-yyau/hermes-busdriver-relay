@@ -353,7 +353,7 @@ def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[s
                     "repo_head_commit_time": repo_head_commit_time,
                     "marker_mtime_after_repo_head_commit_time": None
                     if repo_head_commit_time is None
-                    else marker_mtime >= repo_head_commit_time,
+                    else marker_mtime > repo_head_commit_time,
                 },
             }
             if st.st_size <= 4096 and path.is_file() and name not in {"bypass-log.jsonl"}:
