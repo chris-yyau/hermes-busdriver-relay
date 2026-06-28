@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
     parser.add_argument("--state-dir", default=".claude", help="Busdriver state dir name for Phase-0 marker/config discovery")
     parser.add_argument("--relay-state-dir", help="Hermes relay state dir for lock/run lookup")
+    parser.add_argument("--relay-role", help="Optionally resolve one relay equivalent role through delivery-status")
+    parser.add_argument("--relay-config", help="Relay config JSON path for optional relay role resolution")
     parser.add_argument("--user-config", help="Busdriver user config path for Phase-0 discovery")
     parser.add_argument("--pr", help="Pull request number for post-PR readiness")
     parser.add_argument("--target", default="auto", choices=["auto", "commit", "pr", "merge", "delivery"], help="Finalization handoff target to evaluate")
@@ -99,6 +101,10 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--plugin-root", args.plugin_root]
     if args.relay_state_dir:
         cmd += ["--state-dir", args.relay_state_dir]
+    if args.relay_role:
+        cmd += ["--relay-role", args.relay_role]
+    if args.relay_config:
+        cmd += ["--relay-config", args.relay_config]
     if args.pr:
         cmd += ["--pr", args.pr]
     if args.pr_grind_check_script:
@@ -268,6 +274,7 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "phase0_status_schema": phase0.get("status_schema"),
             "delivery_decision": delivery.get("decision"),
             "finalization_lock": delivery.get("finalization_lock"),
+            "relay_role_resolution": delivery.get("relay_role_resolution"),
         },
         "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
         "required_next_actions": [

@@ -9,6 +9,7 @@ Relay v2 supports:
 - read-only Busdriver status/runtime probes, including optional Busdriver drift-baseline comparison;
 - read-only configurable relay-equivalent reviewer/voice/arbiter/backstop status roles under a separate relay config JSON;
 - a read-only relay role resolver that turns one configured equivalent role into a fail-closed dispatcher-facing selection envelope;
+- optional relay-role resolution evidence in delivery-status and finalization-readiness handoff envelopes;
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
@@ -21,8 +22,8 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 
 | Check | v2 status | Evidence |
 |---|---|---|
-| H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, PR-grind checker/loop, verify-only dispatcher, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
+| H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, verify-only dispatcher, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -52,7 +53,18 @@ scripts/hermes-busdriver-finalization-readiness \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
   --relay-state-dir /path/to/hermes-relay-state \
+  --relay-role relay.pr.backstop \
+  --relay-config /path/to/hermes-relay-config.json \
   --pr 123 \
+  --pretty
+```
+
+```bash
+scripts/hermes-busdriver-delivery-status \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --relay-role relay.pr.backstop \
+  --relay-config /path/to/hermes-relay-config.json \
   --pretty
 ```
 
