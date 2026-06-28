@@ -41,6 +41,7 @@ BLOCKED_FLAGS = {
     "deploy_allowed": False,
     "release_allowed": False,
     "publish_allowed": False,
+    "marker_write_allowed": False,
 }
 
 
@@ -68,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through delivery-status")
     parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
-    parser.add_argument("--mode", default="plan", choices=["plan", "execute"], help="Delivery mode; only execute verify is enabled")
+    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; only execute verify is enabled; status is read-only run lookup")
     parser.add_argument("--operation", default="plan", choices=["plan", "verify"], help="Delivery operation; execute supports only verify")
     parser.add_argument("--run-id", help="Optional durable delivery run id echoed in the envelope and artifact filename")
     parser.add_argument(
@@ -155,6 +156,12 @@ def pr_summary(pr: str | None, delivery_status: dict[str, Any]) -> dict[str, Any
     }
 
 
+def effective_operation(args: argparse.Namespace) -> str:
+    if args.mode == "status":
+        return "status"
+    return args.operation
+
+
 def parse_verifier(item: str, index: int) -> tuple[str, str]:
     if VERIFIER_LABEL.match(item):
         name, command = item.split("=", 1)
@@ -238,6 +245,8 @@ def artifact_token(run_id: str) -> str:
 def delivery_phase(args: argparse.Namespace, reason: str | None) -> str:
     if reason == "delivery_status_failed":
         return "delivery_status"
+    if args.mode == "status":
+        return "status"
     if args.mode == "execute" and args.operation == "verify":
         return "verify"
     if args.mode == "execute":
@@ -267,10 +276,129 @@ def delivery_run(
     }
 
 
+def artifact_base() -> Path:
+    return Path(os.environ.get(ARTIFACT_ENV, "~/.hermes/busdriver-relay/delivery-runs")).expanduser()
+
+
 def artifact_path(run_id: str) -> Path:
-    base = Path(os.environ.get(ARTIFACT_ENV, "~/.hermes/busdriver-relay/delivery-runs")).expanduser()
+    base = artifact_base()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return base / f"{stamp}-{artifact_token(run_id)}-{os.getpid()}.json"
+
+
+def blocked_flag_value(value: dict[str, Any], key: str) -> Any:
+    if key == "marker_write_allowed":
+        return value.get(key, False)
+    return value.get(key)
+
+
+def authority_flags_safe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return all(blocked_flag_value(value, key) is False for key in BLOCKED_FLAGS)
+
+
+def decision_metadata_safe(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("reason"), str)
+        and authority_flags_safe(value)
+    )
+
+
+VALID_ARTIFACT_RUN_PHASES = {"verify", "delivery_status"}
+
+
+def artifact_run_artifacts_safe(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, dict)
+        and item.get("kind") == "result"
+        and isinstance(item.get("path"), str)
+        for item in value
+    )
+
+
+def run_metadata_safe(value: Any, run_id: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("schema") == RUN_SCHEMA
+        and value.get("version") == 1
+        and value.get("run_id") == run_id
+        and isinstance(value.get("created_at"), str)
+        and value.get("phase") in VALID_ARTIFACT_RUN_PHASES
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("reason"), str)
+        and isinstance(value.get("repo_root"), (str, type(None)))
+        and (value.get("pr_number") is None or isinstance(value.get("pr_number"), (int, str)))
+        and authority_flags_safe(value.get("authority"))
+        and artifact_run_artifacts_safe(value.get("artifacts"))
+    )
+
+
+def decision_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {"status": value.get("status"), "reason": value.get("reason"), **{key: blocked_flag_value(value, key) for key in BLOCKED_FLAGS}}
+
+
+def artifact_refs_summary(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {"kind": item["kind"], "path": item["path"]}
+        for item in value
+        if isinstance(item, dict) and isinstance(item.get("kind"), str) and isinstance(item.get("path"), str)
+    ]
+
+
+def run_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": value.get("schema"),
+        "version": value.get("version"),
+        "run_id": value.get("run_id"),
+        "created_at": value.get("created_at"),
+        "phase": value.get("phase"),
+        "status": value.get("status"),
+        "reason": value.get("reason"),
+        "repo_root": value.get("repo_root"),
+        "pr_number": value.get("pr_number"),
+        "authority": {key: blocked_flag_value(value.get("authority", {}), key) for key in BLOCKED_FLAGS},
+        "artifacts": artifact_refs_summary(value.get("artifacts")),
+    }
+
+
+def artifact_is_valid(data: dict[str, Any], run_id: str) -> bool:
+    run = data.get("run")
+    decision_data = data.get("decision")
+    return (
+        data.get("schema") == SCHEMA
+        and data.get("version") == 1
+        and isinstance(data.get("ok"), bool)
+        and decision_metadata_safe(decision_data)
+        and run_metadata_safe(run, run_id)
+    )
+
+
+def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
+    base = artifact_base()
+    if not base.is_dir():
+        return None
+    matches: list[tuple[float, str, Path, dict[str, Any]]] = []
+    for path in base.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or not artifact_is_valid(data, run_id):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        matches.append((mtime, path.name, path, data))
+    if not matches:
+        return None
+    _mtime, _name, path, data = sorted(matches)[-1]
+    return path, data
 
 
 def write_artifact(result: dict[str, Any]) -> None:
@@ -307,7 +435,124 @@ def write_artifact(result: dict[str, Any]) -> None:
         raise
 
 
+def status_lookup_run(args: argparse.Namespace, result_decision: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "schema": RUN_SCHEMA,
+        "version": 1,
+        "run_id": args.run_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "phase": "status",
+        "status": result_decision.get("status"),
+        "reason": result_decision.get("reason", reason),
+        "repo_root": None,
+        "pr_number": None,
+        "authority": {key: result_decision[key] for key in BLOCKED_FLAGS},
+        "artifacts": [],
+    }
+
+
+def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    if not args.run_id:
+        result_decision = decision("blocked", "run_id_required")
+        result = {
+            "schema": SCHEMA,
+            "version": 1,
+            "ok": False,
+            "mode": "status",
+            "operation": "status",
+            "repo": None,
+            "pr": None,
+            "delivery_status": None,
+            "status_lookup": {"found": False, "reason": "run_id_required"},
+            "verifiers": [],
+            "steps": steps_for("run_id_required"),
+            "decision": result_decision,
+            "run": status_lookup_run(args, result_decision, "run_id_required"),
+            "run_artifact_path": None,
+        }
+        return redact_value(result), 2
+
+    found = artifact_for_run_id(args.run_id)
+    if found is None:
+        result_decision = decision("blocked", "run_not_found")
+        result = {
+            "schema": SCHEMA,
+            "version": 1,
+            "ok": False,
+            "mode": "status",
+            "operation": "status",
+            "repo": None,
+            "pr": None,
+            "delivery_status": None,
+            "status_lookup": {"found": False, "reason": "run_not_found", "run_id": args.run_id},
+            "verifiers": [],
+            "steps": steps_for("run_not_found"),
+            "decision": result_decision,
+            "run": delivery_run(args, {}, result_decision, "run_not_found"),
+            "run_artifact_path": None,
+        }
+        return redact_value(result), 1
+
+    path, artifact = found
+    artifact_run = artifact.get("run") if isinstance(artifact.get("run"), dict) else {}
+    result_decision = decision("found", "run_found")
+    result = {
+        "schema": SCHEMA,
+        "version": 1,
+        "ok": True,
+        "mode": "status",
+        "operation": "status",
+        "repo": {"root": artifact_run.get("repo_root")},
+        "pr": {"number": artifact_run.get("pr_number")} if artifact_run.get("pr_number") is not None else None,
+        "delivery_status": None,
+        "status_lookup": {
+            "found": True,
+            "run_id": args.run_id,
+            "artifact_path": str(path),
+            "artifact_schema": artifact.get("schema"),
+            "artifact_ok": artifact.get("ok"),
+            "artifact_decision": decision_summary(artifact.get("decision", {})),
+            "artifact_run": run_summary(artifact_run),
+        },
+        "verifiers": [],
+        "steps": steps_for("run_found"),
+        "decision": result_decision,
+        "run": delivery_run(args, {"repo": {"root": artifact_run.get("repo_root")}}, result_decision, "run_found"),
+        "run_artifact_path": None,
+    }
+    result["run"]["pr_number"] = artifact_run.get("pr_number")
+    result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
+    return redact_value(result), 0
+
+
 def steps_for(reason: str | None) -> list[dict[str, str]]:
+    if reason == "run_found":
+        return [
+            {"name": "status_lookup", "status": "found", "reason": "run_found"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "run_id_required":
+        return [
+            {"name": "status_lookup", "status": "blocked", "reason": "run_id_required"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "run_not_found":
+        return [
+            {"name": "status_lookup", "status": "blocked", "reason": "run_not_found"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
     if reason == "delivery_status_failed":
         return [
             {"name": "delivery_status", "status": "blocked", "reason": "helper_failed"},
@@ -379,6 +624,11 @@ def decision(status: str, reason: str) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    if args.mode == "status":
+        result, returncode = status_mode_result(args)
+        print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+        return returncode
+
     delivery_status, status_rc = run_delivery_status(args)
     delivery_ok = bool(delivery_status.get("ok"))
     reason: str | None = None
@@ -415,7 +665,7 @@ def main() -> int:
         "version": 1,
         "ok": result_ok,
         "mode": args.mode,
-        "operation": args.operation,
+        "operation": effective_operation(args),
         "repo": delivery_status.get("repo"),
         "pr": pr_summary(args.pr, delivery_status),
         "delivery_status": delivery_status,

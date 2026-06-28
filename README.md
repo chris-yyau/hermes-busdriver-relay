@@ -39,7 +39,7 @@ scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate 
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
-scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher
+scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher + run status lookup
 scripts/hermes-busdriver-finalization-readiness
                                            Read-only finalization handoff envelope
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
@@ -174,9 +174,14 @@ scripts/hermes-busdriver-deliver \
   --run-id local-verify-001 \
   --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
+
+scripts/hermes-busdriver-deliver \
+  --mode status \
+  --run-id local-verify-001 \
+  --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. `--mode status --run-id <id>` is a read-only lookup that finds the latest valid persisted artifact with the same run identity and returns its path plus sanitized metadata (`artifact_run`, decision, schema, ok flag) as `status_lookup` evidence without writing a new artifact or probing the target repo; it does not echo verifier output tails from the persisted artifact. Matching artifacts must carry versioned deliver and nested delivery-run envelopes with fail-closed decision/authority metadata, and the returned status envelope preserves the artifact's repo/PR identity. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
 
 ### Finalization readiness handoff
 

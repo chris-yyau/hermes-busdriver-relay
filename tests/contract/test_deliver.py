@@ -10,6 +10,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
+BLOCKED_KEYS = [
+    "finalization_allowed",
+    "commit_allowed",
+    "push_allowed",
+    "pr_allowed",
+    "merge_allowed",
+    "deploy_allowed",
+    "release_allowed",
+    "publish_allowed",
+    "marker_write_allowed",
+]
 
 
 def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -58,31 +69,13 @@ def invoke(
 
 
 def assert_finalization_blocked(decision: dict) -> None:
-    for key in [
-        "finalization_allowed",
-        "commit_allowed",
-        "push_allowed",
-        "pr_allowed",
-        "merge_allowed",
-        "deploy_allowed",
-        "release_allowed",
-        "publish_allowed",
-    ]:
+    for key in BLOCKED_KEYS:
         assert decision[key] is False
 
 
 def assert_run_authority_blocked(run: dict) -> None:
     authority = run["authority"]
-    for key in [
-        "finalization_allowed",
-        "commit_allowed",
-        "push_allowed",
-        "pr_allowed",
-        "merge_allowed",
-        "deploy_allowed",
-        "release_allowed",
-        "publish_allowed",
-    ]:
+    for key in BLOCKED_KEYS:
         assert authority[key] is False
 
 
@@ -381,6 +374,251 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
     assert not (repo / ".opencode").exists()
 
 
+def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
+    cp_first, first_data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--run-id",
+        "lookup-123",
+        "--verifier",
+        f"first={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+    cp_second, second_data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--run-id",
+        "lookup-123",
+        "--verifier",
+        f"second={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+    first_artifact = Path(first_data["run_artifact_path"])
+    second_artifact = Path(second_data["run_artifact_path"])
+    second_payload = json.loads(second_artifact.read_text())
+    second_payload["run"]["artifacts"][0]["verifier_tail"] = "do-not-echo"
+    second_artifact.write_text(json.dumps(second_payload))
+    spoof = artifact_dir / "zz-spoof.json"
+    spoof.write_text(json.dumps({"run": {"run_id": "lookup-123", "schema": "wrong"}}))
+    schema_spoof = artifact_dir / "zzz-schema-spoof.json"
+    schema_spoof.write_text(json.dumps({"schema": "hermes-busdriver-deliver/v0", "run": {"schema": "hermes-busdriver-delivery-run/v0", "run_id": "lookup-123"}}))
+    authority_positive = artifact_dir / "zzzz-authority-positive.json"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    authority_positive.write_text(json.dumps({
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "decision": {"status": "verified", "reason": "verified", **false_flags, "merge_allowed": True, "secret": "do-not-echo"},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": "lookup-123",
+            "phase": "verify",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": str(repo),
+            "authority": {**false_flags, "merge_allowed": True},
+            "secret": "do-not-echo",
+        },
+    }))
+    malformed_identity = artifact_dir / "zzzzz-malformed-identity.json"
+    malformed_identity.write_text(json.dumps({
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "verify",
+        "repo": {"root": ["not", "a", "string"]},
+        "pr": {"number": {"bad": True}},
+        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": "lookup-123",
+            "created_at": 123,
+            "phase": "surprise",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": ["not", "a", "string"],
+            "pr_number": {"bad": True},
+            "authority": false_flags,
+            "artifacts": "not-a-list",
+        },
+    }))
+    corrupt = artifact_dir / "zzzzzz-corrupt.json"
+    corrupt.write_bytes(b"\xff\xfe\x00not-json")
+    os.utime(first_artifact, (10, 10))
+    os.utime(second_artifact, (20, 20))
+    os.utime(spoof, (30, 30))
+    os.utime(schema_spoof, (40, 40))
+    os.utime(authority_positive, (50, 50))
+    os.utime(malformed_identity, (60, 60))
+    os.utime(corrupt, (70, 70))
+    before = {
+        path.name: {
+            "bytes": path.read_bytes(),
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        for path in artifact_dir.iterdir()
+    }
+
+    cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "lookup-123", artifact_dir=artifact_dir)
+    after = {
+        path.name: {
+            "bytes": path.read_bytes(),
+            "mtime_ns": path.stat().st_mtime_ns,
+        }
+        for path in artifact_dir.iterdir()
+    }
+
+    assert cp_first.returncode == 0
+    assert cp_second.returncode == 0
+    assert cp.returncode == 0
+    assert before == after
+    assert data["ok"] is True
+    assert data["mode"] == "status"
+    assert data["operation"] == "status"
+    assert data["run_artifact_path"] is None
+    assert data["status_lookup"]["found"] is True
+    assert data["status_lookup"]["run_id"] == "lookup-123"
+    assert data["status_lookup"]["artifact_path"] == str(second_artifact)
+    assert data["status_lookup"]["artifact_run"]["run_id"] == "lookup-123"
+    assert data["status_lookup"]["artifact_schema"] == "hermes-busdriver-deliver/v0"
+    assert data["status_lookup"]["artifact_ok"] is True
+    assert data["status_lookup"]["artifact_run"]["artifacts"] == [{"kind": "result", "path": str(second_artifact)}]
+    assert "artifact" not in data["status_lookup"]
+    assert "verifiers" not in data["status_lookup"]
+    assert "do-not-echo" not in json.dumps(data["status_lookup"])
+    assert data["status_lookup"]["artifact_decision"]["status"] == "verified"
+    assert_delivery_run_envelope(data["run"], "lookup-123", "status", "found", "run_found")
+    assert data["run"]["repo_root"] == str(repo)
+    assert data["run"]["artifacts"] == [{"kind": "result", "path": str(second_artifact)}]
+    assert_finalization_blocked(data["decision"])
+
+
+def test_status_mode_accepts_legacy_v1_artifact_without_marker_write_flag(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
+    cp_verify, verify_data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--run-id",
+        "legacy-123",
+        "--verifier",
+        f"ok={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+    artifact = Path(verify_data["run_artifact_path"])
+    legacy_payload = json.loads(artifact.read_text())
+    legacy_payload["decision"].pop("marker_write_allowed")
+    legacy_payload["run"]["authority"].pop("marker_write_allowed")
+    artifact.write_text(json.dumps(legacy_payload))
+
+    cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "legacy-123", artifact_dir=artifact_dir)
+
+    assert cp_verify.returncode == 0
+    assert cp.returncode == 0
+    assert data["status_lookup"]["found"] is True
+    assert data["status_lookup"]["artifact_path"] == str(artifact)
+    assert data["status_lookup"]["artifact_decision"]["marker_write_allowed"] is False
+    assert data["status_lookup"]["artifact_run"]["authority"]["marker_write_allowed"] is False
+    assert_finalization_blocked(data["decision"])
+
+
+def test_status_mode_returns_latest_valid_failed_delivery_status_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    missing_repo = tmp_path / "missing-repo"
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
+
+    cp_ok, ok_data = invoke(
+        repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--run-id",
+        "lookup-failed-latest",
+        "--verifier",
+        f"ok={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+    cp_failed, failed_data = invoke(
+        missing_repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "verify",
+        "--run-id",
+        "lookup-failed-latest",
+        "--verifier",
+        f"skip={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+    ok_artifact = Path(ok_data["run_artifact_path"])
+    failed_artifact = Path(failed_data["run_artifact_path"])
+    os.utime(ok_artifact, (10, 10))
+    os.utime(failed_artifact, (20, 20))
+
+    cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "lookup-failed-latest", artifact_dir=artifact_dir)
+
+    assert cp_ok.returncode == 0
+    assert cp_failed.returncode != 0
+    assert cp.returncode == 0
+    assert data["status_lookup"]["found"] is True
+    assert data["status_lookup"]["artifact_path"] == str(failed_artifact)
+    assert data["status_lookup"]["artifact_run"]["phase"] == "delivery_status"
+    assert data["status_lookup"]["artifact_run"]["status"] == "blocked"
+    assert data["status_lookup"]["artifact_run"]["reason"] == "delivery_status_failed"
+    assert data["run"]["phase"] == "status"
+    assert data["run"]["artifacts"] == [{"kind": "result", "path": str(failed_artifact)}]
+    assert_finalization_blocked(data["decision"])
+
+
+def test_status_mode_fails_closed_when_run_id_missing_or_unknown(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp_missing, missing = invoke(repo, plugin, "--mode", "status", artifact_dir=artifact_dir)
+    cp_unknown, unknown = invoke(repo, plugin, "--mode", "status", "--run-id", "missing-run", artifact_dir=artifact_dir)
+
+    assert cp_missing.returncode == 2
+    assert missing["ok"] is False
+    assert missing["operation"] == "status"
+    assert missing["decision"] == {"status": "blocked", "reason": "run_id_required", **{key: False for key in BLOCKED_KEYS}}
+    assert missing["status_lookup"] == {"found": False, "reason": "run_id_required"}
+    assert missing["run"]["run_id"] is None
+    assert missing["run"]["phase"] == "status"
+    assert cp_unknown.returncode == 1
+    assert unknown["ok"] is False
+    assert unknown["decision"]["status"] == "blocked"
+    assert unknown["decision"]["reason"] == "run_not_found"
+    assert unknown["status_lookup"] == {"found": False, "reason": "run_not_found", "run_id": "missing-run"}
+    assert_finalization_blocked(unknown["decision"])
+
+
 def test_failing_verifier_fails_closed_with_bounded_tails(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -595,7 +833,7 @@ def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
     assert data["run"]["status"] == "blocked"
     assert data["run"]["reason"] == "artifact_write_failed"
     assert data["run"]["artifacts"] == []
-    assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in ["finalization_allowed", "commit_allowed", "push_allowed", "pr_allowed", "merge_allowed", "deploy_allowed", "release_allowed", "publish_allowed"]}}
+    assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in BLOCKED_KEYS}}
     assert data["steps"][0] == {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"}
     assert_finalization_blocked(data["decision"])
 
