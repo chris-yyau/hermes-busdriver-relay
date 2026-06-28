@@ -68,6 +68,58 @@ def invoke(
     return cp, json.loads(cp.stdout)
 
 
+def safe_loop_decision(status: str = "clean", reason: str = "latest_pr_head_clean_read_only") -> dict:
+    return {
+        "status": status,
+        "reason": reason,
+        "pr_grind_clean": status == "clean",
+        "fixing_allowed": False,
+        "fix_rounds_attempted": 0,
+        "ack_ledger_policy": "delegated_to_pr_grind_check_read_only; no ack or Busdriver marker writes",
+        **{key: False for key in BLOCKED_KEYS},
+    }
+
+
+def safe_loop_payload(status: str = "clean", ok: bool = True, clean: bool = True, decision: dict | None = None) -> dict:
+    reason = "latest_pr_head_clean_read_only" if status == "clean" else "actionable_feedback_present_read_only_no_fix"
+    return {
+        "schema": "hermes-busdriver-pr-grind-loop/v0",
+        "version": 1,
+        "ok": ok,
+        "read_only": True,
+        "status": status,
+        "clean": clean,
+        "latest_head": "abc123",
+        "decision": decision or safe_loop_decision(status, reason),
+        "iterations": [{"iteration": 1, "status": status, "head": "abc123"}],
+    }
+
+
+def invoke_with_pr_grind_loop(
+    monkeypatch,
+    capsys,
+    repo: Path,
+    plugin: Path,
+    payload: dict,
+    returncode: int = 0,
+    *extra: str,
+    artifact_dir: Path | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    ns = runpy.run_path(str(DELIVER))
+    ns["main"].__globals__["run_pr_grind_loop"] = lambda _repo, _args: (payload, returncode)
+    if artifact_dir:
+        monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [sys.executable, "--repo", str(repo), "--plugin-root", str(plugin), "--mode", "execute", "--operation", "pr-grind", "--pr", "7", *extra],
+    )
+    rc = ns["main"]()
+    captured = capsys.readouterr()
+    cp = subprocess.CompletedProcess(sys.argv, rc, stdout=captured.out, stderr=captured.err)
+    return cp, json.loads(captured.out)
+
+
 def assert_finalization_blocked(decision: dict) -> None:
     for key in BLOCKED_KEYS:
         assert decision[key] is False
@@ -96,6 +148,7 @@ def test_verifier_help_warns_commands_execute_locally():
     assert cp.returncode == 0
     assert "shell=False" in cp.stdout
     assert "launch errors fail closed" in cp.stdout
+    assert "--pr-grind-loop-script" not in cp.stdout
 
 
 def test_default_plan_mode_is_read_only_status_envelope(tmp_path: Path):
@@ -153,6 +206,24 @@ def test_execute_mode_without_verify_operation_is_blocked_and_has_no_repo_side_e
     assert data["run_artifact_path"] is None
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
+
+
+def test_execute_verify_without_verifiers_writes_handoff_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(repo, plugin, "--mode", "execute", "--operation", "verify", "--run-id", "verify-noop", artifact_dir=artifact_dir)
+
+    assert cp.returncode == 2
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "no_verifiers"
+    assert_finalization_blocked(data["decision"])
+    assert_delivery_run_envelope(data["run"], "verify-noop", "verify", "blocked", "no_verifiers")
+    artifact = Path(data["run_artifact_path"])
+    assert artifact.exists()
+    assert json.loads(artifact.read_text())["decision"]["reason"] == "no_verifiers"
 
 
 def test_plan_mode_never_authorizes_clean_status(tmp_path: Path):
@@ -303,6 +374,256 @@ def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):
     assert data["delivery_status"]["decision"]["status"] == "pr_clean_read_only"
     assert data["decision"]["status"] == "plan_only"
     assert_finalization_blocked(data["decision"])
+
+
+def test_execute_pr_grind_runs_read_only_loop_and_writes_artifact(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        safe_loop_payload(),
+        0,
+        "--run-id",
+        "prgrind-123",
+        "--max-wait-seconds",
+        "1",
+        "--poll-interval",
+        "0",
+        "--max-polls",
+        "2",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 0
+    assert data["ok"] is True
+    assert data["operation"] == "pr-grind"
+    assert data["decision"]["status"] == "pr_grind_clean"
+    assert data["decision"]["reason"] == "latest_pr_head_clean_read_only"
+    assert_finalization_blocked(data["decision"])
+    assert data["pr_grind_loop"]["status"] == "clean"
+    assert data["pr_grind_loop"]["clean"] is True
+    assert data["verifiers"] == []
+    assert_delivery_run_envelope(data["run"], "prgrind-123", "pr_grind", "pr_grind_clean", "latest_pr_head_clean_read_only")
+    artifact = Path(data["run_artifact_path"])
+    assert artifact.exists()
+    artifact_data = json.loads(artifact.read_text())
+    assert artifact_data["pr_grind_loop"]["status"] == "clean"
+    assert artifact_data["run"]["artifacts"] == [{"kind": "result", "path": str(artifact)}]
+    assert not (repo / ".claude").exists()
+    assert not (repo / ".opencode").exists()
+
+
+def test_execute_pr_grind_needs_fix_fails_closed_and_writes_artifact(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        safe_loop_payload(status="needs_fix", ok=False, clean=False),
+        1,
+        "--run-id",
+        "prgrind-needs-fix",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_grind_needs_fix"
+    assert_finalization_blocked(data["decision"])
+    assert data["pr_grind_loop"]["status"] == "needs_fix"
+    assert data["steps"][0] == {"name": "pr_grind", "status": "blocked", "reason": "pr_grind_needs_fix"}
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_execute_pr_grind_rejects_malformed_loop_output(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        {"ok": True, "status": "clean", "clean": True},
+        0,
+        "--run-id",
+        "prgrind-malformed-loop",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode != 0
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_grind_loop_failed"
+    assert_finalization_blocked(data["decision"])
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+
+    def raise_timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["slow-loop"], timeout=1, output=b"partial", stderr=b"slow")
+
+    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    args = type(
+        "Args",
+        (),
+        {
+            "pr": "7",
+            "max_wait_seconds": 1.0,
+            "poll_interval": 0.0,
+            "max_polls": 1,
+            "check_timeout": 1.0,
+            "plugin_root": None,
+        },
+    )()
+
+    data, rc = ns["run_pr_grind_loop"](tmp_path, args)
+
+    assert rc == 124
+    assert data["stdout_tail"] == "partial"
+    assert data["stderr_tail"] == "slow"
+    json.dumps(data)
+
+
+def test_execute_pr_grind_rejects_mismatched_loop_decision_status(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    mismatched_decision = safe_loop_decision(status="blocked", reason="checker_failed")
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        safe_loop_payload(status="clean", ok=True, clean=True, decision=mismatched_decision),
+        0,
+        "--run-id",
+        "prgrind-mismatched-decision",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_grind_loop_failed"
+    assert_finalization_blocked(data["decision"])
+    assert data["pr_grind_loop"]["status"] == "clean"
+    assert data["pr_grind_loop"]["decision"]["status"] == "blocked"
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_execute_pr_grind_rejects_clean_payload_with_nonzero_exit(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        safe_loop_payload(),
+        1,
+        "--run-id",
+        "prgrind-clean-nonzero",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_grind_loop_failed"
+    assert_finalization_blocked(data["decision"])
+    assert data["pr_grind_loop"]["clean"] is True
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_execute_pr_grind_rejects_unsafe_loop_authority(monkeypatch, capsys, tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    unsafe_decision = safe_loop_decision()
+    unsafe_decision["merge_allowed"] = True
+
+    cp, data = invoke_with_pr_grind_loop(
+        monkeypatch,
+        capsys,
+        repo,
+        plugin,
+        safe_loop_payload(decision=unsafe_decision),
+        0,
+        "--run-id",
+        "prgrind-unsafe-clean",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_grind_loop_failed"
+    assert_finalization_blocked(data["decision"])
+    assert data["pr_grind_loop"]["decision"]["merge_allowed"] is True
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_execute_pr_grind_delivery_status_failure_writes_handoff_artifact(tmp_path: Path):
+    missing_repo = tmp_path / "missing-repo"
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(
+        missing_repo,
+        plugin,
+        "--mode",
+        "execute",
+        "--operation",
+        "pr-grind",
+        "--pr",
+        "7",
+        "--run-id",
+        "prgrind-preflight-failed",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode != 0
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "delivery_status_failed"
+    assert data["pr_grind_loop"] is None
+    assert data["steps"][0] == {"name": "delivery_status", "status": "blocked", "reason": "helper_failed"}
+    assert data["steps"][1] == {"name": "pr_grind", "status": "skipped", "reason": "delivery_status_failed"}
+    assert_finalization_blocked(data["decision"])
+    assert Path(data["run_artifact_path"]).exists()
+
+
+def test_execute_pr_grind_requires_pr_and_writes_no_artifact(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+
+    cp, data = invoke(repo, plugin, "--mode", "execute", "--operation", "pr-grind", artifact_dir=artifact_dir)
+
+    assert cp.returncode == 2
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert data["decision"]["reason"] == "pr_required"
+    assert_finalization_blocked(data["decision"])
+    assert data["run_artifact_path"] is None
+    assert not artifact_dir.exists()
 
 
 def test_delivery_status_failure_blocks_finalization(tmp_path: Path):

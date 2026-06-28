@@ -18,8 +18,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
+PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
 SCHEMA = "hermes-busdriver-deliver/v0"
 RUN_SCHEMA = "hermes-busdriver-delivery-run/v0"
+PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
 VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
@@ -69,9 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through delivery-status")
     parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
-    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; only execute verify is enabled; status is read-only run lookup")
-    parser.add_argument("--operation", default="plan", choices=["plan", "verify"], help="Delivery operation; execute supports only verify")
+    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports verify and read-only pr-grind; status is read-only run lookup")
+    parser.add_argument("--operation", default="plan", choices=["plan", "verify", "pr-grind"], help="Delivery operation; execute supports verify and read-only pr-grind")
     parser.add_argument("--run-id", help="Optional durable delivery run id echoed in the envelope and artifact filename")
+    parser.add_argument("--max-wait-seconds", type=float, default=300.0, help="Bounded wait budget passed to execute pr-grind loop")
+    parser.add_argument("--poll-interval", type=float, default=30.0, help="Poll interval passed to execute pr-grind loop")
+    parser.add_argument("--max-polls", type=int, default=20, help="Poll cap passed to execute pr-grind loop")
+    parser.add_argument("--check-timeout", type=float, default=180.0, help="Checker timeout passed to execute pr-grind loop")
     parser.add_argument(
         "--verifier",
         action="append",
@@ -233,6 +239,91 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
     return results
 
 
+def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    script = PR_GRIND_LOOP
+    cmd = [
+        sys.executable,
+        str(script),
+        "--repo",
+        str(repo),
+        "--pr",
+        str(args.pr),
+        "--max-wait-seconds",
+        str(args.max_wait_seconds),
+        "--poll-interval",
+        str(args.poll_interval),
+        "--max-polls",
+        str(args.max_polls),
+        "--check-timeout",
+        str(args.check_timeout),
+    ]
+    if args.plugin_root:
+        cmd += ["--plugin-root", args.plugin_root]
+    try:
+        cp = subprocess.run(cmd, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0))
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "clean": False,
+            "error": "pr_grind_loop_timeout",
+            "returncode": 124,
+            "stdout_tail": tail(e.stdout),
+            "stderr_tail": tail(e.stderr),
+        }, 124
+    except OSError as e:
+        return {"ok": False, "status": "blocked", "clean": False, "error": type(e).__name__, "returncode": 127, "stderr_tail": tail(str(e))}, 127
+
+    try:
+        data = json.loads(cp.stdout)
+    except json.JSONDecodeError as e:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "clean": False,
+            "error": "pr_grind_loop_invalid_json",
+            "returncode": cp.returncode,
+            "stdout_tail": tail(cp.stdout),
+            "stderr_tail": tail(cp.stderr),
+            "parse_error": str(e),
+        }, cp.returncode or 1
+    if not isinstance(data, dict):
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_loop_json_not_object", "returncode": cp.returncode}, cp.returncode or 1
+    data.setdefault("returncode", cp.returncode)
+    if cp.stderr:
+        data.setdefault("stderr_tail", tail(cp.stderr))
+    return data, cp.returncode
+
+
+PR_GRIND_LOOP_DECISION_FLAGS = (*BLOCKED_FLAGS.keys(), "fixing_allowed")
+VALID_PR_GRIND_LOOP_STATUSES = {"clean", "needs_fix", "wait", "blocked"}
+
+
+def pr_grind_loop_authority_safe(value: Any) -> bool:
+    return isinstance(value, dict) and all(value.get(key) is False for key in PR_GRIND_LOOP_DECISION_FLAGS)
+
+
+def pr_grind_loop_envelope_safe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    status = value.get("status")
+    clean = value.get("clean")
+    decision_data = value.get("decision")
+    return (
+        value.get("schema") == PR_GRIND_LOOP_SCHEMA
+        and value.get("version") == 1
+        and isinstance(value.get("ok"), bool)
+        and value.get("read_only") is True
+        and status in VALID_PR_GRIND_LOOP_STATUSES
+        and isinstance(clean, bool)
+        and (clean is (status == "clean"))
+        and isinstance(decision_data, dict)
+        and decision_data.get("status") == status
+        and isinstance(decision_data.get("reason"), str)
+        and pr_grind_loop_authority_safe(decision_data)
+    )
+
+
 def new_run_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
@@ -249,6 +340,8 @@ def delivery_phase(args: argparse.Namespace, reason: str | None) -> str:
         return "status"
     if args.mode == "execute" and args.operation == "verify":
         return "verify"
+    if args.mode == "execute" and args.operation == "pr-grind":
+        return "pr_grind"
     if args.mode == "execute":
         return "execute"
     return "plan"
@@ -307,7 +400,7 @@ def decision_metadata_safe(value: Any) -> bool:
     )
 
 
-VALID_ARTIFACT_RUN_PHASES = {"verify", "delivery_status"}
+VALID_ARTIFACT_RUN_PHASES = {"verify", "pr_grind", "delivery_status"}
 
 
 def artifact_run_artifacts_safe(value: Any) -> bool:
@@ -525,7 +618,7 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     return redact_value(result), 0
 
 
-def steps_for(reason: str | None) -> list[dict[str, str]]:
+def steps_for(reason: str | None, operation: str | None = None) -> list[dict[str, str]]:
     if reason == "run_found":
         return [
             {"name": "status_lookup", "status": "found", "reason": "run_found"},
@@ -554,9 +647,10 @@ def steps_for(reason: str | None) -> list[dict[str, str]]:
             {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
         ]
     if reason == "delivery_status_failed":
+        skipped_operation = "pr_grind" if operation == "pr-grind" else "verify"
         return [
             {"name": "delivery_status", "status": "blocked", "reason": "helper_failed"},
-            {"name": "verify", "status": "skipped", "reason": "delivery_status_failed"},
+            {"name": skipped_operation, "status": "skipped", "reason": "delivery_status_failed"},
             {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
@@ -575,6 +669,33 @@ def steps_for(reason: str | None) -> list[dict[str, str]]:
     if reason == "no_verifiers":
         return [
             {"name": "verify", "status": "blocked", "reason": "no_verifiers"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "pr_required":
+        return [
+            {"name": "pr_grind", "status": "blocked", "reason": "pr_required"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "latest_pr_head_clean_read_only":
+        return [
+            {"name": "pr_grind", "status": "passed", "reason": "latest_pr_head_clean_read_only"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason in {"pr_grind_needs_fix", "pr_grind_wait", "pr_grind_blocked", "pr_grind_loop_failed"}:
+        return [
+            {"name": "pr_grind", "status": "blocked", "reason": reason},
             {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
@@ -635,30 +756,86 @@ def main() -> int:
     result_ok = delivery_ok
     result_decision = decision("plan_only", "read_only_plan")
     verifiers: list[dict[str, Any]] = []
+    pr_grind_loop: dict[str, Any] | None = None
+    write_run_artifact = False
     returncode = 0 if delivery_ok else (status_rc or 1)
 
     if not delivery_ok:
         reason = "delivery_status_failed"
         result_ok = False
         result_decision = decision("blocked", reason)
+        write_run_artifact = args.mode == "execute" and (args.operation == "verify" or (args.operation == "pr-grind" and bool(args.pr)))
     elif args.mode == "execute":
-        if args.operation != "verify":
+        if args.operation == "verify":
+            if not args.verifier:
+                reason = "no_verifiers"
+                result_ok = False
+                result_decision = decision("blocked", reason)
+                returncode = 2
+                write_run_artifact = True
+            else:
+                repo = Path(args.repo or ".").expanduser().resolve()
+                verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
+                result_ok = all(v["ok"] for v in verifiers)
+                reason = "verified" if result_ok else "verifier_failed"
+                result_decision = decision("verified" if result_ok else "blocked", reason)
+                returncode = 0 if result_ok else 1
+                write_run_artifact = True
+        elif args.operation == "pr-grind":
+            if not args.pr:
+                reason = "pr_required"
+                result_ok = False
+                result_decision = decision("blocked", reason)
+                returncode = 2
+            else:
+                repo = Path(args.repo or ".").expanduser().resolve()
+                pr_grind_loop, loop_rc = run_pr_grind_loop(repo, args)
+                loop_status = str(pr_grind_loop.get("status") or "")
+                loop_decision = pr_grind_loop.get("decision") if isinstance(pr_grind_loop.get("decision"), dict) else {}
+                loop_reason = str(loop_decision.get("reason") or "")
+                loop_safe = pr_grind_loop_envelope_safe(pr_grind_loop)
+                loop_clean = loop_safe and loop_status == "clean" and pr_grind_loop.get("clean") is True and pr_grind_loop.get("ok") is True and loop_rc == 0
+                if loop_clean:
+                    reason = loop_reason or "latest_pr_head_clean_read_only"
+                    result_ok = True
+                    result_decision = decision("pr_grind_clean", reason)
+                    returncode = 0
+                elif not loop_safe:
+                    reason = "pr_grind_loop_failed"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                elif loop_rc != 0 and (pr_grind_loop.get("clean") is True or loop_status == "clean"):
+                    reason = "pr_grind_loop_failed"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                elif loop_status == "needs_fix":
+                    reason = "pr_grind_needs_fix"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                elif loop_status == "wait":
+                    reason = "pr_grind_wait"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                elif loop_status == "blocked":
+                    reason = "pr_grind_blocked"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                else:
+                    reason = "pr_grind_loop_failed"
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = loop_rc or 1
+                write_run_artifact = True
+        else:
             reason = "unsupported_operation"
             result_ok = False
             result_decision = decision("blocked", reason)
             returncode = 2
-        elif not args.verifier:
-            reason = "no_verifiers"
-            result_ok = False
-            result_decision = decision("blocked", reason)
-            returncode = 2
-        else:
-            repo = Path(args.repo or ".").expanduser().resolve()
-            verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
-            result_ok = all(v["ok"] for v in verifiers)
-            reason = "verified" if result_ok else "verifier_failed"
-            result_decision = decision("verified" if result_ok else "blocked", reason)
-            returncode = 0 if result_ok else 1
 
     result = {
         "schema": SCHEMA,
@@ -669,14 +846,15 @@ def main() -> int:
         "repo": delivery_status.get("repo"),
         "pr": pr_summary(args.pr, delivery_status),
         "delivery_status": delivery_status,
+        "pr_grind_loop": pr_grind_loop,
         "verifiers": verifiers,
-        "steps": steps_for(reason),
+        "steps": steps_for(reason, args.operation),
         "decision": result_decision,
         "run": delivery_run(args, delivery_status, result_decision, reason),
         "run_artifact_path": None,
     }
     result = redact_value(result)
-    if args.mode == "execute" and args.operation == "verify":
+    if write_run_artifact:
         try:
             write_artifact(result)
         except OSError as e:

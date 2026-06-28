@@ -13,7 +13,7 @@ Relay v2 supports:
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
-- a verify-only delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
+- a verify/pr-grind delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
 - a read-only finalization readiness helper that emits a handoff envelope but never finalizes;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
@@ -24,7 +24,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, verify-only dispatcher with durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -105,17 +105,28 @@ scripts/hermes-busdriver-deliver \
   --pretty
 
 scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --mode execute \
+  --operation pr-grind \
+  --pr 123 \
+  --run-id pr-grind-001 \
+  --max-wait-seconds 300 \
+  --poll-interval 30 \
+  --pretty
+
+scripts/hermes-busdriver-deliver \
   --mode status \
   --run-id local-verify-001 \
   --pretty
 ```
 
-`status` mode is read-only: it searches Hermes-owned delivery-run artifacts by `run_id`, returns the latest valid matching artifact path and sanitized metadata as `status_lookup` evidence, preserves that artifact's repo/PR identity in the status envelope, and does not probe or mutate the target repo.
+`status` mode is read-only: it searches Hermes-owned delivery-run artifacts by `run_id`, returns the latest valid matching artifact path and sanitized metadata as `status_lookup` evidence, preserves that artifact's repo/PR identity in the status envelope, and does not probe or mutate the target repo. `execute --operation pr-grind` is also non-finalizing: it wraps the read-only bounded PR-grind loop, validates the loop envelope schema/version/read-only flag and nested fail-closed authority flags before accepting clean, embeds the loop result in a durable run artifact, returns nonzero unless the latest PR HEAD is clean by a safe loop envelope, and never fixes, pushes, writes Busdriver markers, or merges.
 
 ## Remaining finalization work
 
 - `hermes-busdriver-deliver` commit/push/PR/merge executor mode, if ever approved;
 - mutating final delivery result envelope;
 - programmatic litmus/pre-PR dual-review equivalent;
-- mutating pr-grind dispatcher loop with fix rounds and push/re-poll integration; the current read-only loop covers max-wait/max-polls, policy-gap bails, ack-ledger delegation, and latest-head re-poll without fixing or merging;
+- mutating pr-grind dispatcher loop with fix rounds and push/re-poll integration; the current read-only loop and delivery-dispatcher wrapper cover max-wait/max-polls, policy-gap bails, ack-ledger delegation, latest-head re-poll, and durable run artifacts without fixing or merging;
 - safe Busdriver marker interop only if Busdriver defines an integration surface.

@@ -176,12 +176,23 @@ scripts/hermes-busdriver-deliver \
   --pretty
 
 scripts/hermes-busdriver-deliver \
+  --repo /path/to/repo \
+  --plugin-root /path/to/busdriver \
+  --mode execute \
+  --operation pr-grind \
+  --pr 123 \
+  --run-id pr-grind-001 \
+  --max-wait-seconds 300 \
+  --poll-interval 30 \
+  --pretty
+
+scripts/hermes-busdriver-deliver \
   --mode status \
   --run-id local-verify-001 \
   --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute` supports only `operation=verify`: it runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. `--mode status --run-id <id>` is a read-only lookup that finds the latest valid persisted artifact with the same run identity and returns its path plus sanitized metadata (`artifact_run`, decision, schema, ok flag) as `status_lookup` evidence without writing a new artifact or probing the target repo; it does not echo verifier output tails from the persisted artifact. Matching artifacts must carry versioned deliver and nested delivery-run envelopes with fail-closed decision/authority metadata, and the returned status envelope preserves the artifact's repo/PR identity. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute --operation verify` runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. `execute --operation pr-grind` requires `--pr`, invokes the read-only bounded PR-grind loop, validates the loop envelope schema/version/read-only flag and fail-closed nested authority flags before accepting `clean`, embeds the loop envelope under `pr_grind_loop`, writes the same Hermes-owned run artifact, and returns nonzero for unsafe loop output / `needs_fix` / `wait` / `blocked`; even a clean loop result only sets dispatcher status `pr_grind_clean` and keeps commit/push/PR/merge/marker-write authority false. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. `--mode status --run-id <id>` is a read-only lookup that finds the latest valid persisted artifact with the same run identity and returns its path plus sanitized metadata (`artifact_run`, decision, schema, ok flag) as `status_lookup` evidence without writing a new artifact or probing the target repo; it does not echo verifier output tails from the persisted artifact. Matching artifacts must carry versioned deliver and nested delivery-run envelopes with fail-closed decision/authority metadata, and the returned status envelope preserves the artifact's repo/PR identity. Commit, push, PR creation, merge, marker writes, deploy, release, and publish remain disabled.
 
 ### Finalization readiness handoff
 
