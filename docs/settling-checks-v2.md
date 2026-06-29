@@ -1,12 +1,13 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, and read-only finalization handoff envelope.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope.
 
 ## Current scope
 
 Relay v2 supports:
 
 - read-only Busdriver status/runtime probes, including optional Busdriver drift-baseline comparison;
+- read-only litmus/pre-PR marker freshness status for current HEAD and branch diff hashes;
 - read-only configurable relay-equivalent reviewer/voice/arbiter/backstop status roles under a separate relay config JSON;
 - a read-only relay role resolver that turns one configured equivalent role into a fail-closed dispatcher-facing selection envelope;
 - optional relay-role resolution evidence in delivery-status and finalization-readiness handoff envelopes;
@@ -24,14 +25,14 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
 | H6 read-only status check | Implemented | Status/runtime/PR-grind readiness probes are read-only. |
 | H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/unsupported-schema/drifted baselines while keeping all finalization flags false. No automatic restore/enable state machine yet. |
 | H8 state-dir/plugin-root portability | Partial | Status/gate/smoke accept plugin root and state dir; PR-grind checker can use live Busdriver `relevant-check-status.sh`. |
-| H9 marker freshness | Partial | Status reports marker metadata; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
+| H9 marker freshness | Improved | Status reports marker metadata; `hermes-busdriver-litmus-status` read-only checks commit litmus and pre-PR review marker freshness against current HEAD / branch diff hash; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
 | H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |
 | H11 external side effects | Partial | Draft paths block side effects; Delivery Mode PR/merge side effects require explicit user intent and clean checks. |
 | H12 sensitive payload | Improved | Verify-only delivery redacts common secret shapes from verifier commands, stdout/stderr tails, helper-error tails, and persisted artifacts; finalization/status paths still avoid advisory/model payloads. |
@@ -122,6 +123,16 @@ scripts/hermes-busdriver-deliver \
 ```
 
 `status` mode is read-only: it searches Hermes-owned delivery-run artifacts by `run_id`, returns the latest valid matching artifact path and sanitized metadata as `status_lookup` evidence, preserves that artifact's repo/PR identity in the status envelope, and does not probe or mutate the target repo. `execute --operation pr-grind` is also non-finalizing: it wraps the read-only bounded PR-grind loop, validates the loop envelope schema/version/read-only flag and nested fail-closed authority flags before accepting clean, embeds the loop result in a durable run artifact, returns nonzero unless the latest PR HEAD is clean by a safe loop envelope, and never fixes, pushes, writes Busdriver markers, or merges.
+
+```bash
+scripts/hermes-busdriver-litmus-status \
+  --repo /path/to/repo \
+  --base-ref origin/main \
+  --state-dir-name .claude \
+  --pretty
+```
+
+The litmus-status helper only reports whether existing Busdriver markers match current Busdriver gate semantics. It computes PR hashes with the same plain `git diff` semantics as Busdriver's PR gate, fails closed on ambient `GIT_DIFF_OPTS` instead of hashing a divergent diff, fails closed instead of executing external diff/textconv/diff-driver configuration or hashing through `.gitattributes`, `$GIT_DIR/info/attributes`, or `core.attributesFile` diff selection, refuses to follow state-dir symlink components or marker symlinks and refuses non-regular/oversized marker files, fingerprints marker text / summarizes JSON fields instead of echoing raw contents, requires fresh timestamped PR artifacts, treats empty PR diffs as unavailable, treats commit markers older than the current HEAD timestamp as stale, and keeps finalization, commit, push, PR, merge, and marker-write authority false.
 
 ## Remaining finalization work
 

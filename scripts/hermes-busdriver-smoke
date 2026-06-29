@@ -23,10 +23,29 @@ GATE = ROOT / "scripts" / "hermes-busdriver-gate"
 AGENT_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
 AGENT_SMOKE = ROOT / "scripts" / "hermes-busdriver-agent-smoke"
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
+RELAY_ROLE = ROOT / "scripts" / "hermes-busdriver-relay-role"
+LITMUS_STATUS = ROOT / "scripts" / "hermes-busdriver-litmus-status"
 PR_GRIND_CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
 PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
 DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
 FINALIZATION_READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
+SMOKE = ROOT / "scripts" / "hermes-busdriver-smoke"
+PY_COMPILE_SCRIPTS = [
+    STATUS,
+    RELAY_ROLE,
+    LOCK,
+    RUNTIME,
+    GATE,
+    AGENT_DRAFT,
+    AGENT_SMOKE,
+    DELIVERY_STATUS,
+    FINALIZATION_READINESS,
+    DELIVER,
+    LITMUS_STATUS,
+    PR_GRIND_CHECK,
+    PR_GRIND_LOOP,
+    SMOKE,
+]
 
 
 def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
@@ -73,7 +92,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", str(STATUS), str(LOCK), str(RUNTIME), str(GATE), str(AGENT_DRAFT), str(AGENT_SMOKE), str(DELIVERY_STATUS), str(PR_GRIND_CHECK), str(PR_GRIND_LOOP), str(DELIVER), str(FINALIZATION_READINESS)]))
+    checks.append(run([sys.executable, "-m", "py_compile", *map(str, PY_COMPILE_SCRIPTS)]))
     checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
 
     if args.plugin_root:
