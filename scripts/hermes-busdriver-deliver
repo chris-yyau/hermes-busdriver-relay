@@ -26,6 +26,7 @@ DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
 DEFAULT_PR_GRIND_TIMEOUT = 180
 DEFAULT_LITMUS_STATUS_TIMEOUT = 60
 DEFAULT_PHASE0_STATUS_TIMEOUT = 60
+DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
@@ -72,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fail-closed Hermes Delivery Mode dispatcher")
     parser.add_argument("--repo", help="Target git repo/worktree to inspect and verify")
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
+    parser.add_argument("--relay-role", help="Optionally resolve one relay equivalent role through delivery-status")
+    parser.add_argument("--relay-config", help="Relay config JSON path to pass through delivery-status")
+    parser.add_argument("--relay-role-timeout", type=int, default=DEFAULT_RELAY_ROLE_TIMEOUT)
     parser.add_argument("--pr", help="Pull request number for post-PR status")
     parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through delivery-status")
     parser.add_argument(
@@ -126,10 +130,16 @@ def delivery_status_phase0_timeout(args: argparse.Namespace) -> int:
     return int(getattr(args, "phase0_status_timeout", DEFAULT_PHASE0_STATUS_TIMEOUT) or 0)
 
 
+def delivery_status_relay_role_timeout(args: argparse.Namespace) -> int:
+    return int(getattr(args, "relay_role_timeout", DEFAULT_RELAY_ROLE_TIMEOUT) or 0)
+
+
 def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     if args.delivery_status_timeout is not None:
         return args.delivery_status_timeout
     nested_budget = delivery_status_pr_grind_timeout(args) + delivery_status_litmus_timeout(args) + DELIVERY_STATUS_TIMEOUT_MARGIN
+    if getattr(args, "relay_role", None):
+        nested_budget += delivery_status_relay_role_timeout(args)
     if getattr(args, "drift_baseline", None):
         nested_budget += delivery_status_phase0_timeout(args)
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
@@ -141,6 +151,14 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--repo", args.repo]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
+    relay_role = getattr(args, "relay_role", None)
+    if relay_role:
+        cmd += ["--relay-role", relay_role]
+    relay_config = getattr(args, "relay_config", None)
+    if relay_config:
+        cmd += ["--relay-config", relay_config]
+    if relay_role and getattr(args, "relay_role_timeout", None) is not None:
+        cmd += ["--relay-role-timeout", str(delivery_status_relay_role_timeout(args))]
     if args.pr:
         cmd += ["--pr", args.pr]
     cmd += ["--pr-grind-timeout", str(delivery_status_pr_grind_timeout(args))]
