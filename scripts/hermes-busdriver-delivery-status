@@ -584,16 +584,14 @@ def run_phase0_status(args: argparse.Namespace, repo: dict[str, Any], busdriver:
     script = ROOT / "scripts" / "hermes-busdriver-status"
     if not script.exists():
         return {"available": False, "ok": False, "script": str(script), "reason": "hermes-busdriver-status not available in this branch"}
-    cmd = [sys.executable, str(script), "--drift-baseline", args.drift_baseline]
-    if repo.get("ok"):
-        cmd += ["--repo", repo["root"]]
+    cmd = [sys.executable, str(script), "--repo", args.repo, "--drift-baseline", args.drift_baseline]
     if busdriver.get("ok"):
         cmd += ["--plugin-root", busdriver["plugin_root"]]
     if getattr(args, "busdriver_state_dir_name", None):
         cmd += ["--state-dir", args.busdriver_state_dir_name]
     if args.state_dir:
         cmd += ["--relay-state-dir", args.state_dir]
-    cp = run(cmd, cwd=Path(repo["root"]) if repo.get("ok") else None, timeout=args.phase0_status_timeout)
+    cp = run(cmd, timeout=args.phase0_status_timeout)
     base: dict[str, Any] = {"available": True, "script": str(script), "returncode": cp.returncode}
     try:
         data = json.loads(cp.stdout)
