@@ -3,12 +3,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
+PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 
 
@@ -47,8 +49,8 @@ def fake_busdriver(path: Path) -> Path:
     return path
 
 
-def invoke(repo: Path, plugin: Path, *extra: str) -> dict:
-    cp = run([sys.executable, str(STATUS), "--repo", str(repo), "--plugin-root", str(plugin), "--no-lock-status", "--no-agent-runs", *extra])
+def invoke(repo: Path, plugin: Path, *extra: str, cwd: Path | None = None) -> dict:
+    cp = run([sys.executable, str(STATUS), "--repo", str(repo), "--plugin-root", str(plugin), "--no-lock-status", "--no-agent-runs", *extra], cwd=cwd)
     assert cp.returncode == 0, cp.stderr + cp.stdout
     return json.loads(cp.stdout)
 
@@ -127,6 +129,18 @@ def litmus_status_fixture(
         "state_dir": state_summary,
         "markers": markers,
         "decision": {"status": status, "warnings": warnings, "blockers": blockers, **decision_flags, "not_busdriver_native_claude_runtime": True, "unexpected_secret": malicious_sentinel},
+    }))
+    return path
+
+
+def drift_baseline_fixture(path: Path, plugin: Path) -> Path:
+    cp = run([sys.executable, str(PHASE0_STATUS), "--plugin-root", str(plugin)])
+    assert cp.returncode == 0, cp.stderr + cp.stdout
+    current = json.loads(cp.stdout)
+    path.write_text(json.dumps({
+        "status_schema": "hermes-busdriver-status/v0",
+        "package": {"version": current["package"]["version"]},
+        "critical_file_hashes": current["critical_file_hashes"],
     }))
     return path
 
@@ -210,6 +224,121 @@ def test_dirty_draft_includes_read_only_litmus_status_stale_warning(tmp_path: Pa
     assert data["litmus_status"]["summary"]["decision"]["finalization_allowed"] is False
     assert data["litmus_status"]["summary"]["decision"]["marker_write_allowed"] is False
     assert data["litmus_status"]["summary"]["markers"]["litmus_passed"]["exists"] is False
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_delivery_status_accepts_compatible_drift_baseline_as_phase0_evidence(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    baseline = drift_baseline_fixture(tmp_path / "baseline.json", plugin)
+
+    data = invoke(repo, plugin, "--drift-baseline", str(baseline))
+
+    drift = data["phase0_status"]["busdriver_drift"]
+    assert drift["status"] == "compatible"
+    assert drift["finalization_compatible"] is True
+    assert "busdriver_drift_incompatible" not in data["decision"]["blockers"]
+    assert data["decision"]["status"] == "draft_changes_need_busdriver_finalization"
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_phase0_status_forwards_requested_repo_even_when_parent_repo_status_failed(monkeypatch, tmp_path: Path):
+    mod = __import__("runpy").run_path(str(STATUS))
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    requested_repo = tmp_path / "not-a-git-repo"
+    requested_repo.mkdir()
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}\n")
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        payload = {
+            "status_schema": "hermes-busdriver-status/v0",
+            "read_only": True,
+            "repo": {"path": str(requested_repo), "is_git_repo": False},
+            "plugin_root": {"path": str(plugin), "exists": True},
+            "busdriver_drift": {"status": "baseline_invalid", "finalization_compatible": False},
+        }
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    monkeypatch.setitem(mod["run_phase0_status"].__globals__, "run", fake_run)
+    args = __import__("types").SimpleNamespace(
+        repo=str(requested_repo),
+        drift_baseline=str(baseline),
+        phase0_status_timeout=7,
+        busdriver_state_dir_name=None,
+        state_dir=None,
+    )
+
+    data = mod["run_phase0_status"](args, {"ok": False, "path": str(requested_repo)}, {"ok": True, "plugin_root": str(plugin)})
+
+    cmd = captured["cmd"]
+    assert data["status_schema"] == "hermes-busdriver-status/v0"
+    assert "--repo" in cmd
+    assert cmd[cmd.index("--repo") + 1] == str(requested_repo)
+    assert captured["cwd"] is None
+    assert captured["timeout"] == 7
+
+
+def test_delivery_status_preserves_relative_drift_baseline_cwd_semantics(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (repo / "src.txt").write_text("draft\n")
+    drift_baseline_fixture(caller / "baseline.json", plugin)
+    (repo / "baseline.json").write_text("{not-json\n")
+
+    data = invoke(repo, plugin, "--drift-baseline", "baseline.json", cwd=caller)
+
+    drift = data["phase0_status"]["busdriver_drift"]
+    assert drift["baseline_path"] == str(caller / "baseline.json")
+    assert drift["status"] == "compatible"
+    assert drift["finalization_compatible"] is True
+    assert data["decision"]["status"] == "draft_changes_need_busdriver_finalization"
+    assert "busdriver_drift_incompatible" not in data["decision"]["blockers"]
+
+
+def test_delivery_status_blocks_when_drift_baseline_is_drifted(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    baseline = drift_baseline_fixture(tmp_path / "baseline.json", plugin)
+    (plugin / "package.json").write_text('{"version":"9.99.0"}\n')
+
+    data = invoke(repo, plugin, "--drift-baseline", str(baseline))
+
+    drift = data["phase0_status"]["busdriver_drift"]
+    assert drift["status"] == "drifted"
+    assert drift["finalization_compatible"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert "busdriver_drift_incompatible" in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
+
+@pytest.mark.parametrize("baseline_name, baseline_content, expected_status", [
+    ("invalid-baseline.json", "{not-json\n", "baseline_invalid"),
+    ("missing-baseline.json", None, "baseline_missing"),
+])
+def test_delivery_status_blocks_when_drift_baseline_is_invalid_or_missing(tmp_path: Path, baseline_name: str, baseline_content: str | None, expected_status: str):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    baseline = tmp_path / baseline_name
+    if baseline_content is not None:
+        baseline.write_text(baseline_content)
+
+    data = invoke(repo, plugin, "--drift-baseline", str(baseline))
+
+    drift = data["phase0_status"]["busdriver_drift"]
+    assert drift["status"] == expected_status
+    assert drift["finalization_compatible"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert "busdriver_drift_incompatible" in data["decision"]["blockers"]
     assert_no_delivery_authority(data["decision"])
 
 
