@@ -298,7 +298,7 @@ def test_litmus_status_non_boolean_ok_fails_closed_even_when_fresh(tmp_path: Pat
 
     assert data["litmus_status"]["ok"] is False
     assert data["litmus_status"]["reason"] == "litmus_status_schema_invalid"
-    assert data["litmus_status"]["summary"]["ok"] == "false"
+    assert data["litmus_status"]["summary"]["ok"] is False
     assert data["decision"]["status"] == "blocked"
     assert "litmus_status_schema_invalid" in data["decision"]["blockers"]
     assert "litmus_status_not_fresh" not in data["decision"]["blockers"]
@@ -419,6 +419,33 @@ def test_litmus_status_summary_sanitizes_invalid_native_runtime_flag(tmp_path: P
     assert_no_delivery_authority(data["decision"])
 
 
+def test_litmus_status_summary_normalizes_untrusted_top_level_primitives(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    sentinel = "ghp_" + "G" * 36
+    litmus = litmus_status_fixture(tmp_path / "malicious-top-level-litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    payload["schema"] = f"schema token={sentinel}"
+    payload["read_only"] = {"secret": sentinel}
+    payload["ok"] = f"ok token={sentinel}"
+    payload["decision"]["not_busdriver_native_claude_runtime"] = f"token={sentinel}"
+    litmus.write_text(json.dumps(payload))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    serialized = json.dumps(data)
+    summary = data["litmus_status"]["summary"]
+    assert sentinel not in serialized
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == "litmus_status_schema_invalid"
+    assert summary["schema"] is None
+    assert summary["read_only"] is False
+    assert summary["ok"] is False
+    assert summary["decision"]["not_busdriver_native_claude_runtime"] is False
+    assert_no_delivery_authority(data["decision"])
+
+
 def test_litmus_status_parse_error_tails_are_redacted_and_bounded(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -470,6 +497,55 @@ def test_litmus_status_timeout_with_bytes_output_is_sanitized(monkeypatch, tmp_p
     assert len(data["stderr"]) <= 4000
     assert "api_key=[REDACTED]" in data["stdout_tail"]
     assert "token=[REDACTED]" in data["stderr"]
+
+
+def test_run_litmus_status_forwards_busdriver_state_dir_name(monkeypatch, tmp_path: Path):
+    mod = __import__("runpy").run_path(str(STATUS))
+    script = tmp_path / "litmus-status.py"
+    script.write_text("# fake litmus helper\n")
+    captured: dict[str, list[str]] = {}
+    payload = {
+        "schema": "hermes-busdriver-litmus-status/v0",
+        "read_only": True,
+        "ok": True,
+        "repo": {"root": str(tmp_path), "branch": "main", "head": "abc123", "head_timestamp": 1, "base_ref": None, "branch_diff_hash": None},
+        "state_dir": {"path": str(tmp_path / ".opencode"), "exists": False, "is_symlink": False, "has_symlink_component": False},
+        "markers": {},
+        "decision": {
+            "status": "stale_or_missing",
+            "warnings": [],
+            "blockers": [],
+            "finalization_allowed": False,
+            "commit_allowed": False,
+            "push_allowed": False,
+            "pr_allowed": False,
+            "merge_allowed": False,
+            "deploy_allowed": False,
+            "release_allowed": False,
+            "publish_allowed": False,
+            "marker_write_allowed": False,
+            "not_busdriver_native_claude_runtime": True,
+        },
+    }
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(mod["subprocess"], "run", fake_run)
+    args = __import__("types").SimpleNamespace(
+        litmus_status_result_file=None,
+        litmus_status_script=str(script),
+        litmus_status_timeout=10,
+        busdriver_state_dir_name=".opencode",
+    )
+
+    data = mod["run_litmus_status"](args, {"ok": True, "root": str(tmp_path), "branch": "main", "head": "abc123"})
+
+    cmd = captured["cmd"]
+    assert data["ok"] is True
+    assert "--state-dir-name" in cmd
+    assert cmd[cmd.index("--state-dir-name") + 1] == ".opencode"
 
 
 def test_litmus_status_nonzero_valid_json_stderr_is_redacted_and_bounded(tmp_path: Path):

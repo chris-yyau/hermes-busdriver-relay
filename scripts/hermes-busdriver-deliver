@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-polls", type=int, default=20, help="Poll cap passed to execute pr-grind loop")
     parser.add_argument("--pr-grind-timeout", type=int, default=DEFAULT_PR_GRIND_TIMEOUT, help="PR-grind timeout passed to delivery-status")
     parser.add_argument("--litmus-status-timeout", type=int, default=DEFAULT_LITMUS_STATUS_TIMEOUT, help="Litmus-status timeout passed to delivery-status")
+    parser.add_argument("--busdriver-state-dir-name", help="Busdriver marker state dir name to pass through delivery-status to litmus-status")
     parser.add_argument("--check-timeout", type=float, default=180.0, help="Checker timeout passed to execute pr-grind loop")
     parser.add_argument(
         "--verifier",
@@ -135,6 +136,9 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--pr", args.pr]
     cmd += ["--pr-grind-timeout", str(delivery_status_pr_grind_timeout(args))]
     cmd += ["--litmus-status-timeout", str(delivery_status_litmus_timeout(args))]
+    state_dir_name = getattr(args, "busdriver_state_dir_name", None)
+    if state_dir_name:
+        cmd += ["--busdriver-state-dir-name", state_dir_name]
     if args.pr_grind_result_file:
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
 

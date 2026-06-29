@@ -410,6 +410,8 @@ def test_delivery_status_timeout_covers_custom_pr_grind_and_litmus_budget(monkey
             "240",
             "--litmus-status-timeout",
             "90",
+            "--busdriver-state-dir-name",
+            ".opencode",
         ],
     )
     args = ns["parse_args"]()
@@ -434,6 +436,7 @@ def test_delivery_status_timeout_covers_custom_pr_grind_and_litmus_budget(monkey
     assert isinstance(cmd, list)
     assert cmd[cmd.index("--pr-grind-timeout") + 1] == "240"
     assert cmd[cmd.index("--litmus-status-timeout") + 1] == "90"
+    assert cmd[cmd.index("--busdriver-state-dir-name") + 1] == ".opencode"
 
 
 def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):

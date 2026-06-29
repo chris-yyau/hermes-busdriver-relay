@@ -137,6 +137,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--litmus-status-result-file", args.litmus_status_result_file]
     if args.litmus_status_timeout is not None:
         cmd += ["--litmus-status-timeout", str(args.litmus_status_timeout)]
+    if args.state_dir:
+        cmd += ["--busdriver-state-dir-name", args.state_dir]
     return run_json(cmd, effective_delivery_status_timeout(args))
 
 

@@ -417,9 +417,9 @@ def sanitize_litmus_summary(result: dict[str, Any]) -> dict[str, Any]:
     allowed_state_dir = {"path", "exists", "is_symlink", "has_symlink_component"}
     allowed_markers = {"litmus_passed", "pr_codex_lead", "pr_backstop_verdict", "pr_review_passed"}
     return {
-        "schema": result.get("schema"),
-        "read_only": result.get("read_only"),
-        "ok": result.get("ok"),
+        "schema": result.get("schema") if result.get("schema") == LITMUS_STATUS_SCHEMA else None,
+        "read_only": result.get("read_only") is True,
+        "ok": result.get("ok") if isinstance(result.get("ok"), bool) else False,
         "repo": {key: redact_value(repo.get(key)) for key in allowed_repo if key in repo},
         "state_dir": {key: redact_value(state_dir.get(key)) for key in allowed_state_dir if key in state_dir},
         "markers": {name: sanitize_litmus_marker(markers[name]) for name in allowed_markers if name in markers},
@@ -492,6 +492,8 @@ def run_litmus_status(args: argparse.Namespace, repo: dict[str, Any]) -> dict[st
     if not repo.get("ok"):
         return {"available": True, "ok": False, "script": str(script), "reason": "repo_unavailable"}
     cmd = [sys.executable, str(script), "--repo", repo["root"]]
+    if getattr(args, "busdriver_state_dir_name", None):
+        cmd += ["--state-dir-name", args.busdriver_state_dir_name]
     try:
         cp = run(cmd, cwd=Path(repo["root"]), timeout=args.litmus_status_timeout)
     except subprocess.TimeoutExpired as e:
@@ -690,6 +692,7 @@ def main() -> int:
     ap.add_argument("--litmus-status-script", help="Path to hermes-busdriver-litmus-status; defaults to this relay repo's scripts dir")
     ap.add_argument("--litmus-status-result-file", help="Fixture/result JSON from hermes-busdriver-litmus-status")
     ap.add_argument("--litmus-status-timeout", type=int, default=60)
+    ap.add_argument("--busdriver-state-dir-name", help="Busdriver marker state dir name relative to repo root to pass to hermes-busdriver-litmus-status")
     ap.add_argument("--state-dir", help="Hermes busdriver-relay state dir for lock/run lookup")
     ap.add_argument("--relay-role", help="Optionally resolve one relay equivalent role into the status envelope")
     ap.add_argument("--relay-config", help="Relay config JSON path to pass to hermes-busdriver-relay-role")

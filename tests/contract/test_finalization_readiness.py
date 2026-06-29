@@ -480,6 +480,36 @@ def test_readiness_handoff_litmus_status_evidence_sanitizes_untrusted_fields(tmp
     assert_no_finalization_authority(data["decision"])
 
 
+def test_readiness_handoff_litmus_status_evidence_normalizes_untrusted_top_level_fields(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    sentinel = "ghp_" + "H" * 36
+    litmus = litmus_status_fixture(tmp_path / "malicious-top-level-litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    payload["schema"] = f"schema token={sentinel}"
+    payload["read_only"] = {"secret": sentinel}
+    payload["ok"] = f"ok token={sentinel}"
+    payload["decision"]["not_busdriver_native_claude_runtime"] = f"token={sentinel}"
+    litmus.write_text(json.dumps(payload))
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    payload_text = json.dumps(data)
+    handoff_litmus = data["handoff_envelope"]["evidence"]["litmus_status"]
+    assert cp.returncode == 0, cp.stderr
+    assert sentinel not in payload_text
+    assert data["delivery_status"]["litmus_status"]["ok"] is False
+    assert data["delivery_status"]["litmus_status"]["reason"] == "litmus_status_schema_invalid"
+    assert handoff_litmus["schema"] is None
+    assert handoff_litmus["read_only"] is False
+    assert handoff_litmus["ok"] is False
+    assert handoff_litmus["decision"]["not_busdriver_native_claude_runtime"] is False
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
 def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -664,6 +694,8 @@ def test_default_delivery_status_timeout_covers_forwarded_pr_grind_and_litmus_bu
             "/tmp/busdriver.json",
             "--pr",
             "7",
+            "--state-dir",
+            ".opencode",
         ],
     )
     args = mod["parse_args"]()
@@ -680,6 +712,7 @@ def test_default_delivery_status_timeout_covers_forwarded_pr_grind_and_litmus_bu
 
     assert "--pr-grind-timeout" in captured["cmd"]
     assert "--litmus-status-timeout" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--busdriver-state-dir-name") + 1] == ".opencode"
     assert captured["timeout"] == args.pr_grind_timeout + args.litmus_status_timeout + 30
 
 
