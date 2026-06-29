@@ -41,6 +41,12 @@ LITMUS_AUTHORITY_FALSE_KEYS = [
     "publish_allowed",
     "marker_write_allowed",
 ]
+LITMUS_UNSAFE_BOOLEAN_KEYS = {
+    *LITMUS_AUTHORITY_FALSE_KEYS,
+    "dispatch_allowed",
+    "mutation_allowed",
+    "programmatic_execution_allowed",
+}
 LITMUS_DECISION_STATUSES = {
     "stale_or_missing",
     "blocked",
@@ -365,6 +371,32 @@ def load_json_result_file(path: str) -> tuple[Any, str | None]:
         return None, str(e)
 
 
+def litmus_payload_authority_flags_false(value: Any) -> bool:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    visited = 0
+    max_nodes = 10000
+    max_depth = 1000
+    while stack:
+        current, depth = stack.pop()
+        visited += 1
+        if visited > max_nodes or depth > max_depth:
+            return False
+        try:
+            if isinstance(current, dict):
+                for key, item in current.items():
+                    if key in LITMUS_UNSAFE_BOOLEAN_KEYS and item is not False:
+                        return False
+                    if isinstance(item, (dict, list)):
+                        stack.append((item, depth + 1))
+            elif isinstance(current, list):
+                for item in current:
+                    if isinstance(item, (dict, list)):
+                        stack.append((item, depth + 1))
+        except Exception:  # noqa: BLE001 - malformed payload traversal must fail closed
+            return False
+    return True
+
+
 def litmus_authority_is_safe(result: dict[str, Any]) -> bool:
     decision = result.get("decision")
     return (
@@ -373,6 +405,7 @@ def litmus_authority_is_safe(result: dict[str, Any]) -> bool:
         and isinstance(decision, dict)
         and all(decision.get(key) is False for key in LITMUS_AUTHORITY_FALSE_KEYS)
         and decision.get("not_busdriver_native_claude_runtime") is True
+        and litmus_payload_authority_flags_false(result)
     )
 
 
@@ -420,6 +453,8 @@ def sanitize_litmus_summary(result: dict[str, Any]) -> dict[str, Any]:
         "schema": result.get("schema") if result.get("schema") == LITMUS_STATUS_SCHEMA else None,
         "read_only": result.get("read_only") is True,
         "ok": result.get("ok") if isinstance(result.get("ok"), bool) else False,
+        "authority_safe": litmus_authority_is_safe(result),
+        "decision_status_recognized": litmus_decision_status_is_recognized(result),
         "repo": {key: redact_value(repo.get(key)) for key in allowed_repo if key in repo},
         "state_dir": {key: redact_value(state_dir.get(key)) for key in allowed_state_dir if key in state_dir},
         "markers": {name: sanitize_litmus_marker(markers[name]) for name in allowed_markers if name in markers},

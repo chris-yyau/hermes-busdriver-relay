@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails and dual-review readiness evidence.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails, dual-review readiness evidence, and advisory pre-PR dual-review evidence classification.
 
 ## Current scope
 
@@ -12,6 +12,7 @@ Relay v2 supports:
 - a read-only relay role resolver that turns one configured equivalent role into a fail-closed dispatcher-facing selection envelope;
 - optional relay-role resolution and Busdriver drift-baseline evidence in delivery-status and finalization-readiness handoff envelopes;
 - state-dir-aware, normalized/redacted read-only litmus/pre-PR marker freshness evidence in delivery-status and finalization-readiness handoff envelopes;
+- advisory pre-PR dual-review evidence classification in finalization-readiness, derived only from sanitized delivery-status litmus summaries and never from raw marker contents;
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
@@ -26,7 +27,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas including read-only dual-review readiness; no mutating final delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emits JSON schemas including read-only dual-review readiness and advisory pre-PR dual-review evidence classification; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
