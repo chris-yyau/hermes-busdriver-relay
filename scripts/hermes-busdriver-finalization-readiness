@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--litmus-status-script", help="Path to hermes-busdriver-litmus-status for delivery-status")
     parser.add_argument("--litmus-status-result-file", help="Fixture/result JSON from hermes-busdriver-litmus-status")
     parser.add_argument("--litmus-status-timeout", type=int, default=60)
+    parser.add_argument("--drift-baseline", help="Read-only Busdriver drift baseline JSON to compare through delivery/Phase-0 status")
     parser.add_argument(
         "--delivery-status-timeout",
         type=int,
@@ -137,6 +138,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--litmus-status-result-file", args.litmus_status_result_file]
     if args.litmus_status_timeout is not None:
         cmd += ["--litmus-status-timeout", str(args.litmus_status_timeout)]
+    if args.drift_baseline:
+        cmd += ["--drift-baseline", args.drift_baseline]
     if args.state_dir:
         cmd += ["--busdriver-state-dir-name", args.state_dir]
     return run_json(cmd, effective_delivery_status_timeout(args))
@@ -150,6 +153,8 @@ def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--plugin-root", args.plugin_root]
     if args.user_config:
         cmd += ["--user-config", args.user_config]
+    if args.drift_baseline:
+        cmd += ["--drift-baseline", args.drift_baseline]
     return run_json(cmd, args.phase0_status_timeout)
 
 
@@ -188,6 +193,9 @@ def phase0_blockers(phase0: dict[str, Any]) -> list[str]:
     locks = phase0.get("relay_locks") or {}
     if locks.get("active_for_repo_count", 0):
         blockers.append("relay_repo_mutation_lock_active")
+    busdriver_drift = phase0.get("busdriver_drift")
+    if isinstance(busdriver_drift, dict) and busdriver_drift.get("finalization_compatible") is False:
+        blockers.append("busdriver_drift_incompatible")
     return blockers
 
 
@@ -294,11 +302,13 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "user_config": {"path": user_config.get("path"), "exists": user_config.get("exists"), "parse_error": user_config.get("parse_error")},
             "hooks": {"path": hooks.get("path"), "exists": hooks.get("exists"), "parse_error": hooks.get("parse_error"), "events": hooks.get("events")},
             "active_markers": phase0.get("active_markers"),
+            "busdriver_drift": phase0.get("busdriver_drift"),
         },
         "evidence": {
             "delivery_status_schema": delivery.get("schema"),
             "phase0_status_schema": phase0.get("status_schema"),
             "delivery_decision": delivery.get("decision"),
+            "busdriver_drift": phase0.get("busdriver_drift") or ((delivery.get("phase0_status") or {}).get("busdriver_drift")),
             "litmus_status": (delivery.get("litmus_status") or {}).get("summary"),
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),

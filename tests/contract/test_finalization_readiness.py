@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
+PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 
 
@@ -153,6 +154,18 @@ def litmus_status_fixture(
     return path
 
 
+def drift_baseline_fixture(path: Path, plugin: Path) -> Path:
+    cp = run([sys.executable, str(PHASE0_STATUS), "--plugin-root", str(plugin)])
+    assert cp.returncode == 0, cp.stderr + cp.stdout
+    current = json.loads(cp.stdout)
+    path.write_text(json.dumps({
+        "status_schema": "hermes-busdriver-status/v0",
+        "package": {"version": current["package"]["version"]},
+        "critical_file_hashes": current["critical_file_hashes"],
+    }))
+    return path
+
+
 def invoke(repo: Path, plugin: Path, user_config: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], dict]:
     cp = run(
         [
@@ -237,6 +250,76 @@ def test_readiness_handoff_propagates_litmus_status_evidence(tmp_path: Path):
     assert handoff_litmus["decision"]["status"] == "stale_or_missing"
     assert handoff_litmus["decision"]["finalization_allowed"] is False
     assert handoff_litmus["decision"]["marker_write_allowed"] is False
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+def test_readiness_accepts_and_forwards_compatible_drift_baseline(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+    baseline = drift_baseline_fixture(tmp_path / "baseline.json", plugin)
+
+    cp, data = invoke(repo, plugin, user_config, "--drift-baseline", str(baseline))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is True
+    assert data["readiness"]["status"] == "ready_for_commit_or_pr_handoff"
+    delivery_drift = data["delivery_status"]["phase0_status"]["busdriver_drift"]
+    handoff_drift = data["handoff_envelope"]["evidence"]["busdriver_drift"]
+    assert delivery_drift["status"] == "compatible"
+    assert delivery_drift["finalization_compatible"] is True
+    assert handoff_drift["finalization_compatible"] is True
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+def test_readiness_blocks_when_drift_baseline_is_drifted(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+    baseline = drift_baseline_fixture(tmp_path / "baseline.json", plugin)
+    (plugin / "package.json").write_text('{"name":"busdriver","version":"9.99.0"}\n')
+
+    cp, data = invoke(repo, plugin, user_config, "--drift-baseline", str(baseline))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    drift = data["handoff_envelope"]["evidence"]["busdriver_drift"]
+    assert drift["status"] == "drifted"
+    assert drift["finalization_compatible"] is False
+    assert "busdriver_drift_incompatible" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+@pytest.mark.parametrize("baseline_name, baseline_content, expected_status", [
+    ("invalid-baseline.json", "{not-json\n", "baseline_invalid"),
+    ("missing-baseline.json", None, "baseline_missing"),
+])
+def test_readiness_blocks_when_drift_baseline_is_invalid_or_missing(tmp_path: Path, baseline_name: str, baseline_content: str | None, expected_status: str):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+    baseline = tmp_path / baseline_name
+    if baseline_content is not None:
+        baseline.write_text(baseline_content)
+
+    cp, data = invoke(repo, plugin, user_config, "--drift-baseline", str(baseline))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    drift = data["handoff_envelope"]["evidence"]["busdriver_drift"]
+    assert drift["status"] == expected_status
+    assert drift["finalization_compatible"] is False
+    assert "busdriver_drift_incompatible" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
 

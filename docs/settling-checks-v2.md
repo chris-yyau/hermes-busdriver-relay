@@ -10,7 +10,7 @@ Relay v2 supports:
 - read-only litmus/pre-PR marker freshness status for current HEAD and branch diff hashes;
 - read-only configurable relay-equivalent reviewer/voice/arbiter/backstop status roles under a separate relay config JSON;
 - a read-only relay role resolver that turns one configured equivalent role into a fail-closed dispatcher-facing selection envelope;
-- optional relay-role resolution evidence in delivery-status and finalization-readiness handoff envelopes;
+- optional relay-role resolution and Busdriver drift-baseline evidence in delivery-status and finalization-readiness handoff envelopes;
 - state-dir-aware, normalized/redacted read-only litmus/pre-PR marker freshness evidence in delivery-status and finalization-readiness handoff envelopes;
 - Hermes-owned single-flight locks;
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
@@ -31,7 +31,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
 | H6 read-only status check | Implemented | Status/runtime/PR-grind readiness probes are read-only. |
-| H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/unsupported-schema/drifted baselines while keeping all finalization flags false. No automatic restore/enable state machine yet. |
+| H7 drift invalidation | Improved | Status reports critical Busdriver file hashes and can read-only compare a status-style drift baseline, returning `busdriver_drift.finalization_compatible=false` for missing/invalid/unsupported-schema/drifted baselines while keeping all finalization flags false. Delivery-status and finalization-readiness accept `--drift-baseline`, include Phase-0 drift evidence, and block handoff fail-closed on incompatible baselines. No automatic restore/enable state machine yet. |
 | H8 state-dir/plugin-root portability | Partial | Status/gate/smoke accept plugin root and state dir; delivery-status/finalization-readiness/deliver forward the Busdriver state dir to litmus-status; PR-grind checker can use live Busdriver `relevant-check-status.sh`. |
 | H9 marker freshness | Improved | Status reports marker metadata; `hermes-busdriver-litmus-status` read-only checks commit litmus and pre-PR review marker freshness against current HEAD / branch diff hash; delivery-status/finalization-readiness include sanitized, normalized/redacted freshness evidence and warn on stale/missing markers only when helper evidence is available and schema-safe; unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper evidence blocks fail-closed; PR-grind checker avoids writing markers and evaluates latest PR HEAD comments/checks. |
 | H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |
@@ -58,6 +58,7 @@ scripts/hermes-busdriver-finalization-readiness \
   --relay-state-dir /path/to/hermes-relay-state \
   --relay-role relay.pr.backstop \
   --relay-config /path/to/hermes-relay-config.json \
+  --drift-baseline /path/to/busdriver-status-baseline.json \
   --pr 123 \
   --pretty
 ```
@@ -68,6 +69,7 @@ scripts/hermes-busdriver-delivery-status \
   --plugin-root /path/to/busdriver \
   --relay-role relay.pr.backstop \
   --relay-config /path/to/hermes-relay-config.json \
+  --drift-baseline /path/to/busdriver-status-baseline.json \
   --pretty
 ```
 
