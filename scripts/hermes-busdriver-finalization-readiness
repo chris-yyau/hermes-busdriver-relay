@@ -22,6 +22,7 @@ PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
+DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 POLICY = (
     "Read-only finalization readiness only prepares a handoff envelope. It does "
@@ -49,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--relay-state-dir", help="Hermes relay state dir for lock/run lookup")
     parser.add_argument("--relay-role", help="Optionally resolve one relay equivalent role through delivery-status")
     parser.add_argument("--relay-config", help="Relay config JSON path for optional relay role resolution")
+    parser.add_argument("--relay-role-timeout", type=int, default=DEFAULT_RELAY_ROLE_TIMEOUT)
     parser.add_argument("--user-config", help="Busdriver user config path for Phase-0 discovery")
     parser.add_argument("--pr", help="Pull request number for post-PR readiness")
     parser.add_argument("--target", default="auto", choices=["auto", "commit", "pr", "merge", "delivery"], help="Finalization handoff target to evaluate")
@@ -111,6 +113,8 @@ def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     if args.delivery_status_timeout is not None:
         return args.delivery_status_timeout
     nested_budget = int(args.pr_grind_timeout or 0) + int(args.litmus_status_timeout or 0) + DELIVERY_STATUS_TIMEOUT_MARGIN
+    if args.relay_role:
+        nested_budget += int(args.relay_role_timeout or 0)
     if args.drift_baseline:
         nested_budget += int(args.phase0_status_timeout or 0)
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
@@ -126,6 +130,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--relay-role", args.relay_role]
     if args.relay_config:
         cmd += ["--relay-config", args.relay_config]
+    if args.relay_role and args.relay_role_timeout is not None:
+        cmd += ["--relay-role-timeout", str(args.relay_role_timeout)]
     if args.pr:
         cmd += ["--pr", args.pr]
     if args.pr_grind_check_script:
