@@ -21,6 +21,8 @@ DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
+DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
+DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 POLICY = (
     "Read-only finalization readiness only prepares a handoff envelope. It does "
     "not authorize or perform commit, push, PR creation, merge, deploy, release, "
@@ -35,6 +37,7 @@ BLOCKED_FLAGS = {
     "deploy_allowed": False,
     "release_allowed": False,
     "publish_allowed": False,
+    "marker_write_allowed": False,
 }
 
 
@@ -52,7 +55,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr-grind-check-script", help="Path to hermes-busdriver-pr-grind-check for delivery-status")
     parser.add_argument("--pr-grind-result-file", help="Fixture/result JSON from hermes-busdriver-pr-grind-check")
     parser.add_argument("--pr-grind-timeout", type=int, default=180)
-    parser.add_argument("--delivery-status-timeout", type=int, default=180)
+    parser.add_argument("--litmus-status-script", help="Path to hermes-busdriver-litmus-status for delivery-status")
+    parser.add_argument("--litmus-status-result-file", help="Fixture/result JSON from hermes-busdriver-litmus-status")
+    parser.add_argument("--litmus-status-timeout", type=int, default=60)
+    parser.add_argument(
+        "--delivery-status-timeout",
+        type=int,
+        default=None,
+        help="Wrapper timeout for delivery-status; defaults to max(180, pr-grind timeout + litmus-status timeout + 30s margin)",
+    )
     parser.add_argument("--phase0-status-timeout", type=int, default=60)
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args()
@@ -95,6 +106,13 @@ def run_json(cmd: list[str], timeout: int) -> tuple[dict[str, Any], int]:
     return data, cp.returncode
 
 
+def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
+    if args.delivery_status_timeout is not None:
+        return args.delivery_status_timeout
+    nested_budget = int(args.pr_grind_timeout or 0) + int(args.litmus_status_timeout or 0) + DELIVERY_STATUS_TIMEOUT_MARGIN
+    return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
+
+
 def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     cmd = [sys.executable, str(DELIVERY_STATUS), "--repo", args.repo]
     if args.plugin_root:
@@ -113,7 +131,13 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
     if args.pr_grind_timeout is not None:
         cmd += ["--pr-grind-timeout", str(args.pr_grind_timeout)]
-    return run_json(cmd, args.delivery_status_timeout)
+    if args.litmus_status_script:
+        cmd += ["--litmus-status-script", args.litmus_status_script]
+    if args.litmus_status_result_file:
+        cmd += ["--litmus-status-result-file", args.litmus_status_result_file]
+    if args.litmus_status_timeout is not None:
+        cmd += ["--litmus-status-timeout", str(args.litmus_status_timeout)]
+    return run_json(cmd, effective_delivery_status_timeout(args))
 
 
 def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -273,6 +297,7 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "delivery_status_schema": delivery.get("schema"),
             "phase0_status_schema": phase0.get("status_schema"),
             "delivery_decision": delivery.get("decision"),
+            "litmus_status": (delivery.get("litmus_status") or {}).get("summary"),
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),
         },

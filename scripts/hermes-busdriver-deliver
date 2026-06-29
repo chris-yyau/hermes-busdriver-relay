@@ -22,6 +22,10 @@ PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
 SCHEMA = "hermes-busdriver-deliver/v0"
 RUN_SCHEMA = "hermes-busdriver-delivery-run/v0"
 PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
+DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
+DEFAULT_PR_GRIND_TIMEOUT = 180
+DEFAULT_LITMUS_STATUS_TIMEOUT = 60
+DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 TAIL_LIMIT = 4000
 VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
@@ -69,7 +73,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
     parser.add_argument("--pr", help="Pull request number for post-PR status")
     parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through delivery-status")
-    parser.add_argument("--delivery-status-timeout", type=int, default=180, help="Seconds to wait for delivery-status before failing closed")
+    parser.add_argument(
+        "--delivery-status-timeout",
+        type=int,
+        default=None,
+        help="Seconds to wait for delivery-status before failing closed; defaults to max(180, PR-grind + litmus-status + 30s margin)",
+    )
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
     parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports verify and read-only pr-grind; status is read-only run lookup")
     parser.add_argument("--operation", default="plan", choices=["plan", "verify", "pr-grind"], help="Delivery operation; execute supports verify and read-only pr-grind")
@@ -99,6 +108,13 @@ def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
     return text[-limit:]
 
 
+def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
+    if args.delivery_status_timeout is not None:
+        return args.delivery_status_timeout
+    nested_budget = DEFAULT_PR_GRIND_TIMEOUT + DEFAULT_LITMUS_STATUS_TIMEOUT + DELIVERY_STATUS_TIMEOUT_MARGIN
+    return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
+
+
 def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     cmd = [sys.executable, str(DELIVERY_STATUS)]
     if args.repo:
@@ -110,14 +126,15 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.pr_grind_result_file:
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
 
+    timeout = effective_delivery_status_timeout(args)
     try:
-        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=args.delivery_status_timeout)
+        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
             "error": "delivery_status_timeout",
             "returncode": 124,
-            "timeout_seconds": args.delivery_status_timeout,
+            "timeout_seconds": timeout,
             "stdout_tail": tail(e.stdout),
             "stderr": tail(e.stderr),
         }, 124

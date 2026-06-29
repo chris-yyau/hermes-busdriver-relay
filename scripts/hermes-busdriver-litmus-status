@@ -24,6 +24,9 @@ AUTHORITY_FALSE = {
     "push_allowed": False,
     "pr_allowed": False,
     "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
     "marker_write_allowed": False,
 }
 HEX64 = re.compile(r"^[a-f0-9]{64}$")

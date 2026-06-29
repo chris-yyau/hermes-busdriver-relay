@@ -360,8 +360,39 @@ def test_delivery_status_timeout_fails_closed(monkeypatch):
     assert data["stderr"] == "slow"
 
 
+def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(DELIVER), "--repo", "/tmp/repo", "--plugin-root", "/tmp/plugin", "--pr", "7"],
+    )
+    args = ns["parse_args"]()
+    captured = {"timeout": None}
+
+    class CP:
+        stdout = "{}"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(*_args, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+
+    ns["run_delivery_status"](args)
+
+    assert captured["timeout"] == 180 + 60 + 30
+
+
 def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
+    assert run(["git", "config", "user.email", "test@example.test"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "README.md").write_text("# test\n")
+    assert run(["git", "add", "README.md"], repo).returncode == 0
+    assert run(["git", "commit", "-m", "init"], repo).returncode == 0
     plugin = fake_busdriver(tmp_path / "busdriver")
     pr_result = tmp_path / "pr-grind-clean.json"
     pr_result.write_text(json.dumps({"status": "clean", "clean": True, "checks": {"failed": 0, "pending": 0}, "actionable_comments": []}))
