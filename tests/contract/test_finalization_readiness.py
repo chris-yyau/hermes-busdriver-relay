@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -108,6 +109,10 @@ def litmus_status_fixture(
     ok: object = True,
     authority_true_key: str | None = None,
     malicious_sentinel: str | None = None,
+    litmus_fresh_for_head: bool = False,
+    pr_codex_lead_fresh_for_branch_diff: bool = False,
+    pr_backstop_verdict_fresh_for_branch_diff: bool = False,
+    pr_review_passed_fresh_for_branch_diff: bool = False,
 ) -> Path:
     false_flags = {
         "finalization_allowed": False,
@@ -140,10 +145,10 @@ def litmus_status_fixture(
     }
     state_summary = {"path": str(state_dir), "exists": False, "is_symlink": False, "has_symlink_component": False}
     markers = {
-        "litmus_passed": {"path": str(state_dir / "litmus-passed.local"), "exists": False, "fresh_for_head": False},
-        "pr_codex_lead": {"path": str(state_dir / "pr-codex-lead.local.json"), "exists": False, "fresh_for_branch_diff": False},
-        "pr_backstop_verdict": {"path": str(state_dir / "pr-backstop-verdict.local.json"), "exists": False, "fresh_for_branch_diff": False},
-        "pr_review_passed": {"path": str(state_dir / "pr-review-passed.local"), "exists": False, "fresh_for_branch_diff": False},
+        "litmus_passed": {"path": str(state_dir / "litmus-passed.local"), "exists": litmus_fresh_for_head, "fresh_for_head": litmus_fresh_for_head},
+        "pr_codex_lead": {"path": str(state_dir / "pr-codex-lead.local.json"), "exists": pr_codex_lead_fresh_for_branch_diff, "fresh_for_branch_diff": pr_codex_lead_fresh_for_branch_diff},
+        "pr_backstop_verdict": {"path": str(state_dir / "pr-backstop-verdict.local.json"), "exists": pr_backstop_verdict_fresh_for_branch_diff, "fresh_for_branch_diff": pr_backstop_verdict_fresh_for_branch_diff},
+        "pr_review_passed": {"path": str(state_dir / "pr-review-passed.local"), "exists": pr_review_passed_fresh_for_branch_diff, "fresh_for_branch_diff": pr_review_passed_fresh_for_branch_diff},
     }
     warnings: list[str] = []
     blockers: list[str] = []
@@ -350,6 +355,187 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
     assert data["handoff_envelope"]["dual_review_readiness"] == dual
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_handoff_includes_fresh_read_only_pre_pr_dual_review_evidence(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(
+        tmp_path / "pre-pr-fresh-litmus-status.json",
+        repo=repo,
+        status="pr_review_fresh",
+        pr_codex_lead_fresh_for_branch_diff=True,
+        pr_backstop_verdict_fresh_for_branch_diff=True,
+        pr_review_passed_fresh_for_branch_diff=True,
+    )
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    evidence = data["pre_pr_dual_review_evidence"]
+    assert evidence["schema"] == "hermes-busdriver-pre-pr-dual-review-evidence/v0"
+    assert evidence["version"] == 0
+    assert evidence["read_only"] is True
+    assert evidence["advisory_only"] is True
+    assert evidence["source"] == "delivery_status.litmus_status.summary"
+    assert evidence["status"] == "fresh_read_only"
+    assert evidence["ok"] is True
+    assert evidence["litmus_decision_status"] == "pr_review_fresh"
+    assert evidence["freshness"] == {
+        "litmus_passed_fresh_for_head": False,
+        "pr_codex_lead_fresh_for_branch_diff": True,
+        "pr_backstop_verdict_fresh_for_branch_diff": True,
+        "pr_review_passed_fresh_for_branch_diff": True,
+    }
+    assert "path" not in json.dumps(evidence)
+    assert data["handoff_envelope"]["pre_pr_dual_review_evidence"] == evidence
+    assert data["handoff_envelope"]["evidence"]["pre_pr_dual_review_evidence"] == evidence
+    assert_no_finalization_authority(evidence)
+    assert_no_positive_finalization_authority(data)
+
+
+@pytest.mark.parametrize(
+    "litmus_kwargs, expected_status",
+    [
+        ({"status": "commit_litmus_fresh", "litmus_fresh_for_head": True}, "commit_litmus_only"),
+        ({"status": "stale_or_missing"}, "stale_or_missing"),
+        ({"status": "blocked"}, "blocked"),
+        (
+            {
+                "status": "pr_review_fresh",
+                "pr_codex_lead_fresh_for_branch_diff": True,
+                "pr_backstop_verdict_fresh_for_branch_diff": True,
+                "pr_review_passed_fresh_for_branch_diff": False,
+            },
+            "stale_or_missing",
+        ),
+    ],
+)
+def test_readiness_pre_pr_dual_review_evidence_classifies_non_fresh_summaries(
+    tmp_path: Path,
+    litmus_kwargs: dict[str, Any],
+    expected_status: str,
+):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo, **litmus_kwargs)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    evidence = data["pre_pr_dual_review_evidence"]
+    assert evidence["status"] == expected_status
+    assert evidence["ok"] is False
+    assert evidence["read_only"] is True
+    assert evidence["programmatic_execution_allowed"] is False
+    assert evidence["dispatch_allowed"] is False
+    assert data["handoff_envelope"]["evidence"]["pre_pr_dual_review_evidence"] == evidence
+    assert_no_finalization_authority(evidence)
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_pre_pr_dual_review_evidence_fails_closed_on_unsafe_summary(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(
+        tmp_path / "unsafe-litmus-status.json",
+        repo=repo,
+        status="pr_review_fresh",
+        authority_true_key="finalization_allowed",
+        pr_codex_lead_fresh_for_branch_diff=True,
+        pr_backstop_verdict_fresh_for_branch_diff=True,
+        pr_review_passed_fresh_for_branch_diff=True,
+    )
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["litmus_status"]["reason"] == "litmus_status_authority_flags_unsafe"
+    evidence = data["pre_pr_dual_review_evidence"]
+    assert evidence["status"] == "unavailable"
+    assert evidence["ok"] is False
+    assert evidence["reason"] == "litmus_summary_unsafe_or_malformed"
+    assert_no_finalization_authority(evidence)
+    assert_no_positive_finalization_authority(data)
+
+
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        lambda payload: payload.update({"commit_allowed": True}),
+        lambda payload: payload["markers"]["pr_codex_lead"].update({"merge_allowed": True}),
+        lambda payload: payload["markers"]["pr_backstop_verdict"].update({"authority": {"pr_allowed": True}}),
+        lambda payload: payload["markers"]["pr_review_passed"].update({"nested": [{"authority": {"push_allowed": True}}]}),
+    ],
+)
+def test_readiness_pre_pr_dual_review_evidence_fails_closed_on_nested_authority(
+    tmp_path: Path,
+    payload_update,
+):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(
+        tmp_path / "nested-authority-litmus-status.json",
+        repo=repo,
+        status="pr_review_fresh",
+        pr_codex_lead_fresh_for_branch_diff=True,
+        pr_backstop_verdict_fresh_for_branch_diff=True,
+        pr_review_passed_fresh_for_branch_diff=True,
+    )
+    payload = json.loads(litmus.read_text())
+    payload_update(payload)
+    litmus.write_text(json.dumps(payload))
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["litmus_status"]["reason"] == "litmus_status_authority_flags_unsafe"
+    assert data["delivery_status"]["litmus_status"]["summary"]["authority_safe"] is False
+    evidence = data["pre_pr_dual_review_evidence"]
+    assert evidence["status"] == "unavailable"
+    assert evidence["ok"] is False
+    assert evidence["reason"] == "litmus_summary_unsafe_or_malformed"
+    assert_no_finalization_authority(evidence)
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_pre_pr_evidence_rejects_fresh_litmus_with_recursive_authority(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(
+        tmp_path / "fresh-recursive-authority-litmus-status.json",
+        repo=repo,
+        status="pr_review_fresh",
+        pr_codex_lead_fresh_for_branch_diff=True,
+        pr_backstop_verdict_fresh_for_branch_diff=True,
+        pr_review_passed_fresh_for_branch_diff=True,
+    )
+    payload = json.loads(litmus.read_text())
+    payload["markers"]["pr_backstop_verdict"]["authority"] = {"pr_allowed": True}
+    litmus.write_text(json.dumps(payload))
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["litmus_status"]["reason"] == "litmus_status_authority_flags_unsafe"
+    assert data["delivery_status"]["litmus_status"]["summary"]["authority_safe"] is False
+    evidence = data["pre_pr_dual_review_evidence"]
+    assert evidence["status"] == "unavailable"
+    assert evidence["status"] != "fresh_read_only"
+    assert evidence["ok"] is False
+    assert evidence["reason"] == "litmus_summary_unsafe_or_malformed"
+    assert_no_finalization_authority(evidence)
     assert_no_positive_finalization_authority(data)
 
 

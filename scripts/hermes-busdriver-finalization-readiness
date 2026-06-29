@@ -25,6 +25,8 @@ FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 FINALIZATION_GUARDRAILS_VERSION = 0
 DUAL_REVIEW_READINESS_SCHEMA = "hermes-busdriver-dual-review-readiness/v0"
 DUAL_REVIEW_READINESS_VERSION = 0
+PRE_PR_DUAL_REVIEW_EVIDENCE_SCHEMA = "hermes-busdriver-pre-pr-dual-review-evidence/v0"
+PRE_PR_DUAL_REVIEW_EVIDENCE_VERSION = 0
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
 DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
@@ -355,6 +357,82 @@ def dual_review_readiness(phase0: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def marker_flag(summary: dict[str, Any], marker: str, field: str) -> bool | None:
+    markers = summary.get("markers") if isinstance(summary.get("markers"), dict) else {}
+    entry = markers.get(marker)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(field)
+    return value if isinstance(value, bool) else None
+
+
+def pre_pr_dual_review_evidence(litmus_summary: Any) -> dict[str, Any]:
+    """Classify sanitized litmus/pre-PR evidence without reading markers.
+
+    The input must be the already-normalized/redacted
+    delivery_status.litmus_status.summary object. This helper deliberately does
+    not inspect raw marker files and treats missing/malformed/unsafe summary
+    shapes as not fresh.
+    """
+    base = {
+        "schema": PRE_PR_DUAL_REVIEW_EVIDENCE_SCHEMA,
+        "version": PRE_PR_DUAL_REVIEW_EVIDENCE_VERSION,
+        "read_only": True,
+        "advisory_only": True,
+        "source": "delivery_status.litmus_status.summary",
+        "programmatic_execution_allowed": False,
+        "dispatch_allowed": False,
+        **BLOCKED_FLAGS,
+    }
+    if not isinstance(litmus_summary, dict):
+        return {**base, "ok": False, "status": "unavailable", "reason": "litmus_summary_unavailable"}
+
+    decision = litmus_summary.get("decision") if isinstance(litmus_summary.get("decision"), dict) else {}
+    decision_status = decision.get("status") if isinstance(decision.get("status"), str) else None
+    fresh = {
+        "litmus_passed_fresh_for_head": marker_flag(litmus_summary, "litmus_passed", "fresh_for_head"),
+        "pr_codex_lead_fresh_for_branch_diff": marker_flag(litmus_summary, "pr_codex_lead", "fresh_for_branch_diff"),
+        "pr_backstop_verdict_fresh_for_branch_diff": marker_flag(litmus_summary, "pr_backstop_verdict", "fresh_for_branch_diff"),
+        "pr_review_passed_fresh_for_branch_diff": marker_flag(litmus_summary, "pr_review_passed", "fresh_for_branch_diff"),
+    }
+    missing_or_malformed = sorted(key for key, value in fresh.items() if value is None)
+    summary_safe = (
+        litmus_summary.get("schema") == "hermes-busdriver-litmus-status/v0"
+        and litmus_summary.get("read_only") is True
+        and litmus_summary.get("authority_safe") is True
+        and litmus_summary.get("decision_status_recognized") is True
+        and isinstance(litmus_summary.get("ok"), bool)
+        and decision.get("not_busdriver_native_claude_runtime") is True
+        and all(decision.get(key) is False for key in BLOCKED_FLAGS)
+    )
+    evidence = {
+        "litmus_decision_status": decision_status,
+        "freshness": fresh,
+        "missing_or_malformed_fields": missing_or_malformed,
+    }
+    if not summary_safe:
+        return {**base, **evidence, "ok": False, "status": "unavailable", "reason": "litmus_summary_unsafe_or_malformed"}
+    if litmus_summary.get("ok") is False:
+        return {**base, **evidence, "ok": False, "status": "blocked", "reason": "litmus_summary_not_ok"}
+    if decision_status == "blocked":
+        return {**base, **evidence, "ok": False, "status": "blocked", "reason": "litmus_status_blocked"}
+
+    pr_fresh_keys = [
+        "pr_codex_lead_fresh_for_branch_diff",
+        "pr_backstop_verdict_fresh_for_branch_diff",
+        "pr_review_passed_fresh_for_branch_diff",
+    ]
+    all_pr_fresh = all(fresh[key] is True for key in pr_fresh_keys)
+    all_pr_not_fresh = all(fresh[key] is False for key in pr_fresh_keys)
+    if decision_status == "pr_review_fresh" and all_pr_fresh:
+        return {**base, **evidence, "ok": True, "status": "fresh_read_only", "reason": "pre_pr_dual_review_markers_fresh"}
+    if decision_status == "commit_litmus_fresh" and fresh["litmus_passed_fresh_for_head"] is True and all_pr_not_fresh:
+        return {**base, **evidence, "ok": False, "status": "commit_litmus_only", "reason": "commit_litmus_fresh_but_pre_pr_dual_review_not_fresh"}
+    if decision_status == "stale_or_missing":
+        return {**base, **evidence, "ok": False, "status": "stale_or_missing", "reason": "pre_pr_dual_review_stale_or_missing"}
+    return {**base, **evidence, "ok": False, "status": "stale_or_missing", "reason": "pre_pr_dual_review_not_fresh"}
+
+
 def phase0_blockers(phase0: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     if phase0.get("returncode", 0) != 0 or phase0.get("ok") is False:
@@ -459,7 +537,14 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
     }
 
 
-def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any], ready: dict[str, Any], dual_review: dict[str, Any]) -> dict[str, Any]:
+def handoff_envelope(
+    args: argparse.Namespace,
+    delivery: dict[str, Any],
+    phase0: dict[str, Any],
+    ready: dict[str, Any],
+    dual_review: dict[str, Any],
+    pre_pr_evidence: dict[str, Any],
+) -> dict[str, Any]:
     repo = delivery.get("repo") or {}
     busdriver = phase0.get("plugin_root") or {}
     hooks = phase0.get("hooks") or {}
@@ -495,8 +580,10 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),
             "dual_review_readiness": dual_review,
+            "pre_pr_dual_review_evidence": pre_pr_evidence,
         },
         "dual_review_readiness": dual_review,
+        "pre_pr_dual_review_evidence": pre_pr_evidence,
         "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
         "required_next_actions": [
             "Re-read live Busdriver source-of-truth before any repo-changing finalization.",
@@ -517,6 +604,7 @@ def main() -> int:
     phase0, phase0_rc = load_phase0_status(args)
     ready = readiness(args, delivery, phase0)
     dual_review = dual_review_readiness(phase0)
+    pre_pr_evidence = pre_pr_dual_review_evidence((delivery.get("litmus_status") or {}).get("summary"))
     result = {
         "schema": SCHEMA,
         "ok": bool(delivery.get("ok") and phase0.get("status_schema") == "hermes-busdriver-status/v0" and delivery_rc == 0 and phase0_rc == 0),
@@ -525,8 +613,9 @@ def main() -> int:
         "phase0_status_returncode": phase0_rc,
         "readiness": ready,
         "dual_review_readiness": dual_review,
+        "pre_pr_dual_review_evidence": pre_pr_evidence,
         "finalization_guardrails": FINALIZATION_GUARDRAILS,
-        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready, dual_review),
+        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready, dual_review, pre_pr_evidence),
         "delivery_status": delivery,
         "phase0_status": phase0,
         "decision": {"status": ready["status"], "reason": "read_only_finalization_readiness", **BLOCKED_FLAGS},

@@ -501,6 +501,91 @@ def test_delivery_rejects_litmus_status_with_finalization_authority(tmp_path: Pa
     assert_no_delivery_authority(data["decision"])
 
 
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        lambda payload: payload.update({"commit_allowed": True}),
+        lambda payload: payload["markers"]["pr_codex_lead"].update({"merge_allowed": True}),
+        lambda payload: payload["markers"]["pr_backstop_verdict"].update({"authority": {"pr_allowed": True}}),
+        lambda payload: payload["markers"]["pr_review_passed"].update({"nested": [{"authority": {"push_allowed": True}}]}),
+        lambda payload: payload.update({"programmatic_execution_allowed": True}),
+    ],
+)
+def test_delivery_rejects_litmus_status_with_nested_or_top_level_authority(
+    tmp_path: Path,
+    payload_update,
+):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    litmus = litmus_status_fixture(tmp_path / "nested-authority-litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    payload_update(payload)
+    litmus.write_text(json.dumps(payload))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == "litmus_status_authority_flags_unsafe"
+    assert data["litmus_status"]["summary"]["authority_safe"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert "litmus_status_authority_flags_unsafe" in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_delivery_rejects_fresh_litmus_status_with_recursive_authority(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    litmus = litmus_status_fixture(tmp_path / "fresh-recursive-authority-litmus-status.json", repo=repo, status="pr_review_fresh")
+    payload = json.loads(litmus.read_text())
+    payload["markers"]["pr_codex_lead"].update({"exists": True, "fresh_for_branch_diff": True})
+    payload["markers"]["pr_backstop_verdict"].update({"exists": True, "fresh_for_branch_diff": True})
+    payload["markers"]["pr_review_passed"].update({"exists": True, "fresh_for_branch_diff": True})
+    payload["markers"]["pr_backstop_verdict"]["authority"] = {"pr_allowed": True}
+    litmus.write_text(json.dumps(payload))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == "litmus_status_authority_flags_unsafe"
+    assert data["litmus_status"]["summary"]["authority_safe"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert "litmus_status_authority_flags_unsafe" in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_litmus_authority_scan_fails_closed_on_excessive_list_depth() -> None:
+    mod = __import__("runpy").run_path(str(STATUS))
+    payload: dict[str, Any] = {"nested": []}
+    cursor = payload["nested"]
+    for _ in range(1105):
+        child: list[Any] = []
+        cursor.append(child)
+        cursor = child
+
+    assert mod["litmus_payload_authority_flags_false"](payload) is False
+
+
+def test_litmus_authority_scan_rejects_authority_nested_in_list() -> None:
+    mod = __import__("runpy").run_path(str(STATUS))
+    payload: dict[str, Any] = {"nested": [{"authority": {"pr_allowed": True}}]}
+
+    assert mod["litmus_payload_authority_flags_false"](payload) is False
+
+
+def test_litmus_authority_scan_fails_closed_on_excessive_depth() -> None:
+    mod = __import__("runpy").run_path(str(STATUS))
+    payload: dict[str, Any] = {}
+    cursor = payload
+    for _ in range(1105):
+        child: dict[str, Any] = {}
+        cursor["nested"] = child
+        cursor = child
+
+    assert mod["litmus_payload_authority_flags_false"]({"root": payload}) is False
+
+
 def test_delivery_litmus_status_summary_sanitizes_untrusted_evidence(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
