@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against Busdriver `1.71.5` source on `origin/main`.
+Last verified against the installed Busdriver marketplace plugin `1.72.0` used by smoke.
 
 ## Locations
 
@@ -14,7 +14,7 @@ Last verified against Busdriver `1.71.5` source on `origin/main`.
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, and redacted verifier output artifacts**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, and durable run identity/artifact handoff.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, and redacted verifier output artifacts**, a **read-only litmus/pre-PR marker freshness status helper**, a **read-only finalization readiness / handoff envelope**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, marker freshness status, and durable run identity/artifact handoff.
 
 Implemented:
 
@@ -29,6 +29,7 @@ Implemented:
 - `scripts/hermes-busdriver-agent-smoke`
 - `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence
 - `scripts/hermes-busdriver-deliver`
+- `scripts/hermes-busdriver-litmus-status`
 - `scripts/hermes-busdriver-finalization-readiness`
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-pr-grind-loop`
@@ -42,6 +43,7 @@ Implemented:
 - `tests/contract/test_agent_smoke.py`
 - `tests/contract/test_delivery_status.py`
 - `tests/contract/test_deliver.py`
+- `tests/contract/test_litmus_status.py`
 - `tests/contract/test_finalization_readiness.py`
 - `tests/contract/test_pr_grind_check.py`
 - `tests/contract/test_pr_grind_loop.py`
@@ -65,10 +67,10 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 198 passed
-py_compile: hermes-busdriver-status, hermes-busdriver-relay-role, hermes-busdriver-lock, hermes-busdriver-runtime-check, hermes-busdriver-gate, hermes-busdriver-agent-draft, hermes-busdriver-agent-smoke, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-pr-grind-check, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
+contract tests: 260 passed
+py_compile: hermes-busdriver-status, hermes-busdriver-relay-role, hermes-busdriver-lock, hermes-busdriver-runtime-check, hermes-busdriver-gate, hermes-busdriver-agent-draft, hermes-busdriver-agent-smoke, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-litmus-status, hermes-busdriver-pr-grind-check, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
-package_version 1.71.5
+package_version 1.72.0
 hook_event_count 7
 route_count 7
 runtime_check.hook_manifest_available True

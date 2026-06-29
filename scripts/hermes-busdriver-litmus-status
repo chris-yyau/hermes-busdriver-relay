@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+"""Read-only Busdriver litmus/pre-PR marker freshness status."""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Mapping
+
+
+SCHEMA = "hermes-busdriver-litmus-status/v0"
+AUTHORITY_FALSE = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "marker_write_allowed": False,
+}
+HEX64 = re.compile(r"^[a-f0-9]{64}$")
+PR_BYPASS = re.compile(r"^PASS-(FAST|EXCLUDED)-([a-f0-9]{64})-([0-9]+)$")
+COMMIT_EXTERNAL_PASS = re.compile(r"^(external-review-pass|PASS-[0-9]+|PASS-MERGE-[0-9]+|[a-f0-9]{64})$")
+MAX_MARKER_BYTES = 65536
+GIT_TIMEOUT_SECONDS = 30.0
+GIT_TIMEOUT_ENV = "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS"
+
+
+def sanitized_git_env(extra_remove: set[str] | None = None) -> dict[str, str]:
+    remove = {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_LITERAL_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
+        "GIT_ICASE_PATHSPECS",
+        "GIT_TRACE",
+        "GIT_TRACE2",
+    }
+    if extra_remove:
+        remove |= extra_remove
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k not in remove and not k.startswith("GIT_TRACE_") and not k.startswith("GIT_TRACE2_")
+    }
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        data = {
+            "schema": SCHEMA,
+            "read_only": True,
+            "ok": False,
+            "repo": {"root": None, "branch": None, "head": None, "head_timestamp": None, "base_ref": None, "branch_diff_hash": None},
+            "state_dir": {"path": None, "exists": False, "is_symlink": False},
+            "markers": {},
+            "decision": decision("blocked", [f"invalid_cli: {message}"]),
+        }
+        json.dump(data, sys.stdout)
+        sys.stdout.write("\n")
+        raise SystemExit(2)
+
+
+def git_timeout_seconds() -> float:
+    raw = os.environ.get(GIT_TIMEOUT_ENV)
+    if raw is None:
+        return GIT_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return GIT_TIMEOUT_SECONDS
+    if timeout <= 0:
+        return GIT_TIMEOUT_SECONDS
+    return min(timeout, GIT_TIMEOUT_SECONDS)
+
+
+def git_timeout_stderr(args: list[str], timeout: float) -> str:
+    cmd = " ".join(args[:3] + [*args[3:4]])
+    return f"git command timed out after {timeout:g}s: {cmd}"
+
+
+def git(repo: Path, *args: str, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    cmd = ["git", "-C", str(repo), *args]
+    timeout = git_timeout_seconds()
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env if env is not None else sanitized_git_env(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=git_timeout_stderr(cmd, timeout))
+
+
+def decision(status: str, blockers: list[str] | None = None, warnings: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "warnings": warnings or [],
+        "blockers": blockers or [],
+        **AUTHORITY_FALSE,
+        "not_busdriver_native_claude_runtime": True,
+    }
+
+
+def marker_base(path: Path, *, state_dir_unsafe: bool = False) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "path": str(path),
+        "exists": False,
+        "is_symlink": False,
+    }
+    if state_dir_unsafe:
+        out["state_dir_unsafe"] = True
+        out["read_error"] = "refusing_to_follow_state_dir_symlink"
+        return out
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return out
+    except OSError as e:
+        out["stat_error"] = str(e)
+        return out
+    out["exists"] = True
+    out["is_symlink"] = path.is_symlink()
+    out["size"] = st.st_size
+    out["mtime"] = st.st_mtime
+    if out["is_symlink"]:
+        out["unsafe_symlink"] = True
+    elif not stat.S_ISREG(st.st_mode):
+        out["read_error"] = "refusing_to_read_non_regular_file"
+    elif st.st_size > MAX_MARKER_BYTES:
+        out["read_error"] = "refusing_to_read_large_marker"
+    return out
+
+
+def read_marker_text(path: Path) -> tuple[str | None, str | None]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "refusing_to_read_non_regular_file"
+        if st.st_size > MAX_MARKER_BYTES:
+            return None, "refusing_to_read_large_marker"
+        data = os.read(fd, MAX_MARKER_BYTES + 1)
+        if len(data) > MAX_MARKER_BYTES:
+            return None, "refusing_to_read_large_marker"
+        return data.decode().rstrip("\n"), None
+    except OSError as e:
+        if getattr(e, "errno", None) == errno.ELOOP:
+            return None, "refusing_to_follow_symlink"
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001 - report marker read errors as status data
+        return None, str(e)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def add_text_fingerprint(marker: dict[str, Any], text: str) -> None:
+    raw = text.encode()
+    marker["value_sha256"] = hashlib.sha256(raw).hexdigest()
+    marker["value_length"] = len(raw)
+
+
+def commit_marker(path: Path, head_timestamp: int | None, *, state_dir_unsafe: bool = False) -> dict[str, Any]:
+    marker = marker_base(path, state_dir_unsafe=state_dir_unsafe)
+    marker["accepted_by_commit_gate"] = False
+    marker["fresh_for_head"] = False
+    if not marker["exists"]:
+        return marker
+    if marker.get("unsafe_symlink") or marker.get("state_dir_unsafe") or marker.get("read_error"):
+        marker["read_error"] = marker.get("read_error") or "refusing_to_follow_symlink"
+        return marker
+    text, err = read_marker_text(path)
+    if err:
+        marker["read_error"] = err
+        return marker
+    assert text is not None
+    add_text_fingerprint(marker, text)
+    if text.startswith("DEGRADED"):
+        marker["recognized_format"] = "degraded"
+        return marker
+    if text.startswith("SKIPPED-NONE"):
+        marker["recognized_format"] = "skipped_none"
+    elif text.startswith("BUILTIN-"):
+        marker["recognized_format"] = "builtin"
+    elif COMMIT_EXTERNAL_PASS.match(text):
+        marker["recognized_format"] = "external_review_pass"
+    else:
+        marker["recognized_format"] = "unrecognized"
+        return marker
+    marker["accepted_by_commit_gate"] = True
+    marker["fresh_for_head"] = (
+        head_timestamp is not None and marker.get("mtime") is not None and marker["mtime"] > head_timestamp
+    )
+    return marker
+
+
+def pr_review_marker(
+    path: Path, branch_diff_hash: str | None, max_age: int, *, state_dir_unsafe: bool = False
+) -> dict[str, Any]:
+    marker = marker_base(path, state_dir_unsafe=state_dir_unsafe)
+    marker["fresh_for_branch_diff"] = False
+    if not marker["exists"]:
+        return marker
+    if marker.get("unsafe_symlink") or marker.get("state_dir_unsafe") or marker.get("read_error"):
+        marker["read_error"] = marker.get("read_error") or "refusing_to_follow_symlink"
+        return marker
+    text, err = read_marker_text(path)
+    if err:
+        marker["read_error"] = err
+        return marker
+    assert text is not None
+    add_text_fingerprint(marker, text)
+    if branch_diff_hash is None:
+        return marker
+    now = int(time.time())
+    if HEX64.match(text):
+        marker["recognized_format"] = "dual_voice_hash"
+        marker["fresh_for_branch_diff"] = text == branch_diff_hash
+        return marker
+    match = PR_BYPASS.match(text)
+    if match:
+        marker["recognized_format"] = f"pass_{match.group(1).lower()}"
+        marker["diff_hash"] = match.group(2)
+        marker["ts"] = int(match.group(3))
+        marker["age_seconds"] = now - marker["ts"]
+        marker["max_age_seconds"] = max_age
+        marker["fresh_for_branch_diff"] = (
+            marker["diff_hash"] == branch_diff_hash and 0 <= marker["age_seconds"] <= max_age
+        )
+        return marker
+    marker["recognized_format"] = "unrecognized"
+    return marker
+
+
+def json_marker(
+    path: Path, branch_diff_hash: str | None, max_age: int, *, state_dir_unsafe: bool = False
+) -> dict[str, Any]:
+    marker: dict[str, Any] = {
+        **marker_base(path, state_dir_unsafe=state_dir_unsafe),
+        "status_is_pass": False,
+        "diff_hash_matches": False,
+        "ts_valid": False,
+        "age_seconds": None,
+        "max_age_seconds": max_age,
+        "fresh_for_branch_diff": False,
+    }
+    if not marker["exists"]:
+        return marker
+    if marker.get("unsafe_symlink") or marker.get("state_dir_unsafe") or marker.get("read_error"):
+        marker["read_error"] = marker.get("read_error") or "refusing_to_follow_symlink"
+        return marker
+    text, err = read_marker_text(path)
+    if err:
+        marker["read_error"] = err
+        return marker
+    try:
+        data = json.loads(text or "")
+    except Exception as e:  # noqa: BLE001 - status helper preserves parse failures
+        marker["parse_error"] = str(e)
+        return marker
+    if not isinstance(data, dict):
+        marker["parse_error"] = "json_root_must_be_object"
+        return marker
+
+    status = data.get("status")
+    diff_hash = data.get("diff_hash")
+    ts = data.get("ts")
+    marker["status_is_pass"] = status == "PASS"
+    marker["diff_hash_matches"] = isinstance(diff_hash, str) and branch_diff_hash is not None and diff_hash == branch_diff_hash
+    marker["ts_valid"] = isinstance(ts, int) and not isinstance(ts, bool)
+    if marker["ts_valid"]:
+        marker["age_seconds"] = int(time.time()) - ts
+    marker["fresh_for_branch_diff"] = (
+        marker["status_is_pass"]
+        and marker["diff_hash_matches"]
+        and marker["ts_valid"]
+        and marker["age_seconds"] is not None
+        and 0 <= marker["age_seconds"] <= max_age
+    )
+    return marker
+
+
+def safety_probe_error(cp: subprocess.CompletedProcess[str], label: str, *, missing_ok: bool = False) -> str | None:
+    if cp.returncode == 0:
+        return None
+    if missing_ok and cp.returncode == 1 and not cp.stdout.strip() and not cp.stderr.strip():
+        return None
+    detail = (cp.stderr or cp.stdout).strip()
+    return detail or f"{label} failed with exit {cp.returncode}"
+
+
+def unsafe_diff_driver_configured(repo: Path) -> tuple[bool, str | None]:
+    if os.environ.get("GIT_EXTERNAL_DIFF"):
+        return True, None
+    external = git(repo, "config", "--get", "diff.external")
+    if external.returncode == 0 and external.stdout.strip():
+        return True, None
+    err = safety_probe_error(external, "diff.external safety probe", missing_ok=True)
+    if err:
+        return False, err
+    textconv = git(repo, "config", "--get-regexp", r"^diff\..*\.textconv$")
+    if textconv.returncode == 0 and textconv.stdout.strip():
+        return True, None
+    err = safety_probe_error(textconv, "diff textconv safety probe", missing_ok=True)
+    if err:
+        return False, err
+    command = git(repo, "config", "--get-regexp", r"^diff\..*\.command$")
+    if command.returncode == 0 and command.stdout.strip():
+        return True, None
+    err = safety_probe_error(command, "diff command safety probe", missing_ok=True)
+    if err:
+        return False, err
+    return False, None
+
+
+def default_global_attributes_paths(env: Mapping[str, str]) -> list[Path]:
+    paths: list[Path] = []
+    xdg_config_home = env.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        paths.append(Path(xdg_config_home) / "git" / "attributes")
+    home = env.get("HOME")
+    if home:
+        paths.append(Path(home) / ".config" / "git" / "attributes")
+    return paths
+
+
+def default_global_attributes_configured(env: Mapping[str, str]) -> bool:
+    for attrs in default_global_attributes_paths(env):
+        try:
+            attrs.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        else:
+            return True
+    return False
+
+
+def diff_attributes_configured(repo: Path) -> tuple[bool, str | None]:
+    git_env = sanitized_git_env()
+    pathspec = ["--", ".gitattributes", ":(glob)**/.gitattributes"]
+    visible = git(repo, "ls-files", "--cached", "--others", "--exclude-standard", *pathspec, env=git_env)
+    if visible.returncode == 0 and visible.stdout.strip():
+        return True, None
+    err = safety_probe_error(visible, "gitattributes visibility safety probe")
+    if err:
+        return False, err
+    ignored = git(repo, "ls-files", "--others", "--ignored", "--exclude-standard", *pathspec, env=git_env)
+    if ignored.returncode == 0 and ignored.stdout.strip():
+        return True, None
+    err = safety_probe_error(ignored, "ignored gitattributes safety probe")
+    if err:
+        return False, err
+    for dir_flag in ("--git-dir", "--git-common-dir"):
+        git_dir_cp = git(repo, "rev-parse", dir_flag, env=git_env)
+        if git_dir_cp.returncode == 0:
+            git_dir = Path(git_dir_cp.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = repo / git_dir
+            info_attrs = git_dir / "info" / "attributes"
+            try:
+                info_attrs.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return True, None
+            else:
+                return True, None
+        else:
+            err = safety_probe_error(git_dir_cp, f"{dir_flag} safety probe")
+            if err:
+                return False, err
+    core_attrs = git(repo, "config", "--path", "--get", "core.attributesFile", env=git_env)
+    if core_attrs.returncode == 0 and core_attrs.stdout.strip():
+        return True, None
+    err = safety_probe_error(core_attrs, "core.attributesFile safety probe", missing_ok=True)
+    if err:
+        return False, err
+    if default_global_attributes_configured(git_env):
+        return True, None
+    return False, None
+
+
+def branch_diff_hash(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
+    merge_base = git(repo, "merge-base", base_ref, "HEAD")
+    if merge_base.returncode != 0:
+        return None, (merge_base.stderr or merge_base.stdout).strip() or "merge-base failed"
+    if os.environ.get("GIT_DIFF_OPTS"):
+        return None, "GIT_DIFF_OPTS configured"
+    unsafe_diff_driver, safety_error = unsafe_diff_driver_configured(repo)
+    if safety_error:
+        return None, f"safety probe unavailable: {safety_error}"
+    if unsafe_diff_driver:
+        return None, "external diff configured"
+    diff_attributes, safety_error = diff_attributes_configured(repo)
+    if safety_error:
+        return None, f"safety probe unavailable: {safety_error}"
+    if diff_attributes:
+        return None, "diff attributes configured"
+    diff_env = sanitized_git_env({"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"})
+    diff_cmd = [
+        "git",
+        "-C",
+        str(repo),
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        f"{merge_base.stdout.strip()}...HEAD",
+    ]
+    timeout = git_timeout_seconds()
+    try:
+        diff = subprocess.run(
+            diff_cmd,
+            capture_output=True,
+            check=False,
+            env=diff_env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None, git_timeout_stderr(diff_cmd, timeout)
+    if diff.returncode != 0:
+        error = (diff.stderr or diff.stdout).decode(errors="replace").strip()
+        return None, error or "git diff failed"
+    # Match Busdriver pre-pr-gate/run-review-loop shell semantics:
+    # DIFF_OUTPUT=$(git diff ...) strips trailing newlines before printf '%s'.
+    diff_bytes = diff.stdout.rstrip(b"\n")
+    if not diff_bytes:
+        return None, "empty diff"
+    return hashlib.sha256(diff_bytes).hexdigest(), None
+
+
+def resolve_default_base_ref(repo: Path) -> str:
+    origin_head = git(repo, "symbolic-ref", "refs/remotes/origin/HEAD")
+    if origin_head.returncode == 0:
+        ref = origin_head.stdout.strip()
+        prefix = "refs/remotes/"
+        if ref.startswith(prefix) and len(ref) > len(prefix):
+            return ref[len(prefix):]
+    return "origin/main"
+
+
+def repo_status(repo_arg: str, base_ref: str | None) -> tuple[dict[str, Any], str | None]:
+    repo = Path(repo_arg).expanduser()
+    root_cp = git(repo, "rev-parse", "--show-toplevel")
+    if root_cp.returncode != 0:
+        return {
+            "root": str(repo),
+            "branch": None,
+            "head": None,
+            "head_timestamp": None,
+            "base_ref": base_ref,
+            "branch_diff_hash": None,
+        }, (root_cp.stderr or root_cp.stdout).strip() or "not a git repo"
+    root = Path(root_cp.stdout.strip()).resolve()
+    resolved_base_ref = base_ref or resolve_default_base_ref(root)
+    branch_cp = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    head_cp = git(root, "rev-parse", "HEAD")
+    if head_cp.returncode != 0 or not head_cp.stdout.strip():
+        return {
+            "root": str(root),
+            "branch": branch_cp.stdout.strip() if branch_cp.returncode == 0 else None,
+            "head": None,
+            "head_timestamp": None,
+            "base_ref": resolved_base_ref,
+            "branch_diff_hash": None,
+        }, (head_cp.stderr or head_cp.stdout).strip() or "HEAD unavailable"
+    branch = branch_cp.stdout.strip() if branch_cp.returncode == 0 else None
+    head = head_cp.stdout.strip()
+    head_ts_cp = git(root, "log", "-1", "--format=%ct")
+    head_timestamp = int(head_ts_cp.stdout.strip()) if head_ts_cp.returncode == 0 and head_ts_cp.stdout.strip().isdigit() else None
+    diff_hash, diff_error = branch_diff_hash(root, resolved_base_ref)
+    return {
+        "root": str(root),
+        "branch": branch,
+        "head": head,
+        "head_timestamp": head_timestamp,
+        "base_ref": resolved_base_ref,
+        "branch_diff_hash": diff_hash,
+    }, diff_error
+
+
+def pr_state_present(markers: dict[str, dict[str, Any]]) -> bool:
+    return any(markers[name]["exists"] for name in ["pr_codex_lead", "pr_backstop_verdict", "pr_review_passed"])
+
+
+def state_dir_metadata(root: Path, relative_path: Path) -> dict[str, Any]:
+    current = root
+    has_symlink_component = False
+    for index, part in enumerate(relative_path.parts):
+        current = current / part
+        if current.is_symlink():
+            has_symlink_component = True
+            if index < len(relative_path.parts) - 1:
+                path = root / relative_path
+                return {"path": str(path), "exists": False, "is_symlink": False, "has_symlink_component": True}
+    path = root / relative_path
+    try:
+        st = path.lstat()
+        exists = True
+        is_symlink = stat.S_ISLNK(st.st_mode)
+    except FileNotFoundError:
+        exists = False
+        is_symlink = False
+    except OSError:
+        exists = False
+        is_symlink = False
+    return {
+        "path": str(path),
+        "exists": exists,
+        "is_symlink": is_symlink,
+        "has_symlink_component": has_symlink_component,
+    }
+
+
+def build_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    state_name = Path(args.state_dir_name)
+    if state_name.is_absolute() or ".." in state_name.parts:
+        data = {
+            "schema": SCHEMA,
+            "read_only": True,
+            "ok": False,
+            "repo": {"root": args.repo, "branch": None, "head": None, "head_timestamp": None, "base_ref": args.base_ref, "branch_diff_hash": None},
+            "state_dir": {"path": args.state_dir_name, "exists": False, "is_symlink": False},
+            "markers": {},
+            "decision": decision("blocked", ["state_dir_name_must_be_relative"]),
+        }
+        return data, 2
+
+    max_age = args.pr_artifact_max_age_seconds
+    repo, diff_error = repo_status(args.repo, args.base_ref)
+    repo_root = Path(repo["root"])
+    state_dir = repo_root / state_name
+    state_meta = state_dir_metadata(repo_root, state_name)
+    state_dir_unsafe = state_meta["is_symlink"] or state_meta["has_symlink_component"]
+    markers = {
+        "litmus_passed": commit_marker(
+            state_dir / "litmus-passed.local", repo.get("head_timestamp"), state_dir_unsafe=state_dir_unsafe
+        ),
+        "pr_codex_lead": json_marker(
+            state_dir / "pr-codex-lead.local.json", repo["branch_diff_hash"], max_age, state_dir_unsafe=state_dir_unsafe
+        ),
+        "pr_backstop_verdict": json_marker(
+            state_dir / "pr-backstop-verdict.local.json", repo["branch_diff_hash"], max_age, state_dir_unsafe=state_dir_unsafe
+        ),
+        "pr_review_passed": pr_review_marker(
+            state_dir / "pr-review-passed.local",
+            repo["branch_diff_hash"],
+            max_age,
+            state_dir_unsafe=state_dir_unsafe,
+        ),
+    }
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if repo["head"] is None:
+        blockers.append("not_git_repo")
+    if diff_error and pr_state_present(markers):
+        blockers.append(f"branch_diff_hash_unavailable: {diff_error}")
+    elif diff_error:
+        warnings.append(f"branch_diff_hash_unavailable: {diff_error}")
+
+    if blockers:
+        status = "blocked"
+    elif (
+        markers["pr_review_passed"]["fresh_for_branch_diff"]
+        and (
+            markers["pr_review_passed"].get("recognized_format") != "dual_voice_hash"
+            or (
+                markers["pr_codex_lead"]["fresh_for_branch_diff"]
+                and markers["pr_backstop_verdict"]["fresh_for_branch_diff"]
+            )
+        )
+    ):
+        status = "pr_review_fresh"
+    elif markers["litmus_passed"]["fresh_for_head"]:
+        status = "commit_litmus_fresh"
+    else:
+        status = "stale_or_missing"
+
+    data = {
+        "schema": SCHEMA,
+        "read_only": True,
+        "ok": not blockers,
+        "repo": repo,
+        "state_dir": state_meta,
+        "markers": markers,
+        "decision": decision(status, blockers, warnings),
+    }
+    return data, 2 if "not_git_repo" in blockers else 0
+
+
+def max_age_from_env() -> int:
+    raw = os.environ.get("LITMUS_PR_BACKSTOP_MAX_AGE", "3600")
+    return int(raw) if raw.isdigit() else 3600
+
+
+def main() -> int:
+    parser = JsonArgumentParser(description="Read-only Busdriver litmus/pre-PR marker freshness status")
+    parser.add_argument("--repo", required=True, help="Git repo to inspect")
+    parser.add_argument("--base-ref", default=None, help="Base ref for PR-mode diff hash")
+    parser.add_argument("--state-dir-name", default=".claude", help="State dir name relative to repo root")
+    parser.add_argument("--pr-artifact-max-age-seconds", type=int, default=max_age_from_env(), help="Max age for PR lead/backstop artifacts and PASS-FAST/PASS-EXCLUDED markers")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = parser.parse_args()
+
+    try:
+        data, code = build_status(args)
+    except Exception as e:  # noqa: BLE001 - JSON envelope for unexpected failures
+        data, code = {
+            "schema": SCHEMA,
+            "read_only": True,
+            "ok": False,
+            "repo": {"root": args.repo, "branch": None, "head": None, "head_timestamp": None, "base_ref": args.base_ref, "branch_diff_hash": None},
+            "state_dir": {"path": args.state_dir_name, "exists": False, "is_symlink": False},
+            "markers": {},
+            "decision": decision("blocked", [f"internal_error: {e}"]),
+        }, 1
+    json.dump(data, sys.stdout, indent=2 if args.pretty else None, sort_keys=args.pretty)
+    sys.stdout.write("\n")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

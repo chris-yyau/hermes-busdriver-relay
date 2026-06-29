@@ -35,3 +35,11 @@ def test_run_timeout_returns_structured_failure():
     assert result["ok"] is False
     assert result["returncode"] == 124
     assert "timed out" in result["stderr"]
+
+
+def test_smoke_py_compile_covers_all_relay_scripts():
+    smoke = load_smoke_module()
+    scripts_dir = SMOKE.parent
+    expected = sorted(scripts_dir.glob("hermes-busdriver-*"))
+
+    assert sorted(smoke.PY_COMPILE_SCRIPTS) == expected
