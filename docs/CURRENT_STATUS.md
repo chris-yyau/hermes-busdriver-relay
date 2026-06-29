@@ -14,7 +14,7 @@ Last verified against the installed Busdriver marketplace plugin `1.72.2` used b
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, redacted verifier output artifacts, nested helper timeout budgeting, and state-dir-aware litmus evidence forwarding**, a **read-only litmus/pre-PR marker freshness status helper**, a **read-only finalization readiness / handoff envelope with machine-readable finalization guardrails, dual-review readiness evidence, and advisory pre-PR dual-review evidence classification**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, normalized/redacted marker freshness evidence, explicit non-mutating guardrails, dual-review role-readiness evidence, advisory pre-PR dual-review freshness classification, and durable run identity/artifact handoff.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, redacted verifier output artifacts, nested helper timeout budgeting, and state-dir-aware litmus evidence forwarding**, a **read-only litmus/pre-PR marker freshness status helper**, a **read-only finalization readiness / handoff envelope with machine-readable finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive fail-closed authority hardening**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, and **optional relay-role resolution evidence inside delivery/finalization status envelopes**. The non-mutating relay surface is complete for the current policy scope. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, normalized/redacted marker freshness evidence, explicit non-mutating guardrails, dual-review role-readiness evidence, advisory pre-PR dual-review freshness classification, recursive authority-positive fail-closed checks, and durable run identity/artifact handoff.
 
 Implemented:
 
@@ -64,10 +64,10 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent pre-PR31 verified result:
+Most recent post-PR32 verified result on `main` (`a4b032308184ab141d6b3473790a13c2f1f62cc6`):
 
 ```text
-contract tests: 336 passed
+contract tests: 356 passed
 py_compile: all relay scripts passed
 smoke_ok True
 package_version 1.72.2
@@ -86,17 +86,21 @@ finalization_guardrails.schema hermes-busdriver-finalization-guardrails/v0
 finalization_guardrails.read_only True
 dual_review_readiness.schema hermes-busdriver-dual-review-readiness/v0
 dual_review_readiness.programmatic_execution_allowed False
+pre_pr_dual_review_evidence.schema hermes-busdriver-pre-pr-dual-review-evidence/v0
+pre_pr_dual_review_evidence.dispatch_allowed False
+pre_pr_dual_review_evidence.finalization_allowed False
+pre_pr_dual_review_evidence.marker_write_allowed False
 ```
 
 ## Still intentionally deferred
 
-These are not missing work; they are blocked by design until stronger equivalent finalization gates exist:
+These are not missing safe non-mutating relay work; they are blocked by design/policy until a stronger finalization integration surface exists and is explicitly approved:
 
-- `hermes-busdriver-deliver` commit/push/PR/merge execution mode beyond verify-only local verifiers
-- `hermes-busdriver-codex-goal` with commit authority
-- repo-mutating Codex (others temporarily deferred) launcher finalization
+- `hermes-busdriver-deliver` mutating commit/push/PR/merge executor mode and any matching mutating final delivery result envelope
+- `hermes-busdriver-codex-goal` or draft-agent launcher finalization with commit authority
 - `.claude/hermes/jobs` queue
-- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks; `hermes-busdriver-pr-grind-loop` remains read-only and refuses fix rounds
+- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks; `hermes-busdriver-pr-grind-loop` remains read-only and refuses mutating fix rounds / push / re-poll integration
+- Busdriver marker interop or marker writes unless Busdriver defines an explicit safe integration surface
 - deploy / release / publish automation
 - direct MCP/plugin routing
 - any claim that Hermes bare shell execution is Busdriver-gate-safe
@@ -111,7 +115,7 @@ Hermes may use this repo for:
 4. preflight/postflight gates around Hermes-launched draft agents such as Codex (others temporarily deferred);
 5. generating read-only finalization readiness / handoff envelopes for Busdriver/Claude or explicit operator finalization;
 6. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
-7. future v2 work to add agent adapters and commit/PR-capable equivalent gates.
+7. maintaining the current read-only/non-mutating relay envelopes while leaving finalization expansion policy-blocked.
 
 Hermes must not use this repo to bypass Busdriver gates or duplicate Busdriver's source-of-truth.
 
