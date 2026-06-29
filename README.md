@@ -15,11 +15,13 @@ It is **not** a Busdriver clone and must not vendor Claude plugins, MCP configs,
 ## Boundary
 
 ```text
-Hermes = intake, Phase 0 discovery, JIT source reads, read-only status, notification
+Hermes = intake, Phase 0 discovery, JIT source reads, read-only status, non-mutating draft/gate/handoff envelopes, notification
 Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, execution, commits, PRs, merges
 ```
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
+
+Current status after PR #32: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification and recursive fail-closed authority checks. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later.
 
 ## Contents
 
@@ -93,7 +95,7 @@ scripts/hermes-busdriver-runtime-check \
   --pretty
 ```
 
-This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result until a future v2 proves hook-runtime equivalence.
+This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result for the current relay. Bare-shell mutating finalization remains policy-blocked unless a stronger Busdriver-approved equivalence/finalization surface is explicitly added later.
 
 ### Equivalent gate runner
 
@@ -281,4 +283,4 @@ Not allowed yet:
 
 ## Delivery mode
 
-Draft launchers still stop at `needs_busdriver_review`. When the user explicitly asks Hermes to finish the whole job, Hermes may create a branch, commit, open a PR, and merge only through a litmus/pre-PR plus pr-grind-equivalent loop: litmus/pre-PR-equivalent checks before commit/PR, local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and merge only after the PR is clean. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.
+Draft launchers still stop at `needs_busdriver_review`; this repo does not provide an autonomous mutating finalization launcher. Explicit operator-level Hermes Delivery Mode remains a narrow external procedure: when the user explicitly asks Hermes to finish the whole job, Hermes may perform ordinary Git/GitHub finalization only after litmus/pre-PR-equivalent checks, local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and a clean latest-head PR-grind result. That does **not** make mutating commit/push/PR/merge executor code, draft-launcher finalization, marker writes, deploy/release/publish, or direct MCP/plugin routing part of the relay surface. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.
