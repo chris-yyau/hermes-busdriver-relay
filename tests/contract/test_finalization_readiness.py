@@ -799,6 +799,41 @@ def test_default_delivery_status_timeout_covers_forwarded_pr_grind_and_litmus_bu
     assert captured["timeout"] == args.pr_grind_timeout + args.litmus_status_timeout + 30
 
 
+def test_delivery_status_timeout_covers_and_forwards_nested_phase0_status_budget_for_drift_baseline(monkeypatch):
+    mod = __import__("runpy").run_path(str(READINESS))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(READINESS),
+            "--repo",
+            "/tmp/repo",
+            "--plugin-root",
+            "/tmp/plugin",
+            "--user-config",
+            "/tmp/busdriver.json",
+            "--drift-baseline",
+            "/tmp/baseline.json",
+            "--phase0-status-timeout",
+            "17",
+        ],
+    )
+    args = mod["parse_args"]()
+    captured = {"cmd": [], "timeout": 0}
+
+    def fake_run_json(cmd: list[str], timeout: int) -> tuple[dict, int]:
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        return {"ok": True}, 0
+
+    mod["load_delivery_status"].__globals__["run_json"] = fake_run_json
+
+    mod["load_delivery_status"](args)
+
+    assert captured["cmd"][captured["cmd"].index("--phase0-status-timeout") + 1] == "17"
+    assert captured["timeout"] == args.pr_grind_timeout + args.litmus_status_timeout + args.phase0_status_timeout + 30
+
+
 def test_missing_phase0_hooks_block_handoff_even_when_worktree_dirty(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver", hooks=False)

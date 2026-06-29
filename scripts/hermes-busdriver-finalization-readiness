@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--delivery-status-timeout",
         type=int,
         default=None,
-        help="Wrapper timeout for delivery-status; defaults to max(180, pr-grind timeout + litmus-status timeout + 30s margin)",
+        help="Wrapper timeout for delivery-status; defaults to max(180, nested delivery-status helper timeouts + 30s margin)",
     )
     parser.add_argument("--phase0-status-timeout", type=int, default=60)
     parser.add_argument("--pretty", action="store_true")
@@ -111,6 +111,8 @@ def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     if args.delivery_status_timeout is not None:
         return args.delivery_status_timeout
     nested_budget = int(args.pr_grind_timeout or 0) + int(args.litmus_status_timeout or 0) + DELIVERY_STATUS_TIMEOUT_MARGIN
+    if args.drift_baseline:
+        nested_budget += int(args.phase0_status_timeout or 0)
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
 
 
@@ -140,6 +142,8 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--litmus-status-timeout", str(args.litmus_status_timeout)]
     if args.drift_baseline:
         cmd += ["--drift-baseline", args.drift_baseline]
+    if args.phase0_status_timeout is not None:
+        cmd += ["--phase0-status-timeout", str(args.phase0_status_timeout)]
     if args.state_dir:
         cmd += ["--busdriver-state-dir-name", args.state_dir]
     return run_json(cmd, effective_delivery_status_timeout(args))
