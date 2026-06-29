@@ -391,6 +391,141 @@ def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monke
     assert cmd[cmd.index("--pr-grind-timeout") + 1] == "180"
     assert "--litmus-status-timeout" in cmd
     assert cmd[cmd.index("--litmus-status-timeout") + 1] == "60"
+    assert "--relay-role" not in cmd
+    assert "--relay-config" not in cmd
+    assert "--relay-role-timeout" not in cmd
+
+
+def test_delivery_status_forwards_relay_role_config_and_includes_default_relay_budget(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(DELIVER),
+            "--repo",
+            "/tmp/repo",
+            "--plugin-root",
+            "/tmp/plugin",
+            "--relay-role",
+            "relay.pr.backstop",
+            "--relay-config",
+            "/tmp/relay-config.json",
+        ],
+    )
+    args = ns["parse_args"]()
+    captured = {"cmd": None, "timeout": None}
+
+    class CP:
+        stdout = "{}"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs["timeout"]
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+
+    ns["run_delivery_status"](args)
+
+    assert captured["timeout"] == 180 + 60 + 90 + 30
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--relay-role") + 1] == "relay.pr.backstop"
+    assert cmd[cmd.index("--relay-config") + 1] == "/tmp/relay-config.json"
+    assert cmd[cmd.index("--relay-role-timeout") + 1] == "90"
+
+
+def test_delivery_status_forwards_custom_relay_role_timeout_and_budget(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(DELIVER),
+            "--repo",
+            "/tmp/repo",
+            "--plugin-root",
+            "/tmp/plugin",
+            "--pr-grind-timeout",
+            "240",
+            "--litmus-status-timeout",
+            "90",
+            "--relay-role",
+            "relay.pr.backstop",
+            "--relay-config",
+            "/tmp/relay-config.json",
+            "--relay-role-timeout",
+            "45",
+        ],
+    )
+    args = ns["parse_args"]()
+    captured = {"cmd": None, "timeout": None}
+
+    class CP:
+        stdout = "{}"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs["timeout"]
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+
+    ns["run_delivery_status"](args)
+
+    assert captured["timeout"] == 240 + 90 + 45 + 30
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--relay-role") + 1] == "relay.pr.backstop"
+    assert cmd[cmd.index("--relay-config") + 1] == "/tmp/relay-config.json"
+    assert cmd[cmd.index("--relay-role-timeout") + 1] == "45"
+
+
+def test_delivery_status_relay_config_without_role_does_not_include_relay_timeout_budget(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(DELIVER),
+            "--repo",
+            "/tmp/repo",
+            "--plugin-root",
+            "/tmp/plugin",
+            "--relay-config",
+            "/tmp/relay-config.json",
+            "--relay-role-timeout",
+            "45",
+        ],
+    )
+    args = ns["parse_args"]()
+    captured = {"cmd": None, "timeout": None}
+
+    class CP:
+        stdout = "{}"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs["timeout"]
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+
+    ns["run_delivery_status"](args)
+
+    assert captured["timeout"] == 180 + 60 + 30
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--relay-config") + 1] == "/tmp/relay-config.json"
+    assert "--relay-role" not in cmd
+    assert "--relay-role-timeout" not in cmd
 
 
 def test_delivery_status_timeout_covers_custom_pr_grind_and_litmus_budget(monkeypatch):
