@@ -220,7 +220,7 @@ scripts/hermes-busdriver-finalization-readiness \
   --pretty
 ```
 
-This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. The handoff evidence includes delivery-status litmus/pre-PR freshness evidence; when `--relay-role` is supplied, it also includes the same fail-closed resolver output from delivery status. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
+This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. The handoff evidence includes delivery-status litmus/pre-PR freshness evidence; when `--relay-role` is supplied, it also includes the same fail-closed resolver output from delivery status. It also includes a `hermes-busdriver-dual-review-readiness/v0` status envelope for the litmus/pre-PR dual-review gap: programmatic execution remains unsupported here, the needed relay roles are `relay.litmus.reviewer`, `relay.pr.lead`, and `relay.pr.backstop`, configured role routes are surfaced as evidence only, and all dispatch/finalization authority flags remain false. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
 
 ### PR-grind readiness check
 

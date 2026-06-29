@@ -22,6 +22,12 @@ AUTHORITY_KEYS = [
     "publish_allowed",
     "marker_write_allowed",
 ]
+UNSAFE_BOOLEAN_KEYS = [
+    *AUTHORITY_KEYS,
+    "dispatch_allowed",
+    "mutation_allowed",
+    "programmatic_execution_allowed",
+]
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -206,7 +212,7 @@ def assert_no_finalization_authority(authority: dict) -> None:
 def assert_no_positive_finalization_authority(payload: object) -> None:
     if isinstance(payload, dict):
         for key, value in payload.items():
-            if key in AUTHORITY_KEYS:
+            if key in UNSAFE_BOOLEAN_KEYS:
                 assert value is False
             assert_no_positive_finalization_authority(value)
     elif isinstance(payload, list):
@@ -287,6 +293,61 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
         "autonomous_git_github_mutation",
     }
     assert set(data["handoff_envelope"]["forbidden_by_this_helper"]) == set(guardrails["unsupported_mutating_operations"])
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    relay_cfg = tmp_path / "relay-config.json"
+    relay_cfg.write_text(json.dumps({
+        "coding_agent": "codex",
+        "avoid_coding_agent_for_review": True,
+        "routes": {
+            "relay.litmus.reviewer": ["gpt-5.5", "codex"],
+            "relay.pr.lead": ["gpt-5.5", "codex"],
+            "relay.pr.backstop": ["gpt-5.5", "codex"],
+        },
+    }))
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--relay-config", str(relay_cfg))
+
+    assert cp.returncode == 0, cp.stderr
+    dual = data["dual_review_readiness"]
+    assert dual["schema"] == "hermes-busdriver-dual-review-readiness/v0"
+    assert dual["version"] == 0
+    assert dual["read_only"] is True
+    assert dual["status"] == "unsupported_in_this_relay"
+    assert dual["ok"] is False
+    assert dual["programmatic_execution_supported"] is False
+    assert dual["programmatic_execution_allowed"] is False
+    assert dual["not_busdriver_native_claude_runtime"] is True
+    assert dual["required_roles"] == [
+        "relay.litmus.reviewer",
+        "relay.pr.lead",
+        "relay.pr.backstop",
+    ]
+    assert [item["role"] for item in dual["role_requirements"]] == dual["required_roles"]
+    assert dual["role_requirements"][0]["gate"] == "litmus_pre_commit"
+    assert dual["role_requirements"][1]["gate"] == "pre_pr_lead_review"
+    assert dual["role_requirements"][2]["gate"] == "pre_pr_backstop_review"
+    assert set(dual["configured_relay_roles"]) == set(dual["required_roles"])
+    for role, entry in dual["configured_relay_roles"].items():
+        assert entry["role"] == role
+        assert entry["configured"] is True
+        assert entry["selected_agent"] == "gpt-5.5"
+        assert entry["source"] == "relay_config"
+        assert entry["dispatch_allowed"] is False
+        assert entry["mutation_allowed"] is False
+        assert entry["finalization_allowed"] is False
+        assert entry["not_busdriver_native_claude_runtime"] is True
+    assert_no_finalization_authority(dual["authority"])
+    assert data["handoff_envelope"]["evidence"]["dual_review_readiness"] == dual
+    assert data["handoff_envelope"]["dual_review_readiness"] == dual
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
     assert_no_positive_finalization_authority(data)

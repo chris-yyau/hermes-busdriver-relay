@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails and dual-review readiness evidence.
 
 ## Current scope
 
@@ -16,7 +16,7 @@ Relay v2 supports:
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
 - a verify/pr-grind delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, forwards nested helper timeouts/state-dir inputs, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
-- a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails but never finalizes;
+- a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails and dual-review readiness evidence but never finalizes;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
 It still does **not** provide an autonomous finalization launcher. Commit/PR/merge remains an operator-level Delivery Mode path that must run litmus/pre-PR-equivalent checks and a latest-head pr-grind loop.
@@ -26,7 +26,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Partial | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher yet. |
-| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas; no mutating final delivery result envelope yet. |
+| H2 final result envelope/schema | Partial | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emit JSON schemas including read-only dual-review readiness; no mutating final delivery result envelope yet. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -37,7 +37,7 @@ It still does **not** provide an autonomous finalization launcher. Commit/PR/mer
 | H10 concurrency | Improved | `hermes-busdriver-lock` supports per-repo operations; delivery-status/finalization-readiness now report and block on an active per-repo `finalization` lock without granting finalization authority. |
 | H11 external side effects | Partial | Draft paths block side effects; Delivery Mode PR/merge side effects require explicit user intent and clean checks. |
 | H12 sensitive payload | Improved | Verify-only delivery redacts common secret shapes from verifier commands, stdout/stderr tails, helper-error tails, persisted artifacts, and copied litmus summary primitives; finalization/status paths still avoid advisory/model payloads. |
-| H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization; status reports configurable relay equivalents from relay config without claiming Busdriver-native Claude runtime authority. |
+| H13 hook-runtime equivalence | Partial | Runtime check proves Hermes is not inside Claude hooks; draft gate invokes explicit equivalents and refuses finalization; status reports configurable relay equivalents from relay config without claiming Busdriver-native Claude runtime authority, and finalization-readiness surfaces litmus/pre-PR dual-review role readiness as advisory evidence with dispatch/programmatic execution disabled. |
 
 ## Commands
 

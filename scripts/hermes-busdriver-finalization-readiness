@@ -23,6 +23,8 @@ SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
 FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 FINALIZATION_GUARDRAILS_VERSION = 0
+DUAL_REVIEW_READINESS_SCHEMA = "hermes-busdriver-dual-review-readiness/v0"
+DUAL_REVIEW_READINESS_VERSION = 0
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
 DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
@@ -42,6 +44,29 @@ BLOCKED_FLAGS = {
     "publish_allowed": False,
     "marker_write_allowed": False,
 }
+DUAL_REVIEW_REQUIRED_ROLE_SPECS = [
+    {
+        "role": "relay.litmus.reviewer",
+        "gate": "litmus_pre_commit",
+        "native_busdriver_role": "litmus reviewer",
+        "required_before": "commit_or_pr_creation",
+        "evidence_marker": ".claude/litmus-passed.local",
+    },
+    {
+        "role": "relay.pr.lead",
+        "gate": "pre_pr_lead_review",
+        "native_busdriver_role": "PR lead reviewer",
+        "required_before": "pr_creation",
+        "evidence_marker": ".claude/pr-codex-lead.local.json",
+    },
+    {
+        "role": "relay.pr.backstop",
+        "gate": "pre_pr_backstop_review",
+        "native_busdriver_role": "PR security/bugs backstop",
+        "required_before": "pr_creation",
+        "evidence_marker": ".claude/pr-backstop-verdict.local.json",
+    },
+]
 UNSUPPORTED_FINALIZATION_OPERATIONS = [
     "commit",
     "push",
@@ -218,6 +243,8 @@ def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--plugin-root", args.plugin_root]
     if args.user_config:
         cmd += ["--user-config", args.user_config]
+    if args.relay_config:
+        cmd += ["--relay-config", args.relay_config]
     if args.drift_baseline:
         cmd += ["--drift-baseline", args.drift_baseline]
     return run_json(cmd, args.phase0_status_timeout)
@@ -236,6 +263,95 @@ def summarize_pr(pr: str | None, delivery: dict[str, Any]) -> dict[str, Any] | N
         "clean": result.get("clean"),
         "head": result.get("head") or result.get("headRefOid"),
         "url": result.get("url"),
+    }
+
+
+def summarize_dual_review_role(phase0: dict[str, Any], role: str) -> dict[str, Any]:
+    relay_roles = phase0.get("relay_equivalent_roles") if isinstance(phase0.get("relay_equivalent_roles"), dict) else {}
+    roles = relay_roles.get("roles") if isinstance(relay_roles.get("roles"), dict) else {}
+    entry = roles.get(role)
+    base = {
+        "role": role,
+        "configured": False,
+        "status": "unavailable",
+        "selected_agent": None,
+        "configured_route": [],
+        "default_route": [],
+        "source": None,
+        "degraded": True,
+        "config_error": "role_not_reported_by_phase0_status",
+        "dispatch_allowed": False,
+        "mutation_allowed": False,
+        "finalization_allowed": False,
+        "not_busdriver_native_claude_runtime": True,
+    }
+    if not isinstance(entry, dict):
+        return base
+    selected_agent = entry.get("selected_agent") if isinstance(entry.get("selected_agent"), str) else None
+    degraded = entry.get("degraded") is not False
+    config_error = entry.get("config_error") if isinstance(entry.get("config_error"), str) else None
+    return {
+        **base,
+        "configured": True,
+        "status": "degraded" if degraded or not selected_agent else "configured_non_dispatchable_status_only",
+        "native_busdriver_role": entry.get("native_busdriver_role"),
+        "selected_agent": selected_agent,
+        "configured_route": entry.get("configured_route") if isinstance(entry.get("configured_route"), list) else [],
+        "default_route": entry.get("default_route") if isinstance(entry.get("default_route"), list) else [],
+        "source": entry.get("source") if isinstance(entry.get("source"), str) else None,
+        "degraded": degraded,
+        "config_error": config_error,
+        "same_as_coding_agent": entry.get("same_as_coding_agent") is True,
+        "not_busdriver_native_claude_runtime": True,
+        "mutation_allowed": False,
+        "finalization_allowed": False,
+        "dispatch_allowed": False,
+    }
+
+
+def dual_review_readiness(phase0: dict[str, Any]) -> dict[str, Any]:
+    configured_roles = {spec["role"]: summarize_dual_review_role(phase0, spec["role"]) for spec in DUAL_REVIEW_REQUIRED_ROLE_SPECS}
+    phase0_relay_roles = phase0.get("relay_equivalent_roles") if isinstance(phase0.get("relay_equivalent_roles"), dict) else {}
+    relay_config = phase0.get("relay_config") if isinstance(phase0.get("relay_config"), dict) else None
+    config_errors = [
+        key
+        for key in [
+            "relay_config_parse_error",
+            "relay_config_shape_error",
+            "routes_config_error",
+            "coding_agent_config_error",
+            "avoid_coding_agent_for_review_config_error",
+        ]
+        if phase0_relay_roles.get(key)
+    ]
+    return {
+        "schema": DUAL_REVIEW_READINESS_SCHEMA,
+        "version": DUAL_REVIEW_READINESS_VERSION,
+        "read_only": True,
+        "ok": False,
+        "status": "unsupported_in_this_relay",
+        "reason": "programmatic_litmus_pre_pr_dual_review_execution_unsupported",
+        "programmatic_execution_supported": False,
+        "programmatic_execution_allowed": False,
+        "dispatch_allowed": False,
+        "not_busdriver_native_claude_runtime": True,
+        "required_roles": [spec["role"] for spec in DUAL_REVIEW_REQUIRED_ROLE_SPECS],
+        "role_requirements": DUAL_REVIEW_REQUIRED_ROLE_SPECS,
+        "configured_relay_roles": configured_roles,
+        "relay_config": relay_config,
+        "relay_config_errors": config_errors,
+        "authority": BLOCKED_FLAGS,
+        "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR gates",
+        "next_action": "Use this as advisory role-readiness evidence only; do not launch programmatic dual review or write Busdriver markers from this relay.",
+        "unsupported_operations": [
+            "programmatic_litmus_review_execution",
+            "programmatic_pre_pr_lead_review_execution",
+            "programmatic_pre_pr_backstop_review_execution",
+            "busdriver_marker_write",
+            "commit",
+            "push",
+            "pr_create",
+        ],
     }
 
 
@@ -343,7 +459,7 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
     }
 
 
-def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any], ready: dict[str, Any]) -> dict[str, Any]:
+def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any], ready: dict[str, Any], dual_review: dict[str, Any]) -> dict[str, Any]:
     repo = delivery.get("repo") or {}
     busdriver = phase0.get("plugin_root") or {}
     hooks = phase0.get("hooks") or {}
@@ -378,7 +494,9 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "litmus_status": (delivery.get("litmus_status") or {}).get("summary"),
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),
+            "dual_review_readiness": dual_review,
         },
+        "dual_review_readiness": dual_review,
         "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
         "required_next_actions": [
             "Re-read live Busdriver source-of-truth before any repo-changing finalization.",
@@ -398,6 +516,7 @@ def main() -> int:
     delivery, delivery_rc = load_delivery_status(args)
     phase0, phase0_rc = load_phase0_status(args)
     ready = readiness(args, delivery, phase0)
+    dual_review = dual_review_readiness(phase0)
     result = {
         "schema": SCHEMA,
         "ok": bool(delivery.get("ok") and phase0.get("status_schema") == "hermes-busdriver-status/v0" and delivery_rc == 0 and phase0_rc == 0),
@@ -405,8 +524,9 @@ def main() -> int:
         "delivery_status_returncode": delivery_rc,
         "phase0_status_returncode": phase0_rc,
         "readiness": ready,
+        "dual_review_readiness": dual_review,
         "finalization_guardrails": FINALIZATION_GUARDRAILS,
-        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready),
+        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready, dual_review),
         "delivery_status": delivery,
         "phase0_status": phase0,
         "decision": {"status": ready["status"], "reason": "read_only_finalization_readiness", **BLOCKED_FLAGS},

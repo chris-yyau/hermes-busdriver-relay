@@ -60,8 +60,14 @@ def test_finalization_readiness_summary_includes_guardrails_contract():
             "schema": "hermes-busdriver-finalization-guardrails/v0",
             "read_only": True,
         },
+        "dual_review_readiness": {
+            "schema": "hermes-busdriver-dual-review-readiness/v0",
+            "programmatic_execution_allowed": False,
+        },
     })
 
     assert summary["handoff_schema"] == "hermes-busdriver-handoff/v0"
     assert summary["finalization_guardrails"]["schema"] == "hermes-busdriver-finalization-guardrails/v0"
     assert summary["finalization_guardrails"]["read_only"] is True
+    assert summary["dual_review_readiness"]["schema"] == "hermes-busdriver-dual-review-readiness/v0"
+    assert summary["dual_review_readiness"]["programmatic_execution_allowed"] is False

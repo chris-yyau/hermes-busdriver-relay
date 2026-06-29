@@ -87,6 +87,7 @@ def pytest_cmd() -> list[str]:
 def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
     dec = readiness.get("readiness") or {}
     guardrails = readiness.get("finalization_guardrails") or {}
+    dual_review = readiness.get("dual_review_readiness") or {}
     return {
         "status": dec.get("status"),
         "ready": dec.get("ready"),
@@ -96,6 +97,10 @@ def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any
         "finalization_guardrails": {
             "schema": guardrails.get("schema"),
             "read_only": guardrails.get("read_only"),
+        },
+        "dual_review_readiness": {
+            "schema": dual_review.get("schema"),
+            "programmatic_execution_allowed": dual_review.get("programmatic_execution_allowed"),
         },
     }
 
