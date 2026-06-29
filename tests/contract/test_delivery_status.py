@@ -62,6 +62,7 @@ def invoke_with_lock_status(repo: Path, plugin: Path, state: Path, *extra: str) 
 def litmus_status_fixture(
     path: Path,
     *,
+    repo: Path | None = None,
     status: str = "stale_or_missing",
     ok: object = True,
     authority_safe: bool = True,
@@ -83,7 +84,20 @@ def litmus_status_fixture(
     if not authority_safe:
         decision_flags[authority_true_key] = True
     state_dir = path.parent / ".claude"
-    repo_summary = {"root": str(path.parent), "branch": "main", "head": "abc123", "head_timestamp": 1, "base_ref": "origin/main", "branch_diff_hash": None}
+
+    def git_value(*args: str) -> str:
+        if repo is None:
+            return ""
+        return run(["git", *args], repo).stdout.strip()
+
+    repo_summary = {
+        "root": str(repo.resolve()) if repo is not None else str(path.parent),
+        "branch": git_value("branch", "--show-current") or "main",
+        "head": git_value("rev-parse", "HEAD") or "abc123",
+        "head_timestamp": 1,
+        "base_ref": "origin/main",
+        "branch_diff_hash": None,
+    }
     state_summary = {"path": str(state_dir), "exists": False, "is_symlink": False, "has_symlink_component": False}
     markers = {
         "litmus_passed": {"path": str(state_dir / "litmus-passed.local"), "exists": False, "fresh_for_head": False},
@@ -182,7 +196,7 @@ def test_dirty_draft_includes_read_only_litmus_status_stale_warning(tmp_path: Pa
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "litmus-status.json")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo)
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -199,11 +213,54 @@ def test_dirty_draft_includes_read_only_litmus_status_stale_warning(tmp_path: Pa
     assert_no_delivery_authority(data["decision"])
 
 
+@pytest.mark.parametrize("identity_error", ["root", "branch", "head", "missing_branch", "missing_head"])
+def test_litmus_status_repo_identity_mismatch_fails_closed(tmp_path: Path, identity_error: str):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    litmus = litmus_status_fixture(tmp_path / "wrong-repo-litmus-status.json", repo=repo, status="commit_litmus_fresh")
+    payload = json.loads(litmus.read_text())
+    if identity_error == "root":
+        payload["repo"]["root"] = str(tmp_path / "other-repo")
+    elif identity_error == "branch":
+        payload["repo"]["branch"] = "other-branch"
+    elif identity_error == "head":
+        payload["repo"]["head"] = "deadbeef"
+    elif identity_error == "missing_branch":
+        payload["repo"].pop("branch")
+    elif identity_error == "missing_head":
+        payload["repo"].pop("head")
+    litmus.write_text(json.dumps(payload))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == "litmus_status_schema_invalid"
+    assert data["decision"]["status"] == "blocked"
+    assert "litmus_status_schema_invalid" in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_litmus_status_unavailable_blocks_delivery_handoff(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    missing_litmus = tmp_path / "missing-litmus-status"
+
+    data = invoke(repo, plugin, "--litmus-status-script", str(missing_litmus))
+
+    assert data["litmus_status"]["available"] is False
+    assert data["decision"]["status"] == "blocked"
+    assert "litmus_status_unavailable" in data["decision"]["blockers"]
+    assert "litmus_status_unavailable" not in data["decision"]["warnings"]
+    assert_no_delivery_authority(data["decision"])
+
+
 def test_blocked_litmus_status_blocks_delivery_handoff(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "blocked-litmus-status.json", status="blocked")
+    litmus = litmus_status_fixture(tmp_path / "blocked-litmus-status.json", repo=repo, status="blocked")
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -219,7 +276,7 @@ def test_litmus_status_ok_false_blocks_delivery_handoff(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "not-ok-litmus-status.json", status="commit_litmus_fresh", ok=False)
+    litmus = litmus_status_fixture(tmp_path / "not-ok-litmus-status.json", repo=repo, status="commit_litmus_fresh", ok=False)
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -235,7 +292,7 @@ def test_litmus_status_non_boolean_ok_fails_closed_even_when_fresh(tmp_path: Pat
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "malformed-ok-litmus-status.json", status="commit_litmus_fresh", ok="false")
+    litmus = litmus_status_fixture(tmp_path / "malformed-ok-litmus-status.json", repo=repo, status="commit_litmus_fresh", ok="false")
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -252,7 +309,7 @@ def test_litmus_status_unrecognized_decision_status_fails_closed_even_when_ok(tm
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "unknown-status-litmus-status.json", status="surprise_fresh", ok=True)
+    litmus = litmus_status_fixture(tmp_path / "unknown-status-litmus-status.json", repo=repo, status="surprise_fresh", ok=True)
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -269,7 +326,7 @@ def test_unsafe_litmus_status_output_blocks_delivery_handoff(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "unsafe-litmus-status.json", authority_safe=False)
+    litmus = litmus_status_fixture(tmp_path / "unsafe-litmus-status.json", repo=repo, authority_safe=False)
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -280,13 +337,27 @@ def test_unsafe_litmus_status_output_blocks_delivery_handoff(tmp_path: Path):
     assert_no_delivery_authority(data["decision"])
 
 
-@pytest.mark.parametrize("authority_key", ["deploy_allowed", "release_allowed", "publish_allowed", "marker_write_allowed"])
-def test_delivery_rejects_litmus_status_with_deploy_release_publish_authority(tmp_path: Path, authority_key: str):
+@pytest.mark.parametrize(
+    "authority_key",
+    [
+        "finalization_allowed",
+        "commit_allowed",
+        "push_allowed",
+        "pr_allowed",
+        "merge_allowed",
+        "deploy_allowed",
+        "release_allowed",
+        "publish_allowed",
+        "marker_write_allowed",
+    ],
+)
+def test_delivery_rejects_litmus_status_with_finalization_authority(tmp_path: Path, authority_key: str):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
     litmus = litmus_status_fixture(
         tmp_path / f"unsafe-{authority_key}-litmus-status.json",
+        repo=repo,
         authority_safe=False,
         authority_true_key=authority_key,
     )
@@ -306,7 +377,7 @@ def test_delivery_litmus_status_summary_sanitizes_untrusted_evidence(tmp_path: P
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
     sentinel = "ghp_" + "D" * 36
-    litmus = litmus_status_fixture(tmp_path / "malicious-litmus-status.json", malicious_sentinel=sentinel)
+    litmus = litmus_status_fixture(tmp_path / "malicious-litmus-status.json", repo=repo, malicious_sentinel=sentinel)
 
     data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
 
@@ -356,11 +427,37 @@ def test_litmus_status_parse_error_tails_are_redacted_and_bounded(tmp_path: Path
     assert "Authorization: Bearer [REDACTED]" in litmus["stderr"]
 
 
+def test_litmus_status_timeout_with_bytes_output_is_sanitized(monkeypatch, tmp_path: Path):
+    mod = __import__("runpy").run_path(str(STATUS))
+    script = tmp_path / "slow-litmus-status.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    sentinel = "ghp_" + "C" * 36
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, 1, output=f"partial api_key={sentinel}\n".encode(), stderr=f"token={sentinel}\n".encode())
+
+    monkeypatch.setattr(mod["subprocess"], "run", fake_run)
+    args = __import__("types").SimpleNamespace(litmus_status_result_file=None, litmus_status_script=str(script), litmus_status_timeout=1)
+
+    data = mod["run_litmus_status"](args, {"ok": True, "root": str(tmp_path), "branch": "main", "head": "abc123"})
+
+    serialized = json.dumps(data)
+    assert data["ok"] is False
+    assert data["returncode"] == 124
+    assert data["reason"] == "litmus_status_subprocess_failed"
+    assert data["timeout_seconds"] == 1
+    assert sentinel not in serialized
+    assert len(data["stdout_tail"]) <= 4000
+    assert len(data["stderr"]) <= 4000
+    assert "api_key=[REDACTED]" in data["stdout_tail"]
+    assert "token=[REDACTED]" in data["stderr"]
+
+
 def test_litmus_status_nonzero_valid_json_stderr_is_redacted_and_bounded(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "litmus-status.json")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo)
     sentinel = "ghp_" + "B" * 36
     script = tmp_path / "failing-litmus-status.py"
     script.write_text(
@@ -387,7 +484,7 @@ def test_litmus_status_subprocess_nonzero_fails_closed_even_with_valid_json(tmp_
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "litmus-status.json")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo)
     script = tmp_path / "litmus-status-wrapper.py"
     script.write_text(
         "import pathlib, sys\n"
@@ -414,7 +511,7 @@ def test_litmus_status_subprocess_nonzero_fails_closed_even_with_valid_json_ok_f
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     (repo / "src.txt").write_text("draft\n")
-    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", status="commit_litmus_fresh", ok=False)
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo, status="commit_litmus_fresh", ok=False)
     script = tmp_path / "litmus-status-wrapper.py"
     script.write_text(
         "import pathlib, sys\n"

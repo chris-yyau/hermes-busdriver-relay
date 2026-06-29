@@ -433,7 +433,26 @@ def sanitize_litmus_summary(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validated_litmus_status(result: Any, *, source: str, script: str | None = None, returncode: int | None = None, stderr: str = "") -> dict[str, Any]:
+def litmus_repo_identity_matches(result: dict[str, Any], repo: dict[str, Any]) -> bool:
+    if not repo.get("ok"):
+        return True
+    litmus_repo = result.get("repo")
+    if not isinstance(litmus_repo, dict):
+        return False
+    if litmus_repo.get("root") != repo.get("root"):
+        return False
+    repo_branch = repo.get("branch")
+    litmus_branch = litmus_repo.get("branch")
+    if repo_branch and (not isinstance(litmus_branch, str) or litmus_branch != repo_branch):
+        return False
+    repo_head = repo.get("head")
+    litmus_head = litmus_repo.get("head")
+    if repo_head and (not isinstance(litmus_head, str) or litmus_head != repo_head):
+        return False
+    return True
+
+
+def validated_litmus_status(result: Any, *, source: str, repo: dict[str, Any], script: str | None = None, returncode: int | None = None, stderr: str = "") -> dict[str, Any]:
     base: dict[str, Any] = {"available": True, "source": source}
     if script:
         base["script"] = script
@@ -450,6 +469,8 @@ def validated_litmus_status(result: Any, *, source: str, script: str | None = No
         return {**base, "ok": False, "reason": "litmus_status_read_only_unsafe", "summary": summary}
     if not isinstance(result.get("ok"), bool):
         return {**base, "ok": False, "reason": "litmus_status_schema_invalid", "summary": summary}
+    if not litmus_repo_identity_matches(result, repo):
+        return {**base, "ok": False, "reason": "litmus_status_schema_invalid", "summary": summary}
     if not litmus_authority_is_safe(result):
         return {**base, "ok": False, "reason": "litmus_status_authority_flags_unsafe", "summary": summary}
     if not litmus_decision_status_is_recognized(result):
@@ -464,14 +485,37 @@ def run_litmus_status(args: argparse.Namespace, repo: dict[str, Any]) -> dict[st
         data, error = load_json_result_file(args.litmus_status_result_file)
         if error:
             return {"available": True, "source": "fixture", "ok": False, "reason": "litmus_status_malformed", "parse_error": error}
-        return validated_litmus_status(data, source="fixture")
+        return validated_litmus_status(data, source="fixture", repo=repo)
     script = Path(args.litmus_status_script).expanduser() if args.litmus_status_script else ROOT / "scripts" / "hermes-busdriver-litmus-status"
     if not script.exists():
         return {"available": False, "ok": False, "script": str(script), "reason": "hermes-busdriver-litmus-status not available in this branch"}
     if not repo.get("ok"):
         return {"available": True, "ok": False, "script": str(script), "reason": "repo_unavailable"}
     cmd = [sys.executable, str(script), "--repo", repo["root"]]
-    cp = run(cmd, cwd=Path(repo["root"]), timeout=args.litmus_status_timeout)
+    try:
+        cp = run(cmd, cwd=Path(repo["root"]), timeout=args.litmus_status_timeout)
+    except subprocess.TimeoutExpired as e:
+        return {
+            "available": True,
+            "ok": False,
+            "script": str(script),
+            "returncode": 124,
+            "reason": "litmus_status_subprocess_failed",
+            "timeout_seconds": args.litmus_status_timeout,
+            "stdout_tail": sanitized_tail(e.stdout),
+            "stderr": sanitized_tail(e.stderr),
+        }
+    if cp.returncode == 124:
+        return {
+            "available": True,
+            "ok": False,
+            "script": str(script),
+            "returncode": 124,
+            "reason": "litmus_status_subprocess_failed",
+            "timeout_seconds": args.litmus_status_timeout,
+            "stdout_tail": sanitized_tail(cp.stdout),
+            "stderr": sanitized_tail(cp.stderr),
+        }
     try:
         data = json.loads(cp.stdout)
     except Exception as e:  # noqa: BLE001
@@ -485,7 +529,7 @@ def run_litmus_status(args: argparse.Namespace, repo: dict[str, Any]) -> dict[st
             "stdout_tail": sanitized_tail(cp.stdout),
             "stderr": sanitized_tail(cp.stderr),
         }
-    return validated_litmus_status(data, source="script", script=str(script), returncode=cp.returncode, stderr=cp.stderr)
+    return validated_litmus_status(data, source="script", repo=repo, script=str(script), returncode=cp.returncode, stderr=cp.stderr)
 
 
 def relay_role_authority_is_safe(result: dict[str, Any], requested_role: str) -> bool:
@@ -564,7 +608,7 @@ def delivery_decision(repo: dict[str, Any], busdriver: dict[str, Any], markers: 
             warnings.append("relay_role_not_dispatchable")
 
     if not litmus_status.get("available"):
-        warnings.append("litmus_status_unavailable")
+        blockers.append("litmus_status_unavailable")
     elif litmus_status.get("reason") in {
         "litmus_status_malformed",
         "litmus_status_schema_invalid",

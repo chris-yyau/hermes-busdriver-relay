@@ -156,7 +156,7 @@ scripts/hermes-busdriver-delivery-status \
   --pretty
 ```
 
-This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, finalization-lock blocking state, optional PR-grind readiness output, sanitized read-only litmus/pre-PR freshness evidence from `hermes-busdriver-litmus-status`, and optional relay-role resolution from `hermes-busdriver-relay-role`. Stale or missing litmus/pre-PR markers are surfaced as warnings for dirty draft work, malformed or authority-positive litmus-status output fails closed, relay-role resolution is advisory status only, and the envelope still never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
+This read-only Delivery Mode status envelope combines repo state, Busdriver PR-grind source availability, relay capabilities, lock/run summaries, finalization-lock blocking state, optional PR-grind readiness output, sanitized read-only litmus/pre-PR freshness evidence from `hermes-busdriver-litmus-status`, and optional relay-role resolution from `hermes-busdriver-relay-role`. Stale or missing litmus/pre-PR markers are surfaced as warnings for dirty draft work only when the helper evidence is available and schema-safe; missing helper output, malformed/schema-invalid/read-only-unsafe output, repo identity mismatch, authority-positive flags, or litmus-status subprocess failure all fail closed as blockers. Relay-role resolution is advisory status only, and the envelope still never authorizes or performs commit, push, PR creation, merge, marker writes, or deploy/release actions.
 
 ### Delivery dispatcher
 

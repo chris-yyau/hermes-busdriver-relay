@@ -27,7 +27,7 @@ Implemented:
 - `scripts/hermes-busdriver-gate`
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-smoke`
-- `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence and read-only litmus/pre-PR freshness evidence
+- `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence and sanitized read-only litmus/pre-PR freshness evidence that fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver`
 - `scripts/hermes-busdriver-litmus-status`
 - `scripts/hermes-busdriver-finalization-readiness`
