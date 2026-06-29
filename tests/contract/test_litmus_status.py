@@ -116,6 +116,9 @@ def assert_no_authority(decision: dict) -> None:
         "push_allowed",
         "pr_allowed",
         "merge_allowed",
+        "deploy_allowed",
+        "release_allowed",
+        "publish_allowed",
         "marker_write_allowed",
     ]:
         assert decision[key] is False

@@ -27,7 +27,7 @@ Implemented:
 - `scripts/hermes-busdriver-gate`
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-smoke`
-- `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence
+- `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence and sanitized read-only litmus/pre-PR freshness evidence that fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver`
 - `scripts/hermes-busdriver-litmus-status`
 - `scripts/hermes-busdriver-finalization-readiness`
@@ -67,7 +67,7 @@ scripts/hermes-busdriver-smoke \
 Most recent verified result:
 
 ```text
-contract tests: 260 passed
+contract tests: 286 passed
 py_compile: hermes-busdriver-status, hermes-busdriver-relay-role, hermes-busdriver-lock, hermes-busdriver-runtime-check, hermes-busdriver-gate, hermes-busdriver-agent-draft, hermes-busdriver-agent-smoke, hermes-busdriver-delivery-status, hermes-busdriver-finalization-readiness, hermes-busdriver-deliver, hermes-busdriver-litmus-status, hermes-busdriver-pr-grind-check, hermes-busdriver-pr-grind-loop, hermes-busdriver-smoke passed
 smoke_ok True
 package_version 1.72.0
