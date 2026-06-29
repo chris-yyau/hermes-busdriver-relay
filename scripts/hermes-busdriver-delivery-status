@@ -428,7 +428,7 @@ def sanitize_litmus_summary(result: dict[str, Any]) -> dict[str, Any]:
             "warnings": [],
             "blockers": [],
             **{key: False for key in LITMUS_AUTHORITY_FALSE_KEYS},
-            "not_busdriver_native_claude_runtime": decision.get("not_busdriver_native_claude_runtime"),
+            "not_busdriver_native_claude_runtime": decision.get("not_busdriver_native_claude_runtime") is True,
         },
     }
 

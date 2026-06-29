@@ -368,14 +368,15 @@ def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monke
         [str(DELIVER), "--repo", "/tmp/repo", "--plugin-root", "/tmp/plugin", "--pr", "7"],
     )
     args = ns["parse_args"]()
-    captured = {"timeout": None}
+    captured = {"cmd": None, "timeout": None}
 
     class CP:
         stdout = "{}"
         stderr = ""
         returncode = 0
 
-    def fake_run(*_args, **kwargs):
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
@@ -384,6 +385,55 @@ def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monke
     ns["run_delivery_status"](args)
 
     assert captured["timeout"] == 180 + 60 + 30
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "--pr-grind-timeout" in cmd
+    assert cmd[cmd.index("--pr-grind-timeout") + 1] == "180"
+    assert "--litmus-status-timeout" in cmd
+    assert cmd[cmd.index("--litmus-status-timeout") + 1] == "60"
+
+
+def test_delivery_status_timeout_covers_custom_pr_grind_and_litmus_budget(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(DELIVER),
+            "--repo",
+            "/tmp/repo",
+            "--plugin-root",
+            "/tmp/plugin",
+            "--pr",
+            "7",
+            "--pr-grind-timeout",
+            "240",
+            "--litmus-status-timeout",
+            "90",
+        ],
+    )
+    args = ns["parse_args"]()
+    captured = {"cmd": None, "timeout": None}
+
+    class CP:
+        stdout = "{}"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["timeout"] = kwargs["timeout"]
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+
+    ns["run_delivery_status"](args)
+
+    assert captured["timeout"] == 240 + 90 + 30
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[cmd.index("--pr-grind-timeout") + 1] == "240"
+    assert cmd[cmd.index("--litmus-status-timeout") + 1] == "90"
 
 
 def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):

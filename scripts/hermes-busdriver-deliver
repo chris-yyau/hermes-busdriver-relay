@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-wait-seconds", type=float, default=300.0, help="Bounded wait budget passed to execute pr-grind loop")
     parser.add_argument("--poll-interval", type=float, default=30.0, help="Poll interval passed to execute pr-grind loop")
     parser.add_argument("--max-polls", type=int, default=20, help="Poll cap passed to execute pr-grind loop")
+    parser.add_argument("--pr-grind-timeout", type=int, default=DEFAULT_PR_GRIND_TIMEOUT, help="PR-grind timeout passed to delivery-status")
+    parser.add_argument("--litmus-status-timeout", type=int, default=DEFAULT_LITMUS_STATUS_TIMEOUT, help="Litmus-status timeout passed to delivery-status")
     parser.add_argument("--check-timeout", type=float, default=180.0, help="Checker timeout passed to execute pr-grind loop")
     parser.add_argument(
         "--verifier",
@@ -108,10 +110,18 @@ def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
     return text[-limit:]
 
 
+def delivery_status_pr_grind_timeout(args: argparse.Namespace) -> int:
+    return int(getattr(args, "pr_grind_timeout", DEFAULT_PR_GRIND_TIMEOUT) or 0)
+
+
+def delivery_status_litmus_timeout(args: argparse.Namespace) -> int:
+    return int(getattr(args, "litmus_status_timeout", DEFAULT_LITMUS_STATUS_TIMEOUT) or 0)
+
+
 def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     if args.delivery_status_timeout is not None:
         return args.delivery_status_timeout
-    nested_budget = DEFAULT_PR_GRIND_TIMEOUT + DEFAULT_LITMUS_STATUS_TIMEOUT + DELIVERY_STATUS_TIMEOUT_MARGIN
+    nested_budget = delivery_status_pr_grind_timeout(args) + delivery_status_litmus_timeout(args) + DELIVERY_STATUS_TIMEOUT_MARGIN
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
 
 
@@ -123,6 +133,8 @@ def run_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         cmd += ["--plugin-root", args.plugin_root]
     if args.pr:
         cmd += ["--pr", args.pr]
+    cmd += ["--pr-grind-timeout", str(delivery_status_pr_grind_timeout(args))]
+    cmd += ["--litmus-status-timeout", str(delivery_status_litmus_timeout(args))]
     if args.pr_grind_result_file:
         cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
 

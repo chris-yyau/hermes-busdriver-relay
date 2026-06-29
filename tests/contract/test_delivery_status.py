@@ -397,6 +397,25 @@ def test_delivery_litmus_status_summary_sanitizes_untrusted_evidence(tmp_path: P
     assert summary["decision"]["warnings"] == []
     assert summary["decision"]["blockers"] == []
     assert "unexpected_secret" not in summary["decision"]
+    assert summary["decision"]["not_busdriver_native_claude_runtime"] is True
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_litmus_status_summary_sanitizes_invalid_native_runtime_flag(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    sentinel = "ghp_" + "F" * 36
+    litmus = litmus_status_fixture(tmp_path / "malicious-native-runtime-litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    payload["decision"]["not_busdriver_native_claude_runtime"] = f"token={sentinel}"
+    litmus.write_text(json.dumps(payload))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    serialized = json.dumps(data)
+    assert sentinel not in serialized
+    assert data["litmus_status"]["summary"]["decision"]["not_busdriver_native_claude_runtime"] is False
     assert_no_delivery_authority(data["decision"])
 
 
