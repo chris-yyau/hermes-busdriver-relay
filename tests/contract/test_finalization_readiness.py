@@ -11,6 +11,17 @@ ROOT = Path(__file__).resolve().parents[2]
 READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
 PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+AUTHORITY_KEYS = [
+    "finalization_allowed",
+    "commit_allowed",
+    "push_allowed",
+    "pr_allowed",
+    "merge_allowed",
+    "deploy_allowed",
+    "release_allowed",
+    "publish_allowed",
+    "marker_write_allowed",
+]
 
 
 def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -188,18 +199,19 @@ def invoke(repo: Path, plugin: Path, user_config: Path, *extra: str) -> tuple[su
 
 
 def assert_no_finalization_authority(authority: dict) -> None:
-    for key in [
-        "finalization_allowed",
-        "commit_allowed",
-        "push_allowed",
-        "pr_allowed",
-        "merge_allowed",
-        "deploy_allowed",
-        "release_allowed",
-        "publish_allowed",
-        "marker_write_allowed",
-    ]:
+    for key in AUTHORITY_KEYS:
         assert authority[key] is False
+
+
+def assert_no_positive_finalization_authority(payload: object) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in AUTHORITY_KEYS:
+                assert value is False
+            assert_no_positive_finalization_authority(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            assert_no_positive_finalization_authority(item)
 
 
 def test_dirty_tree_generates_read_only_commit_or_pr_handoff_without_side_effects(tmp_path: Path):
@@ -230,6 +242,54 @@ def test_dirty_tree_generates_read_only_commit_or_pr_handoff_without_side_effect
     assert_no_finalization_authority(handoff["authority"])
     assert not (repo / ".claude").exists()
     assert not (repo / ".opencode").exists()
+
+
+def test_readiness_handoff_includes_machine_readable_remaining_finalization_work(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config)
+
+    assert cp.returncode == 0, cp.stderr
+    guardrails = data["finalization_guardrails"]
+    work = guardrails["remaining_work"]
+    assert guardrails["schema"] == "hermes-busdriver-finalization-guardrails/v0"
+    assert guardrails["version"] == 0
+    assert guardrails["read_only"] is True
+    assert guardrails["status"] == "non_mutating_relay_only"
+    assert data["read_only"] is True
+    assert data["handoff_envelope"]["read_only"] is True
+    assert data["handoff_envelope"]["finalization_guardrails"] == guardrails
+    assert data["readiness"]["finalization_guardrail_status"] == guardrails["status"]
+    assert {item["id"] for item in work} == {
+        "deliver-mutating-executor",
+        "mutating-final-result-envelope",
+        "programmatic-litmus-pre-pr-dual-review",
+        "mutating-pr-grind-fix-push-loop",
+        "busdriver-marker-interop",
+    }
+    assert all(item["status"] == "not_implemented" for item in work)
+    assert all(item["safe_to_execute_by_this_helper"] is False for item in work)
+    assert set(guardrails["unsupported_mutating_operations"]) == {
+        "commit",
+        "push",
+        "pr_create",
+        "merge",
+        "deploy",
+        "release",
+        "publish",
+        "busdriver_marker_write",
+        "gate_bypass",
+        "raw_codex_exec",
+        "non_codex_agent_enablement",
+        "autonomous_git_github_mutation",
+    }
+    assert set(data["handoff_envelope"]["forbidden_by_this_helper"]) == set(guardrails["unsupported_mutating_operations"])
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
 
 
 def test_readiness_handoff_propagates_litmus_status_evidence(tmp_path: Path):
