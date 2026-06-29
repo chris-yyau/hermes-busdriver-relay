@@ -21,6 +21,8 @@ DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
+FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
+FINALIZATION_GUARDRAILS_VERSION = 0
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
 DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
@@ -39,6 +41,59 @@ BLOCKED_FLAGS = {
     "release_allowed": False,
     "publish_allowed": False,
     "marker_write_allowed": False,
+}
+UNSUPPORTED_FINALIZATION_OPERATIONS = [
+    "commit",
+    "push",
+    "pr_create",
+    "merge",
+    "deploy",
+    "release",
+    "publish",
+    "busdriver_marker_write",
+    "gate_bypass",
+    "raw_codex_exec",
+    "non_codex_agent_enablement",
+    "autonomous_git_github_mutation",
+]
+FINALIZATION_GUARDRAILS = {
+    "schema": FINALIZATION_GUARDRAILS_SCHEMA,
+    "version": FINALIZATION_GUARDRAILS_VERSION,
+    "read_only": True,
+    "status": "non_mutating_relay_only",
+    "unsupported_mutating_operations": UNSUPPORTED_FINALIZATION_OPERATIONS,
+    "remaining_work": [
+        {
+            "id": "deliver-mutating-executor",
+            "status": "not_implemented",
+            "safe_to_execute_by_this_helper": False,
+            "description": "hermes-busdriver-deliver commit/push/PR/merge executor mode, if ever approved",
+        },
+        {
+            "id": "mutating-final-result-envelope",
+            "status": "not_implemented",
+            "safe_to_execute_by_this_helper": False,
+            "description": "mutating final delivery result envelope",
+        },
+        {
+            "id": "programmatic-litmus-pre-pr-dual-review",
+            "status": "not_implemented",
+            "safe_to_execute_by_this_helper": False,
+            "description": "programmatic litmus/pre-PR dual-review equivalent",
+        },
+        {
+            "id": "mutating-pr-grind-fix-push-loop",
+            "status": "not_implemented",
+            "safe_to_execute_by_this_helper": False,
+            "description": "mutating pr-grind dispatcher loop with fix rounds and push/re-poll integration",
+        },
+        {
+            "id": "busdriver-marker-interop",
+            "status": "not_implemented",
+            "safe_to_execute_by_this_helper": False,
+            "description": "safe Busdriver marker interop only if Busdriver defines an integration surface",
+        },
+    ],
 }
 
 
@@ -283,6 +338,7 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
         "warnings": warnings,
         "next_action": next_action,
         "policy": POLICY,
+        "finalization_guardrail_status": FINALIZATION_GUARDRAILS["status"],
         **BLOCKED_FLAGS,
     }
 
@@ -330,8 +386,9 @@ def handoff_envelope(args: argparse.Namespace, delivery: dict[str, Any], phase0:
             "Run current latest-head pr-grind-equivalent loop before merge.",
             "Treat this envelope as advisory evidence only; do not bypass gates or marker freshness checks.",
         ],
-        "forbidden_by_this_helper": ["commit", "push", "pr_create", "merge", "deploy", "release", "publish", "busdriver_marker_write", "gate_bypass"],
+        "forbidden_by_this_helper": UNSUPPORTED_FINALIZATION_OPERATIONS,
         "authority": BLOCKED_FLAGS,
+        "finalization_guardrails": FINALIZATION_GUARDRAILS,
         "policy": POLICY,
     }
 
@@ -348,6 +405,7 @@ def main() -> int:
         "delivery_status_returncode": delivery_rc,
         "phase0_status_returncode": phase0_rc,
         "readiness": ready,
+        "finalization_guardrails": FINALIZATION_GUARDRAILS,
         "handoff_envelope": handoff_envelope(args, delivery, phase0, ready),
         "delivery_status": delivery,
         "phase0_status": phase0,

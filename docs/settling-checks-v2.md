@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails.
 
 ## Current scope
 
@@ -16,7 +16,7 @@ Relay v2 supports:
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
 - a verify/pr-grind delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, forwards nested helper timeouts/state-dir inputs, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
-- a read-only finalization readiness helper that emits a handoff envelope but never finalizes;
+- a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails but never finalizes;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
 It still does **not** provide an autonomous finalization launcher. Commit/PR/merge remains an operator-level Delivery Mode path that must run litmus/pre-PR-equivalent checks and a latest-head pr-grind loop.
@@ -138,6 +138,8 @@ scripts/hermes-busdriver-litmus-status \
 The litmus-status helper only reports whether existing Busdriver markers match current Busdriver gate semantics. It computes PR hashes with the same plain `git diff` semantics as Busdriver's PR gate, fails closed on ambient `GIT_DIFF_OPTS` instead of hashing a divergent diff, fails closed instead of executing external diff/textconv/diff-driver configuration or hashing through `.gitattributes`, `$GIT_DIR/info/attributes`, or `core.attributesFile` diff selection, refuses to follow state-dir symlink components or marker symlinks and refuses non-regular/oversized marker files, fingerprints marker text / summarizes JSON fields instead of echoing raw contents, requires fresh timestamped PR artifacts, treats empty PR diffs as unavailable, treats commit markers older than the current HEAD timestamp as stale, and keeps finalization, commit, push, PR, merge, and marker-write authority false.
 
 ## Remaining finalization work
+
+`hermes-busdriver-finalization-readiness` exposes this list as `finalization_guardrails.remaining_work` with guardrail schema/version/read-only metadata and repeats it in the handoff envelope so downstream status tooling can distinguish read-only handoff readiness from unsupported mutating/raw-exec operations and unimplemented finalization authority.
 
 - `hermes-busdriver-deliver` commit/push/PR/merge executor mode, if ever approved;
 - mutating final delivery result envelope;

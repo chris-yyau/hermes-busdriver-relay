@@ -84,6 +84,22 @@ def pytest_cmd() -> list[str]:
     return [sys.executable, "-m", "pytest"]
 
 
+def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
+    dec = readiness.get("readiness") or {}
+    guardrails = readiness.get("finalization_guardrails") or {}
+    return {
+        "status": dec.get("status"),
+        "ready": dec.get("ready"),
+        "commit_allowed": dec.get("commit_allowed"),
+        "merge_allowed": dec.get("merge_allowed"),
+        "handoff_schema": (readiness.get("handoff_envelope") or {}).get("schema"),
+        "finalization_guardrails": {
+            "schema": guardrails.get("schema"),
+            "read_only": guardrails.get("read_only"),
+        },
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Safe v1 smoke checks for Hermes Busdriver Relay")
     ap.add_argument("--plugin-root", help="Busdriver plugin root for live status probe")
@@ -139,14 +155,7 @@ def main() -> int:
         if checks[-1]["ok"]:
             try:
                 readiness = json.loads(checks[-1]["stdout"])
-                dec = readiness.get("readiness") or {}
-                checks[-1]["summary"] = {
-                    "status": dec.get("status"),
-                    "ready": dec.get("ready"),
-                    "commit_allowed": dec.get("commit_allowed"),
-                    "merge_allowed": dec.get("merge_allowed"),
-                    "handoff_schema": (readiness.get("handoff_envelope") or {}).get("schema"),
-                }
+                checks[-1]["summary"] = summarize_finalization_readiness(readiness)
                 checks[-1]["stdout"] = "<json omitted; rerun hermes-busdriver-finalization-readiness --pretty for details>"
             except Exception as e:  # noqa: BLE001
                 mark_summary_parse_error(checks[-1], e)

@@ -43,3 +43,25 @@ def test_smoke_py_compile_covers_all_relay_scripts():
     expected = sorted(scripts_dir.glob("hermes-busdriver-*"))
 
     assert sorted(smoke.PY_COMPILE_SCRIPTS) == expected
+
+
+def test_finalization_readiness_summary_includes_guardrails_contract():
+    smoke = load_smoke_module()
+
+    summary = smoke.summarize_finalization_readiness({
+        "readiness": {
+            "status": "blocked",
+            "ready": False,
+            "commit_allowed": False,
+            "merge_allowed": False,
+        },
+        "handoff_envelope": {"schema": "hermes-busdriver-handoff/v0"},
+        "finalization_guardrails": {
+            "schema": "hermes-busdriver-finalization-guardrails/v0",
+            "read_only": True,
+        },
+    })
+
+    assert summary["handoff_schema"] == "hermes-busdriver-handoff/v0"
+    assert summary["finalization_guardrails"]["schema"] == "hermes-busdriver-finalization-guardrails/v0"
+    assert summary["finalization_guardrails"]["read_only"] is True
