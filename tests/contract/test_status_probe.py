@@ -107,7 +107,9 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["relay_config"]["route_keys"] == []
     relay = data["relay_equivalent_roles"]
     assert relay["coding_agent"] == "codex"
-    assert relay["avoid_coding_agent_for_review"] is True
+    assert relay["role_policy"] == "codex_only_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
+    assert relay["avoid_coding_agent_for_review"] is False
     assert set(relay["roles"]) == {
         "relay.litmus.reviewer",
         "relay.blueprint.reviewer_1",
@@ -124,15 +126,17 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     }
     arbiter = relay["roles"]["relay.blueprint.arbiter"]
     assert arbiter["native_busdriver_role"] == "blueprint arbiter"
-    assert arbiter["configured_route"] == ["gpt-5.5", "codex"]
-    assert arbiter["default_route"] == ["gpt-5.5", "codex"]
-    assert arbiter["source"] == "default"
-    assert arbiter["selected_agent"] == "gpt-5.5"
-    assert arbiter["same_as_coding_agent"] is False
-    assert arbiter["configurable"] is True
-    assert arbiter["not_busdriver_native_claude_runtime"] is True
-    assert arbiter["finalization_allowed"] is False
-    assert arbiter["mutation_allowed"] is False
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == ["codex"]
+        assert entry["default_route"] == ["codex"]
+        assert entry["source"] == "default"
+        assert entry["selected_agent"] == "codex"
+        assert entry["same_as_coding_agent"] is True
+        assert entry["degraded"] is False
+        assert entry["configurable"] is True
+        assert entry["not_busdriver_native_claude_runtime"] is True
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
 
 
 def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
@@ -190,6 +194,31 @@ def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
         assert entry["mutation_allowed"] is False
 
 
+def test_status_probe_marks_codex_only_defaults_degraded_when_independence_is_explicitly_requested(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "avoid_coding_agent_for_review": True,
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert relay["role_policy"] == "codex_only_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
+    assert relay["avoid_coding_agent_for_review"] is True
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == ["codex"]
+        assert entry["selected_agent"] == "codex"
+        assert entry["same_as_coding_agent"] is True
+        assert entry["degraded"] is True
+        assert entry["config_error"] is None
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
 def test_status_probe_marks_empty_relay_equivalent_route_degraded(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
@@ -224,7 +253,7 @@ def test_status_probe_marks_invalid_relay_equivalent_route_entries_degraded(tmp_
 
     relay = data["relay_equivalent_roles"]
     assert relay["coding_agent"] == "codex"
-    assert relay["avoid_coding_agent_for_review"] is True
+    assert relay["avoid_coding_agent_for_review"] is False
     assert relay["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"
     assert relay["coding_agent_source"] == "default"

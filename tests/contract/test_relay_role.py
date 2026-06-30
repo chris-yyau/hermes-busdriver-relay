@@ -187,7 +187,7 @@ def test_relay_role_fails_closed_for_invalid_top_level_config_values(tmp_path):
     relay_config.write_text(json.dumps({
         "coding_agent": "",
         "avoid_coding_agent_for_review": "false",
-        "routes": {"relay.pr.backstop": ["gpt-5.5", "codex"]},
+        "routes": {"relay.pr.backstop": ["codex"]},
     }))
 
     code, data = run_role("--role", "relay.pr.backstop", "--relay-config", str(relay_config), check=False)
@@ -199,7 +199,7 @@ def test_relay_role_fails_closed_for_invalid_top_level_config_values(tmp_path):
     assert data["reason"] == "coding_agent_must_be_non_empty_string"
     assert data["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert data["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"
-    assert data["selected"]["selected_agent"] == "gpt-5.5"
+    assert data["selected"]["selected_agent"] == "codex"
     assert data["selected"]["degraded"] is False
     assert data["decision"]["dispatch_allowed"] is False
     assert data["decision"]["mutation_allowed"] is False
