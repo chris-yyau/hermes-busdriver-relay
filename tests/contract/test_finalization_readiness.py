@@ -32,6 +32,13 @@ UNSAFE_BOOLEAN_KEYS = [
     "raw_codex_exec_allowed",
     "non_codex_agent_enablement_allowed",
     "capability_allowed",
+    "repo_mutation_allowed",
+    "external_agents_called",
+    "subprocess_dispatch_called",
+    "codex_called",
+    "github_called",
+    "marker_writes_performed",
+    "repo_mutations_performed",
     "safe_to_execute_by_this_helper",
     "implemented",
     "retired",
@@ -50,6 +57,14 @@ def init_repo(path: Path) -> Path:
     (path / "README.md").write_text("# test\n")
     assert run(["git", "add", "README.md"], path).returncode == 0
     assert run(["git", "commit", "-m", "init"], path).returncode == 0
+    return path
+
+
+def init_uncommitted_repo(path: Path) -> Path:
+    path.mkdir()
+    assert run(["git", "init"], path).returncode == 0
+    assert run(["git", "config", "user.email", "test@example.test"], path).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], path).returncode == 0
     return path
 
 
@@ -320,6 +335,163 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
         "autonomous_git_github_mutation",
     }
     assert set(data["handoff_envelope"]["forbidden_by_this_helper"]) == set(guardrails["unsupported_mutating_operations"])
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_embeds_agent_balance_plan_evidence(tmp_path: Path):
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config)
+
+    assert cp.returncode == 0, cp.stderr
+    plan = data["agent_balance_plan"]
+    assert plan["schema"] == "hermes-busdriver-agent-balance-plan/v0"
+    assert plan["read_only"] is True
+    assert plan["ok"] is True
+    assert plan["execution"]["subprocess_dispatch_called"] is False
+    assert plan["execution"]["repo_mutations_performed"] is False
+    assert data["handoff_envelope"]["agent_balance_plan"] == plan
+    assert data["handoff_envelope"]["evidence"]["agent_balance_plan"] == plan
+    assert_no_positive_finalization_authority(plan)
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_blocks_when_agent_balance_plan_schema_invalid(tmp_path: Path):
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    bad_plan = tmp_path / "bad-agent-balance-plan"
+    bad_plan.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'schema': 'wrong/v0', 'ok': True, 'read_only': True}))\n"
+    )
+    bad_plan.chmod(0o755)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--agent-balance-plan-script", str(bad_plan))
+
+    assert cp.returncode == 1, cp.stderr
+    assert data["ok"] is False
+    assert data["agent_balance_plan_returncode"] == 1
+    plan = data["agent_balance_plan"]
+    assert plan["ok"] is False
+    assert plan["read_only"] is True
+    assert plan["reason"] == "agent_balance_plan_schema_invalid"
+    assert_no_finalization_authority(plan["authority"])
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    assert "agent_balance_plan_unavailable" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert data["handoff_envelope"]["agent_balance_plan"] == plan
+    assert data["handoff_envelope"]["evidence"]["agent_balance_plan"] == plan
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_blocks_when_agent_balance_plan_authority_flags_unsafe(tmp_path: Path):
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    bad_plan = tmp_path / "unsafe-agent-balance-plan"
+    bad_plan.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({\n"
+        "  'schema': 'hermes-busdriver-agent-balance-plan/v0',\n"
+        "  'ok': True,\n"
+        "  'read_only': True,\n"
+        "  'authority': {'finalization_allowed': True},\n"
+        "  'execution': {'codex_called': True}\n"
+        "}))\n"
+    )
+    bad_plan.chmod(0o755)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--agent-balance-plan-script", str(bad_plan))
+
+    assert cp.returncode == 1, cp.stderr
+    assert data["ok"] is False
+    assert data["agent_balance_plan_returncode"] == 1
+    plan = data["agent_balance_plan"]
+    assert plan["ok"] is False
+    assert plan["reason"] == "agent_balance_plan_authority_flags_unsafe"
+    assert "agent_balance_plan_unavailable" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["agent_balance_plan"] == plan
+    assert data["handoff_envelope"]["evidence"]["agent_balance_plan"] == plan
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_blocks_when_agent_balance_plan_subprocess_failed(tmp_path: Path):
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    bad_plan = tmp_path / "failed-agent-balance-plan"
+    bad_plan.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "print(json.dumps({'schema': 'hermes-busdriver-agent-balance-plan/v0', 'ok': False, 'read_only': True}))\n"
+        "sys.exit(2)\n"
+    )
+    bad_plan.chmod(0o755)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--agent-balance-plan-script", str(bad_plan))
+
+    assert cp.returncode == 2, cp.stderr
+    assert data["ok"] is False
+    assert data["agent_balance_plan_returncode"] == 2
+    plan = data["agent_balance_plan"]
+    assert plan["ok"] is False
+    assert plan["reason"] == "agent_balance_plan_subprocess_failed"
+    assert "agent_balance_plan_unavailable" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["agent_balance_plan"] == plan
+    assert data["handoff_envelope"]["evidence"]["agent_balance_plan"] == plan
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
+def test_readiness_blocks_when_agent_balance_plan_times_out(tmp_path: Path):
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    bad_plan = tmp_path / "slow-agent-balance-plan"
+    bad_plan.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "time.sleep(2)\n"
+    )
+    bad_plan.chmod(0o755)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(
+        repo,
+        plugin,
+        user_config,
+        "--agent-balance-plan-script",
+        str(bad_plan),
+        "--agent-balance-plan-timeout",
+        "1",
+    )
+
+    assert cp.returncode == 124, cp.stderr
+    assert data["ok"] is False
+    assert data["agent_balance_plan_returncode"] == 124
+    plan = data["agent_balance_plan"]
+    assert plan["ok"] is False
+    assert plan["reason"] == "agent_balance_plan_subprocess_failed"
+    assert "agent_balance_plan_unavailable" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["agent_balance_plan"] == plan
+    assert data["handoff_envelope"]["evidence"]["agent_balance_plan"] == plan
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
     assert_no_positive_finalization_authority(data)
@@ -1047,7 +1219,13 @@ def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
         "read_only": True,
     }
 
-    data = mod["readiness"](args, delivery, phase0, contract_status)
+    agent_balance_plan = {
+        "schema": "hermes-busdriver-agent-balance-plan/v0",
+        "ok": True,
+        "read_only": True,
+    }
+
+    data = mod["readiness"](args, delivery, phase0, contract_status, agent_balance_plan)
 
     assert data["ready"] is False
     assert data["status"] == "pr_not_clean_read_only"
