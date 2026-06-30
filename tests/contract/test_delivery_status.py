@@ -852,6 +852,9 @@ def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Pa
     data = invoke(repo, plugin, "--relay-role", "relay.pr.backstop", "--relay-config", str(cfg))
 
     assert data["relay_capabilities"]["relay_role"]["available"] is True
+    assert data["relay_capabilities"]["delivery_status"]["available"] is True
+    assert data["relay_capabilities"]["finalization_readiness"]["available"] is True
+    assert data["relay_capabilities"]["finalization_contract_status"]["available"] is True
     role = data["relay_role_resolution"]
     assert role["available"] is True
     assert role["ok"] is True

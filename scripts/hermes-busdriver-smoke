@@ -90,6 +90,8 @@ def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any
     dec = readiness.get("readiness") or {}
     guardrails = readiness.get("finalization_guardrails") or {}
     dual_review = readiness.get("dual_review_readiness") or {}
+    contract_status = readiness.get("finalization_contract_status") or {}
+    contract_authority = contract_status.get("authority") or {}
     return {
         "status": dec.get("status"),
         "ready": dec.get("ready"),
@@ -103,6 +105,17 @@ def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any
         "dual_review_readiness": {
             "schema": dual_review.get("schema"),
             "programmatic_execution_allowed": dual_review.get("programmatic_execution_allowed"),
+        },
+        "finalization_contract_status": {
+            "schema": contract_status.get("schema"),
+            "read_only": contract_status.get("read_only"),
+            "current_policy": contract_status.get("current_policy"),
+            "summary": contract_status.get("summary"),
+            "authority": {
+                "finalization_allowed": contract_authority.get("finalization_allowed"),
+                "marker_write_allowed": contract_authority.get("marker_write_allowed"),
+                "programmatic_execution_allowed": contract_authority.get("programmatic_execution_allowed"),
+            },
         },
     }
 

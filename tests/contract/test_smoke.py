@@ -64,6 +64,17 @@ def test_finalization_readiness_summary_includes_guardrails_contract():
             "schema": "hermes-busdriver-dual-review-readiness/v0",
             "programmatic_execution_allowed": False,
         },
+        "finalization_contract_status": {
+            "schema": "hermes-busdriver-finalization-contract-status/v0",
+            "read_only": True,
+            "current_policy": "non_mutating_relay_only",
+            "summary": {"capability_allowed_count": 0},
+            "authority": {
+                "finalization_allowed": False,
+                "marker_write_allowed": False,
+                "programmatic_execution_allowed": False,
+            },
+        },
     })
 
     assert summary["handoff_schema"] == "hermes-busdriver-handoff/v0"
@@ -71,3 +82,10 @@ def test_finalization_readiness_summary_includes_guardrails_contract():
     assert summary["finalization_guardrails"]["read_only"] is True
     assert summary["dual_review_readiness"]["schema"] == "hermes-busdriver-dual-review-readiness/v0"
     assert summary["dual_review_readiness"]["programmatic_execution_allowed"] is False
+    assert summary["finalization_contract_status"]["schema"] == "hermes-busdriver-finalization-contract-status/v0"
+    assert summary["finalization_contract_status"]["read_only"] is True
+    assert summary["finalization_contract_status"]["current_policy"] == "non_mutating_relay_only"
+    assert summary["finalization_contract_status"]["summary"] == {"capability_allowed_count": 0}
+    assert summary["finalization_contract_status"]["authority"]["finalization_allowed"] is False
+    assert summary["finalization_contract_status"]["authority"]["marker_write_allowed"] is False
+    assert summary["finalization_contract_status"]["authority"]["programmatic_execution_allowed"] is False
