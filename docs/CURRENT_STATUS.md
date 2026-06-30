@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against the installed Busdriver marketplace plugin `1.72.2` used by smoke.
+Last verified against the installed Busdriver marketplace plugin `1.73.0` used by smoke.
 
 ## Locations
 
@@ -65,7 +65,7 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification on `feat/finalization-contract-status` from `origin/main` (`2cea885b059b944534959615eb6966f62a62c31f`) plus this uncommitted read-only slice:
+Most recent local verification on `main` after PR #36 (`87e4c60915f88cda66b7e22cffe70dd97fbd8b7e`):
 
 ```text
 contract tests: 359 passed
@@ -80,6 +80,7 @@ finalization_contract_status.capability_allowed_count 0
 finalization_contract_status.finalization_allowed False
 finalization_contract_status.marker_write_allowed False
 finalization_contract_status.programmatic_execution_allowed False
+finalization_readiness.handoff_embeds_contract_status True
 ```
 
 ## Still intentionally deferred
