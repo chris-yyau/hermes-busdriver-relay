@@ -1,6 +1,6 @@
 # Hermes Busdriver Relay — Project Guide
 
-Private **Hermes-side** relay for the user's Busdriver / Claude Code workflow.
+**Hermes-side** relay for the user's Busdriver / Claude Code workflow.
 This repo holds **Hermes-owned integration artifacts only** — it is not a Busdriver
 clone and must not vendor Claude plugins, MCP configs, runtime markers, credentials,
 or Busdriver skill bodies.
