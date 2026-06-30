@@ -303,7 +303,7 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
         "mutating-pr-grind-fix-push-loop",
         "busdriver-marker-interop",
     }
-    assert all(item["status"] == "not_implemented" for item in work)
+    assert all(item["status"] == "policy_blocked" for item in work)
     assert all(item["safe_to_execute_by_this_helper"] is False for item in work)
     assert set(guardrails["unsupported_mutating_operations"]) == {
         "commit",

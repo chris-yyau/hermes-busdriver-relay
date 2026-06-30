@@ -108,31 +108,31 @@ FINALIZATION_GUARDRAILS = {
     "remaining_work": [
         {
             "id": "deliver-mutating-executor",
-            "status": "not_implemented",
+            "status": "policy_blocked",
             "safe_to_execute_by_this_helper": False,
             "description": "hermes-busdriver-deliver commit/push/PR/merge executor mode, if ever approved",
         },
         {
             "id": "mutating-final-result-envelope",
-            "status": "not_implemented",
+            "status": "policy_blocked",
             "safe_to_execute_by_this_helper": False,
             "description": "mutating final delivery result envelope",
         },
         {
             "id": "programmatic-litmus-pre-pr-dual-review",
-            "status": "not_implemented",
+            "status": "policy_blocked",
             "safe_to_execute_by_this_helper": False,
             "description": "programmatic litmus/pre-PR dual-review equivalent",
         },
         {
             "id": "mutating-pr-grind-fix-push-loop",
-            "status": "not_implemented",
+            "status": "policy_blocked",
             "safe_to_execute_by_this_helper": False,
             "description": "mutating pr-grind dispatcher loop with fix rounds and push/re-poll integration",
         },
         {
             "id": "busdriver-marker-interop",
-            "status": "not_implemented",
+            "status": "policy_blocked",
             "safe_to_execute_by_this_helper": False,
             "description": "safe Busdriver marker interop only if Busdriver defines an integration surface",
         },
