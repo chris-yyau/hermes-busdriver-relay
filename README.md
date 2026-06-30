@@ -1,6 +1,6 @@
 # Hermes Busdriver Relay
 
-Private Hermes-side relay for the user's Busdriver / Claude Code workflow.
+Hermes-side relay for the user's Busdriver / Claude Code workflow.
 
 This repository contains **Hermes-owned integration artifacts only**:
 
@@ -21,7 +21,7 @@ Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, 
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
 
-Current status after PR #33: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification and recursive fail-closed authority checks. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented.
+Current status after PR #35: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification, recursive fail-closed authority checks, and a machine-readable finalization contract status/capability matrix. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented.
 
 ## Contents
 
@@ -47,6 +47,8 @@ scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode
 scripts/hermes-busdriver-litmus-status     Read-only litmus / pre-PR marker freshness status
 scripts/hermes-busdriver-finalization-readiness
                                            Read-only finalization handoff envelope
+scripts/hermes-busdriver-finalization-contract-status
+                                           Read-only ADR 0005 finalization contract/capability matrix
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-pr-grind-loop     Read-only bounded PR-grind polling loop
 scripts/hermes-busdriver-smoke             Safe smoke runner
@@ -225,6 +227,14 @@ scripts/hermes-busdriver-finalization-readiness \
 ```
 
 This helper is read-only and has no execute mode. It combines `hermes-busdriver-delivery-status` with Phase-0 `hermes-busdriver-status` discovery, then emits a `hermes-busdriver-handoff/v0` envelope for Busdriver/Claude or an explicit operator finalizer. The handoff evidence includes delivery-status litmus/pre-PR freshness evidence and a derived `hermes-busdriver-pre-pr-dual-review-evidence/v0` summary. That summary is advisory-only, is computed only from the already-sanitized `delivery_status.litmus_status.summary`, reports `fresh_read_only` only when the sanitized litmus decision is `pr_review_fresh` and all three pre-PR review freshness booleans are true, otherwise reports `commit_litmus_only`, `stale_or_missing`, `blocked`, or `unavailable`, and still keeps dispatch/finalization/marker-write authority false. When `--relay-role` is supplied, the handoff also includes the same fail-closed resolver output from delivery status. It also includes a `hermes-busdriver-dual-review-readiness/v0` status envelope for the litmus/pre-PR dual-review gap: programmatic execution remains unsupported here, the needed relay roles are `relay.litmus.reviewer`, `relay.pr.lead`, and `relay.pr.backstop`, configured role routes are surfaced as evidence only, and all dispatch/finalization authority flags remain false. It may report `ready_for_commit_or_pr_handoff` or `ready_for_merge_handoff`, but all commit/push/PR/merge/deploy/marker-write authority remains false.
+
+### Finalization contract status
+
+```bash
+scripts/hermes-busdriver-finalization-contract-status --pretty
+```
+
+This read-only helper emits `hermes-busdriver-finalization-contract-status/v0`: a machine-readable ADR 0005 status/capability matrix for the same `finalization_guardrails.remaining_work` IDs surfaced by finalization-readiness. Each row remains `status=policy_blocked`, `retired=false`, and `capability_allowed=false`, with missing unlock criteria such as Busdriver-approved seams, mutating schemas, hook-runtime/equivalent proof, programmatic-review contracts, PR-grind mutation contracts, and marker ownership/atomicity/trust semantics. It does not inspect or mutate target repos, write markers, run dispatchers, retire remaining work, or grant finalization authority.
 
 ### PR-grind readiness check
 

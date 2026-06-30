@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, and read-only finalization handoff envelope with machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive fail-closed authority hardening.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, read-only finalization handoff envelope with machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive fail-closed authority hardening, plus a read-only ADR 0005 finalization contract status/capability matrix.
 
 ## Current scope
 
@@ -18,6 +18,7 @@ Relay v2 supports:
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
 - a verify/pr-grind delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, forwards nested helper timeouts/state-dir inputs, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
 - a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive authority-positive fail-closed checks but never finalizes;
+- a read-only finalization contract status helper that emits `hermes-busdriver-finalization-contract-status/v0` with ADR 0005 unlock criteria for each policy-blocked remaining-work item without retiring any item;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
 The read-only/non-mutating relay surface is complete for the current policy scope. It still does **not** provide an autonomous finalization launcher. Commit/PR/merge remains an operator-level Delivery Mode path that must run litmus/pre-PR-equivalent checks and a latest-head pr-grind loop; any scripted mutating finalization executor/envelope, mutating PR-grind fix loop, or marker interop/write path remains intentionally policy-blocked.
@@ -27,7 +28,7 @@ The read-only/non-mutating relay surface is complete for the current policy scop
 | Check | v2 status | Evidence |
 |---|---|---|
 | H1 standalone dispatcher check | Complete for non-mutating relay; finalization policy-blocked | `hermes-busdriver-agent-draft`, `hermes-busdriver-relay-role`, `hermes-busdriver-delivery-status --relay-role`, `hermes-busdriver-pr-grind-check`, and read-only `hermes-busdriver-pr-grind-loop` run standalone; no mutating finalization dispatcher is allowed in the current scope. |
-| H2 final result envelope/schema | Complete for non-mutating relay; finalization policy-blocked | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, and finalization-readiness helper emits JSON schemas including read-only dual-review readiness and advisory pre-PR dual-review evidence classification with recursive authority fail-closed checks; no mutating final delivery result envelope is allowed in the current scope. |
+| H2 final result envelope/schema | Complete for non-mutating relay; finalization policy-blocked | Draft launcher, relay role resolver, delivery-status relay-role and litmus/pre-PR freshness evidence, litmus/pre-PR marker freshness status, PR-grind checker/loop, delivery dispatcher with verify and read-only pr-grind execution plus durable `hermes-busdriver-delivery-run/v0` envelopes and read-only status lookup, finalization-readiness helper emits JSON schemas including read-only dual-review readiness and advisory pre-PR dual-review evidence classification with recursive authority fail-closed checks, and finalization-contract-status emits a read-only ADR 0005 capability matrix; no mutating final delivery result envelope is allowed in the current scope. |
 | H3 dirty tree fail-closed | Implemented for draft | Gate preflight blocks dirty repos unless explicitly allowed; finalization still procedural. |
 | H4 scope containment | Implemented for draft | Postflight blocks out-of-scope draft changes. |
 | H5 gate bypass check | Partial | Draft launchers keep commit/push/PR/merge false; Delivery Mode requires litmus/pre-PR plus pr-grind-equivalent checks but is not yet a dedicated launcher. |
@@ -62,6 +63,10 @@ scripts/hermes-busdriver-finalization-readiness \
   --drift-baseline /path/to/busdriver-status-baseline.json \
   --pr 123 \
   --pretty
+```
+
+```bash
+scripts/hermes-busdriver-finalization-contract-status --pretty
 ```
 
 ```bash
@@ -140,7 +145,7 @@ The litmus-status helper only reports whether existing Busdriver markers match c
 
 ## Policy-blocked finalization surfaces
 
-`hermes-busdriver-finalization-readiness` exposes this list as `finalization_guardrails.remaining_work` with guardrail schema/version/read-only metadata and repeats it in the handoff envelope so downstream status tooling can distinguish read-only handoff readiness from unsupported mutating/raw-exec operations and intentionally unavailable finalization authority. These items are not the next safe implementation slice; they require a stronger Busdriver-approved integration surface, explicit approval, and the ADR 0005 finalization authority integration contract before any mutating implementation work begins.
+`hermes-busdriver-finalization-readiness` exposes this list as `finalization_guardrails.remaining_work` with guardrail schema/version/read-only metadata and repeats it in the handoff envelope so downstream status tooling can distinguish read-only handoff readiness from unsupported mutating/raw-exec operations and intentionally unavailable finalization authority. `hermes-busdriver-finalization-contract-status` reports the same remaining-work IDs as `status=policy_blocked` and records the missing ADR 0005 unlock criteria (Busdriver-approved seams, mutating schemas, hook-runtime/equivalent proof, programmatic-review contracts, PR-grind mutation contracts, and marker ownership/atomicity/trust semantics) without retiring any item. These items are not the next safe mutating implementation slice; they require a stronger Busdriver-approved integration surface, explicit approval, and the ADR 0005 finalization authority integration contract before any mutating implementation work begins.
 
 - `hermes-busdriver-deliver` commit/push/PR/merge executor mode, if ever approved;
 - mutating final delivery result envelope;

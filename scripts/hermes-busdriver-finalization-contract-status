@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Read-only finalization contract status / capability matrix.
+
+This helper is deliberately informational. It translates ADR 0005 and the
+existing finalization-readiness remaining-work IDs into a machine-readable
+policy-blocked capability matrix. It never inspects, writes, or mutates target
+repositories, Busdriver marker state, GitHub, or relay run artifacts.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from typing import Any
+
+SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
+VERSION = 0
+CONTRACT_ADR = "ADRs/0005-finalization-authority-integration-contract.md"
+CURRENT_POLICY = "non_mutating_relay_only"
+GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
+SOURCE_REMAINING_WORK = "scripts/hermes-busdriver-finalization-readiness:finalization_guardrails.remaining_work"
+POLICY = (
+    "Finalization expansion is policy-blocked until a later implementation slice proves the ADR 0005 "
+    "Busdriver-approved authority contract for the specific surface. This status helper is read-only "
+    "and does not retire remaining_work or authorize mutation."
+)
+
+AUTHORITY = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+    "marker_write_allowed": False,
+}
+
+NON_MUTATING_CAPABILITY_FLAGS = {
+    **AUTHORITY,
+    "dispatch_allowed": False,
+    "mutation_allowed": False,
+    "programmatic_execution_allowed": False,
+    "marker_interop_allowed": False,
+    "raw_codex_exec_allowed": False,
+    "non_codex_agent_enablement_allowed": False,
+}
+
+UNSUPPORTED_MUTATING_OPERATIONS = [
+    "commit",
+    "push",
+    "pr_create",
+    "merge",
+    "deploy",
+    "release",
+    "publish",
+    "busdriver_marker_write",
+    "gate_bypass",
+    "raw_codex_exec",
+    "non_codex_agent_enablement",
+    "autonomous_git_github_mutation",
+]
+
+ADR_AUTHORITY_SOURCES = [
+    "explicit_user_intent_for_exact_side_effect",
+    "busdriver_source_of_truth_approval",
+    "hook_runtime_or_equivalent_proof",
+    "fresh_repo_pr_evidence",
+    "fresh_gate_review_evidence",
+    "concurrency_authority",
+    "data_boundary_authority",
+    "schema_authority",
+]
+
+FUTURE_SCHEMAS_REQUIRED = [
+    "hermes-busdriver-finalization-authority/v0",
+    "hermes-busdriver-mutating-delivery-run/v0",
+    "hermes-busdriver-pr-grind-mutation-loop/v0",
+    "hermes-busdriver-dual-review-execution/v0",
+    "hermes-busdriver-marker-interop/v0",
+]
+
+CAPABILITY_MATRIX = [
+    {
+        "id": "deliver-mutating-executor",
+        "surface": "mutating commit/push/PR/merge executor",
+        "current_relay_surface": "read_only_delivery_status_verify_only_dispatch_and_finalization_handoff",
+        "operations": ["commit", "push", "pr_create", "merge"],
+        "missing_unlock_criteria": [
+            "busdriver_approved_seam",
+            "mutating_schema",
+            "hook_runtime_or_equivalent_proof",
+            "explicit_user_intent_per_operation",
+            "fresh_repo_pr_evidence",
+            "fresh_gate_review_evidence",
+            "finalization_lock_authority",
+            "data_boundary_policy",
+            "side_effect_transcript",
+            "postflight_reconciliation",
+            "fail_closed_contract_tests",
+        ],
+        "missing_future_schemas": [
+            "hermes-busdriver-finalization-authority/v0",
+            "hermes-busdriver-mutating-delivery-run/v0",
+        ],
+        "adr_sections": [
+            "Authority Sources",
+            "Required Unlock Criteria by Surface / Mutating commit/push/PR/merge executor and envelope",
+        ],
+        "description": "hermes-busdriver-deliver commit/push/PR/merge executor mode, if ever approved",
+    },
+    {
+        "id": "mutating-final-result-envelope",
+        "surface": "mutating final delivery result envelope",
+        "current_relay_surface": "read_only_handoff_and_non_mutating_delivery_run_envelopes",
+        "operations": ["mutating_delivery_result"],
+        "missing_unlock_criteria": [
+            "busdriver_approved_seam",
+            "mutating_schema",
+            "schema_authority",
+            "authority_evidence_schema",
+            "durable_redacted_run_artifact_contract",
+            "lock_preflight_postflight_state",
+            "side_effect_transcript",
+            "postflight_reconciliation",
+            "malformed_or_authority_positive_rejection_tests",
+        ],
+        "missing_future_schemas": [
+            "hermes-busdriver-finalization-authority/v0",
+            "hermes-busdriver-mutating-delivery-run/v0",
+        ],
+        "adr_sections": [
+            "Schemas and Evidence Required",
+            "Retiring finalization_guardrails.remaining_work",
+        ],
+        "description": "mutating final delivery result envelope",
+    },
+    {
+        "id": "programmatic-litmus-pre-pr-dual-review",
+        "surface": "programmatic litmus/pre-PR dual-review execution",
+        "current_relay_surface": "advisory_read_only_dual_review_readiness_and_pre_pr_evidence_classification",
+        "operations": ["litmus_review", "pre_pr_lead_review", "pre_pr_backstop_review"],
+        "missing_unlock_criteria": [
+            "busdriver_approved_reviewer_role_mappings_or_native_invocation_seam",
+            "reviewer_independence_contract",
+            "prompt_data_egress_policy",
+            "reviewer_input_schema",
+            "reviewer_output_schema",
+            "aggregation_semantics",
+            "marker_write_separation_contract",
+            "fail_closed_contract_tests",
+        ],
+        "missing_future_schemas": ["hermes-busdriver-dual-review-execution/v0"],
+        "adr_sections": [
+            "Required Unlock Criteria by Surface / Programmatic litmus/pre-PR dual-review execution",
+            "Data Egress, Reviewer Ownership, and Marker Ownership",
+        ],
+        "description": "programmatic litmus/pre-PR dual-review equivalent",
+    },
+    {
+        "id": "mutating-pr-grind-fix-push-loop",
+        "surface": "mutating PR-grind fix/push/re-poll loop",
+        "current_relay_surface": "read_only_pr_grind_check_loop_and_non_finalizing_delivery_wrapper",
+        "operations": ["fix_round", "push", "pr_repoll"],
+        "missing_unlock_criteria": [
+            "busdriver_approved_pr_grind_seam",
+            "hook_runtime_or_equivalent_proof",
+            "latest_pr_head_tracking",
+            "bounded_wait_poll_fix_budgets",
+            "actionable_feedback_classification",
+            "required_check_semantics",
+            "gated_fix_executor",
+            "push_and_repoll_evidence",
+            "post_push_reconciliation",
+            "fail_closed_contract_tests",
+        ],
+        "missing_future_schemas": ["hermes-busdriver-pr-grind-mutation-loop/v0"],
+        "adr_sections": [
+            "Required Unlock Criteria by Surface / Mutating PR-grind fix/push/re-poll loop",
+            "Fail-Closed Conditions",
+        ],
+        "description": "mutating pr-grind dispatcher loop with fix rounds and push/re-poll integration",
+    },
+    {
+        "id": "busdriver-marker-interop",
+        "surface": "Busdriver marker interop and marker writes",
+        "current_relay_surface": "read_only_normalized_redacted_marker_status_only",
+        "operations": ["busdriver_marker_write", "busdriver_marker_update", "busdriver_marker_consume"],
+        "missing_unlock_criteria": [
+            "busdriver_approved_marker_integration_surface",
+            "marker_ownership_contract",
+            "allowed_marker_paths_and_symlink_safety",
+            "marker_schema",
+            "atomic_write_contract",
+            "marker_lifecycle_contract",
+            "marker_audit_provenance",
+            "forged_stale_foreign_marker_detection",
+            "busdriver_trust_semantics",
+            "fail_closed_contract_tests",
+        ],
+        "missing_future_schemas": ["hermes-busdriver-marker-interop/v0"],
+        "adr_sections": [
+            "Required Unlock Criteria by Surface / Marker interop and marker writes",
+            "Data Egress, Reviewer Ownership, and Marker Ownership",
+        ],
+        "description": "safe Busdriver marker interop only if Busdriver defines an integration surface",
+    },
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read-only finalization contract status / capability matrix")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    return parser.parse_args()
+
+
+def matrix_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in CAPABILITY_MATRIX:
+        rows.append({
+            **item,
+            "status": "policy_blocked",
+            "retired": False,
+            "implemented": False,
+            "safe_to_execute_by_this_helper": False,
+            "capability_allowed": False,
+            "authority": dict(NON_MUTATING_CAPABILITY_FLAGS),
+            "missing_authority_sources": list(ADR_AUTHORITY_SOURCES),
+        })
+    return rows
+
+
+def build_status() -> dict[str, Any]:
+    rows = matrix_rows()
+    retired_ids = [row["id"] for row in rows if row["retired"]]
+    return {
+        "schema": SCHEMA,
+        "version": VERSION,
+        "ok": True,
+        "read_only": True,
+        "contract_adr": CONTRACT_ADR,
+        "source_remaining_work": SOURCE_REMAINING_WORK,
+        "current_policy": CURRENT_POLICY,
+        "policy": POLICY,
+        "guardrails_schema": GUARDRAILS_SCHEMA,
+        "unsupported_mutating_operations": list(UNSUPPORTED_MUTATING_OPERATIONS),
+        "authority": dict(NON_MUTATING_CAPABILITY_FLAGS),
+        "required_authority_sources": list(ADR_AUTHORITY_SOURCES),
+        "future_schemas_required": list(FUTURE_SCHEMAS_REQUIRED),
+        "remaining_work": rows,
+        "retired_remaining_work": retired_ids,
+        "summary": {
+            "remaining_work_count": len(rows),
+            "policy_blocked_count": sum(1 for row in rows if row["status"] == "policy_blocked"),
+            "retired_count": len(retired_ids),
+            "capability_allowed_count": sum(1 for row in rows if row["capability_allowed"]),
+            "finalization_flags_policy": CURRENT_POLICY,
+        },
+        "decision": {
+            "status": "policy_blocked",
+            "reason": "adr_0005_unlock_contract_not_satisfied",
+            **NON_MUTATING_CAPABILITY_FLAGS,
+        },
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    print(json.dumps(build_status(), indent=2 if args.pretty else None, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
