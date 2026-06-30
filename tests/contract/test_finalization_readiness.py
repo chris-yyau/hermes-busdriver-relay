@@ -1094,6 +1094,59 @@ def test_readiness_handoff_litmus_status_evidence_normalizes_untrusted_top_level
     assert_no_finalization_authority(data["decision"])
 
 
+@pytest.mark.parametrize(
+    ("mutate_payload", "expected_reason"),
+    [
+        (lambda _payload: ["not", "an", "object"], "litmus_status_malformed"),
+        (lambda payload: {**payload, "read_only": False}, "litmus_status_read_only_unsafe"),
+        (lambda payload: {**payload, "ok": "true"}, "litmus_status_schema_invalid"),
+    ],
+    ids=["non_object", "read_only_false", "ok_non_boolean"],
+)
+def test_readiness_handoff_litmus_status_malformed_or_invalid_top_level_fields_fail_closed(
+    tmp_path: Path,
+    mutate_payload,
+    expected_reason: str,
+):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    litmus.write_text(json.dumps(mutate_payload(payload)))
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["litmus_status"]["ok"] is False
+    assert data["delivery_status"]["litmus_status"]["reason"] == expected_reason
+    assert data["readiness"]["status"] == "blocked"
+    assert expected_reason in data["readiness"]["blockers"]
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+def test_readiness_handoff_litmus_status_invalid_json_fails_closed(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = tmp_path / "litmus-status.json"
+    litmus.write_text("{not-json\n")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["litmus_status"]["ok"] is False
+    assert data["delivery_status"]["litmus_status"]["reason"] == "litmus_status_malformed"
+    assert data["handoff_envelope"]["evidence"]["litmus_status"] is None
+    assert data["readiness"]["status"] == "blocked"
+    assert "litmus_status_malformed" in data["readiness"]["blockers"]
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
 def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
