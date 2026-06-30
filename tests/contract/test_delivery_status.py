@@ -843,6 +843,47 @@ def test_litmus_status_subprocess_nonzero_fails_closed_even_with_valid_json_ok_f
     assert data["decision"]["marker_write_allowed"] is False
 
 
+@pytest.mark.parametrize(
+    ("mutate_payload", "expected_reason"),
+    [
+        (lambda _payload: ["not", "an", "object"], "litmus_status_malformed"),
+        (lambda payload: {**payload, "read_only": False}, "litmus_status_read_only_unsafe"),
+        (lambda payload: {**payload, "ok": "true"}, "litmus_status_schema_invalid"),
+    ],
+    ids=["non_object", "read_only_false", "ok_non_boolean"],
+)
+def test_litmus_status_fixture_malformed_or_invalid_top_level_fields_fail_closed(tmp_path: Path, mutate_payload, expected_reason: str):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    litmus = litmus_status_fixture(tmp_path / "litmus-status.json", repo=repo)
+    payload = json.loads(litmus.read_text())
+    litmus.write_text(json.dumps(mutate_payload(payload)))
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == expected_reason
+    assert data["decision"]["status"] == "blocked"
+    assert expected_reason in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
+
+def test_litmus_status_fixture_invalid_json_fails_closed(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    (repo / "src.txt").write_text("draft\n")
+    litmus = tmp_path / "litmus-status.json"
+    litmus.write_text("{not-json\n")
+
+    data = invoke(repo, plugin, "--litmus-status-result-file", str(litmus))
+
+    assert data["litmus_status"]["ok"] is False
+    assert data["litmus_status"]["reason"] == "litmus_status_malformed"
+    assert data["decision"]["status"] == "blocked"
+    assert "litmus_status_malformed" in data["decision"]["blockers"]
+    assert_no_delivery_authority(data["decision"])
+
 
 def assert_capability_entry_is_metadata_only(entry: dict[str, Any]) -> None:
     assert set(entry) == {"path", "available"}
