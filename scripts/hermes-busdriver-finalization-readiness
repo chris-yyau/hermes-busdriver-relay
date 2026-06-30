@@ -20,11 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization-contract-status"
+AGENT_BALANCE_PLAN = ROOT / "scripts" / "hermes-busdriver-agent-balance-plan"
 SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
 FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 FINALIZATION_GUARDRAILS_VERSION = 0
 FINALIZATION_CONTRACT_STATUS_SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
+AGENT_BALANCE_PLAN_SCHEMA = "hermes-busdriver-agent-balance-plan/v0"
 DUAL_REVIEW_READINESS_SCHEMA = "hermes-busdriver-dual-review-readiness/v0"
 DUAL_REVIEW_READINESS_VERSION = 0
 PRE_PR_DUAL_REVIEW_EVIDENCE_SCHEMA = "hermes-busdriver-pre-pr-dual-review-evidence/v0"
@@ -32,6 +34,7 @@ PRE_PR_DUAL_REVIEW_EVIDENCE_VERSION = 0
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
 DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DEFAULT_CONTRACT_STATUS_TIMEOUT = 30
+DEFAULT_AGENT_BALANCE_PLAN_TIMEOUT = 30
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 POLICY = (
     "Read-only finalization readiness only prepares a handoff envelope. It does "
@@ -58,6 +61,13 @@ CONTRACT_STATUS_UNSAFE_BOOLEAN_KEYS = {
     "raw_codex_exec_allowed",
     "non_codex_agent_enablement_allowed",
     "capability_allowed",
+    "repo_mutation_allowed",
+    "external_agents_called",
+    "subprocess_dispatch_called",
+    "codex_called",
+    "github_called",
+    "marker_writes_performed",
+    "repo_mutations_performed",
     "safe_to_execute_by_this_helper",
     "implemented",
     "retired",
@@ -158,6 +168,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--litmus-status-script", help="Path to hermes-busdriver-litmus-status for delivery-status")
     parser.add_argument("--litmus-status-result-file", help="Fixture/result JSON from hermes-busdriver-litmus-status")
     parser.add_argument("--litmus-status-timeout", type=int, default=60)
+    parser.add_argument("--agent-balance-plan-script", help="Path hermes-busdriver-agent-balance-plan helper")
+    parser.add_argument("--agent-balance-plan-timeout", type=int, default=DEFAULT_AGENT_BALANCE_PLAN_TIMEOUT)
     parser.add_argument("--drift-baseline", help="Read-only Busdriver drift baseline JSON to compare through delivery/Phase-0 status")
     parser.add_argument(
         "--delivery-status-timeout",
@@ -303,6 +315,33 @@ def load_contract_status() -> tuple[dict[str, Any], int]:
         return invalid_contract_status("finalization_contract_status_schema_invalid", data, rc), 1
     if has_positive_contract_authority(data):
         return invalid_contract_status("finalization_contract_status_authority_flags_unsafe", data, rc), 1
+    return data, rc
+
+
+def invalid_agent_balance_plan(reason: str, data: dict[str, Any], rc: int) -> dict[str, Any]:
+    return {
+        "schema": AGENT_BALANCE_PLAN_SCHEMA,
+        "ok": False,
+        "read_only": True,
+        "available": False,
+        "reason": reason,
+        "helper_returncode": rc,
+        "source_schema": data.get("schema") if isinstance(data.get("schema"), str) else None,
+        "source_read_only": data.get("read_only") if isinstance(data.get("read_only"), bool) else None,
+        "source_ok": data.get("ok") if isinstance(data.get("ok"), bool) else None,
+        "authority": BLOCKED_FLAGS,
+    }
+
+
+def load_agent_balance_plan(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    script = Path(args.agent_balance_plan_script) if args.agent_balance_plan_script else AGENT_BALANCE_PLAN
+    data, rc = run_json([sys.executable, str(script)], args.agent_balance_plan_timeout)
+    if rc != 0:
+        return invalid_agent_balance_plan("agent_balance_plan_subprocess_failed", data, rc), rc
+    if data.get("schema") != AGENT_BALANCE_PLAN_SCHEMA or data.get("read_only") is not True or data.get("ok") is not True:
+        return invalid_agent_balance_plan("agent_balance_plan_schema_invalid", data, rc), 1
+    if has_positive_contract_authority(data):
+        return invalid_agent_balance_plan("agent_balance_plan_authority_flags_unsafe", data, rc), 1
     return data, rc
 
 
@@ -542,7 +581,13 @@ def infer_target(args: argparse.Namespace, delivery: dict[str, Any]) -> str:
     return "delivery"
 
 
-def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[str, Any], contract_status: dict[str, Any]) -> dict[str, Any]:
+def readiness(
+    args: argparse.Namespace,
+    delivery: dict[str, Any],
+    phase0: dict[str, Any],
+    contract_status: dict[str, Any],
+    agent_balance_plan: dict[str, Any],
+) -> dict[str, Any]:
     delivery_decision = delivery.get("decision") or {}
     blockers = list(delivery_decision.get("blockers") or [])
     warnings = list(delivery_decision.get("warnings") or [])
@@ -552,6 +597,8 @@ def readiness(args: argparse.Namespace, delivery: dict[str, Any], phase0: dict[s
         blockers.append("delivery_status_failed")
     if contract_status.get("ok") is not True:
         blockers.append("finalization_contract_status_unavailable")
+    if agent_balance_plan.get("ok") is not True:
+        blockers.append("agent_balance_plan_unavailable")
 
     repo = delivery.get("repo") or {}
     target = infer_target(args, delivery)
@@ -599,6 +646,7 @@ def handoff_envelope(
     phase0: dict[str, Any],
     ready: dict[str, Any],
     contract_status: dict[str, Any],
+    agent_balance_plan: dict[str, Any],
     dual_review: dict[str, Any],
     pre_pr_evidence: dict[str, Any],
 ) -> dict[str, Any]:
@@ -637,10 +685,12 @@ def handoff_envelope(
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),
             "finalization_contract_status": contract_status,
+            "agent_balance_plan": agent_balance_plan,
             "dual_review_readiness": dual_review,
             "pre_pr_dual_review_evidence": pre_pr_evidence,
         },
         "finalization_contract_status": contract_status,
+        "agent_balance_plan": agent_balance_plan,
         "dual_review_readiness": dual_review,
         "pre_pr_dual_review_evidence": pre_pr_evidence,
         "required_next_actor": "Busdriver/Claude Code or an explicit operator finalizer with current litmus/pre-PR/pr-grind gates",
@@ -662,7 +712,8 @@ def main() -> int:
     delivery, delivery_rc = load_delivery_status(args)
     phase0, phase0_rc = load_phase0_status(args)
     contract_status, contract_status_rc = load_contract_status()
-    ready = readiness(args, delivery, phase0, contract_status)
+    agent_balance_plan, agent_balance_plan_rc = load_agent_balance_plan(args)
+    ready = readiness(args, delivery, phase0, contract_status, agent_balance_plan)
     dual_review = dual_review_readiness(phase0)
     pre_pr_evidence = pre_pr_dual_review_evidence((delivery.get("litmus_status") or {}).get("summary"))
     result = {
@@ -674,23 +725,27 @@ def main() -> int:
             and delivery_rc == 0
             and phase0_rc == 0
             and contract_status_rc == 0
+            and agent_balance_plan_rc == 0
+            and agent_balance_plan.get("ok") is True
         ),
         "read_only": True,
         "delivery_status_returncode": delivery_rc,
         "phase0_status_returncode": phase0_rc,
         "finalization_contract_status_returncode": contract_status_rc,
+        "agent_balance_plan_returncode": agent_balance_plan_rc,
         "readiness": ready,
         "finalization_contract_status": contract_status,
+        "agent_balance_plan": agent_balance_plan,
         "dual_review_readiness": dual_review,
         "pre_pr_dual_review_evidence": pre_pr_evidence,
         "finalization_guardrails": FINALIZATION_GUARDRAILS,
-        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready, contract_status, dual_review, pre_pr_evidence),
+        "handoff_envelope": handoff_envelope(args, delivery, phase0, ready, contract_status, agent_balance_plan, dual_review, pre_pr_evidence),
         "delivery_status": delivery,
         "phase0_status": phase0,
         "decision": {"status": ready["status"], "reason": "read_only_finalization_readiness", **BLOCKED_FLAGS},
     }
     print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
-    return 0 if result["ok"] else (delivery_rc or phase0_rc or contract_status_rc or 1)
+    return 0 if result["ok"] else (delivery_rc or phase0_rc or contract_status_rc or agent_balance_plan_rc or 1)
 
 
 if __name__ == "__main__":

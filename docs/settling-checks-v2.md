@@ -1,6 +1,6 @@
 # Relay v2 Settling Checks
 
-This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, read-only finalization handoff envelope with machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, recursive fail-closed authority hardening, and embedded read-only finalization contract-status evidence, plus a read-only ADR 0005 finalization contract status/capability matrix.
+This file maps the H1-H13 checklist to the current Hermes Busdriver Relay state after adding the Codex draft launcher, read-only PR-grind readiness checker, verify-only dispatcher, durable delivery run envelopes, read-only litmus/pre-PR marker freshness status, read-only finalization handoff envelope with machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, embedded read-only agent balance-plan evidence, recursive fail-closed authority hardening, and embedded read-only finalization contract-status evidence, plus a read-only ADR 0005 finalization contract status/capability matrix.
 
 ## Current scope
 
@@ -17,7 +17,7 @@ Relay v2 supports:
 - scoped Codex draft runs that stop at `needs_busdriver_review`;
 - a read-only PR-grind readiness checker and bounded polling loop for explicit Hermes Delivery Mode;
 - a verify/pr-grind delivery dispatcher that emits durable `hermes-busdriver-delivery-run/v0` run envelopes, forwards nested helper timeouts/state-dir inputs, writes Hermes-owned result artifacts, and supports read-only `--mode status --run-id <id>` artifact lookup;
-- a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, embedded finalization contract-status evidence, and recursive authority-positive fail-closed checks but never finalizes;
+- a read-only finalization readiness helper that emits a handoff envelope plus machine-readable remaining finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, embedded read-only agent balance-plan evidence, embedded finalization contract-status evidence, and recursive authority-positive fail-closed checks but never finalizes or dispatches agents;
 - a read-only finalization contract status helper that emits `hermes-busdriver-finalization-contract-status/v0` with ADR 0005 unlock criteria for each policy-blocked remaining-work item without retiring any item;
 - redacted verifier command/output tails in verify-only delivery artifacts.
 
