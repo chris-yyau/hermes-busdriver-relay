@@ -107,6 +107,8 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["relay_config"]["route_keys"] == []
     relay = data["relay_equivalent_roles"]
     assert relay["coding_agent"] == "codex"
+    assert relay["role_policy"] == "codex_only_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
     assert relay["avoid_coding_agent_for_review"] is False
     assert set(relay["roles"]) == {
         "relay.litmus.reviewer",

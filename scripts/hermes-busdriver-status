@@ -488,6 +488,8 @@ def relay_equivalent_roles(
         "coding_agent": coding_agent,
         "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
         "coding_agent_config_error": coding_agent_config_error,
+        "role_policy": "codex_only_relay_equivalents",
+        "review_independence_policy": "same_codex_agent_allowed_by_current_user_directive",
         "avoid_coding_agent_for_review": avoid,
         "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",
         "avoid_coding_agent_for_review_config_error": avoid_config_error,
