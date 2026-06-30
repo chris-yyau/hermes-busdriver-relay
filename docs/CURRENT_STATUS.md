@@ -80,7 +80,7 @@ finalization_contract_status.capability_allowed_count 0
 finalization_contract_status.finalization_allowed False
 finalization_contract_status.marker_write_allowed False
 finalization_contract_status.programmatic_execution_allowed False
-finalization_readiness.handoff_embeds_contract_status True
+finalization_readiness.handoff_envelope.finalization_contract_status.schema hermes-busdriver-finalization-contract-status/v0
 ```
 
 ## Still intentionally deferred
