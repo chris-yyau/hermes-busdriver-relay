@@ -65,12 +65,14 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification on `main` after PR #36 (`87e4c60915f88cda66b7e22cffe70dd97fbd8b7e`):
+Most recent local and post-merge verification on `main` after PR #38 (`94c486672b543d5e5a79ead6fcf07853cbe318d5`):
 
 ```text
+focused readiness/contract tests: 58 passed
 contract tests: 359 passed
-py_compile: all relay scripts passed, including hermes-busdriver-finalization-contract-status
+py_compile: finalization-readiness and finalization-contract-status passed
 smoke_ok True
+finalization_guardrails.remaining_work statuses ['policy_blocked']
 finalization_contract_status.schema hermes-busdriver-finalization-contract-status/v0
 finalization_contract_status.current_policy non_mutating_relay_only
 finalization_contract_status.remaining_work_count 5
@@ -81,6 +83,8 @@ finalization_contract_status.finalization_allowed False
 finalization_contract_status.marker_write_allowed False
 finalization_contract_status.programmatic_execution_allowed False
 finalization_readiness.handoff_envelope.finalization_contract_status.schema hermes-busdriver-finalization-contract-status/v0
+finalization_guardrails.remaining_work IDs match finalization_contract_status.remaining_work IDs
+main branch CI after merge: Tests success, Security success
 ```
 
 ## Still intentionally deferred
