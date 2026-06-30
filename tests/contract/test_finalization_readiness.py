@@ -28,6 +28,13 @@ UNSAFE_BOOLEAN_KEYS = [
     "dispatch_allowed",
     "mutation_allowed",
     "programmatic_execution_allowed",
+    "marker_interop_allowed",
+    "raw_codex_exec_allowed",
+    "non_codex_agent_enablement_allowed",
+    "capability_allowed",
+    "safe_to_execute_by_this_helper",
+    "implemented",
+    "retired",
 ]
 
 
@@ -265,11 +272,26 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
 
     assert cp.returncode == 0, cp.stderr
     guardrails = data["finalization_guardrails"]
+    contract = data["finalization_contract_status"]
     work = guardrails["remaining_work"]
     assert guardrails["schema"] == "hermes-busdriver-finalization-guardrails/v0"
     assert guardrails["version"] == 0
     assert guardrails["read_only"] is True
     assert guardrails["status"] == "non_mutating_relay_only"
+    assert contract["schema"] == "hermes-busdriver-finalization-contract-status/v0"
+    assert contract["read_only"] is True
+    assert contract["current_policy"] == "non_mutating_relay_only"
+    assert contract["summary"] == {
+        "remaining_work_count": 5,
+        "policy_blocked_count": 5,
+        "retired_count": 0,
+        "capability_allowed_count": 0,
+        "finalization_flags_policy": "non_mutating_relay_only",
+    }
+    assert data["finalization_contract_status_returncode"] == 0
+    assert data["handoff_envelope"]["finalization_contract_status"] == contract
+    assert data["handoff_envelope"]["evidence"]["finalization_contract_status"] == contract
+    assert {item["id"] for item in contract["remaining_work"]} == {item["id"] for item in work}
     assert data["read_only"] is True
     assert data["handoff_envelope"]["read_only"] is True
     assert data["handoff_envelope"]["finalization_guardrails"] == guardrails
@@ -1019,7 +1041,13 @@ def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
         "minimum_gate_scripts": {},
     }
 
-    data = mod["readiness"](args, delivery, phase0)
+    contract_status = {
+        "schema": "hermes-busdriver-finalization-contract-status/v0",
+        "ok": True,
+        "read_only": True,
+    }
+
+    data = mod["readiness"](args, delivery, phase0, contract_status)
 
     assert data["ready"] is False
     assert data["status"] == "pr_not_clean_read_only"

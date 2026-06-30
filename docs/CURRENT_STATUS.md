@@ -30,7 +30,7 @@ Implemented:
 - `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence and sanitized, normalized/redacted, state-dir-aware read-only litmus/pre-PR freshness evidence that fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver` including nested delivery-status timeout budgeting and `--busdriver-state-dir-name` forwarding to litmus evidence checks
 - `scripts/hermes-busdriver-litmus-status`
-- `scripts/hermes-busdriver-finalization-readiness` including advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries
+- `scripts/hermes-busdriver-finalization-readiness` including advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries, plus embedded read-only `finalization_contract_status` evidence for downstream consumers
 - `scripts/hermes-busdriver-finalization-contract-status` read-only ADR 0005 contract/capability matrix for policy-blocked remaining finalization work
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-pr-grind-loop`
