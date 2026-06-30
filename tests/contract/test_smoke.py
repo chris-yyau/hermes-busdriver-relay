@@ -89,3 +89,10 @@ def test_finalization_readiness_summary_includes_guardrails_contract():
     assert summary["finalization_contract_status"]["authority"]["finalization_allowed"] is False
     assert summary["finalization_contract_status"]["authority"]["marker_write_allowed"] is False
     assert summary["finalization_contract_status"]["authority"]["programmatic_execution_allowed"] is False
+
+    missing_authority_summary = smoke.summarize_finalization_readiness({"finalization_contract_status": {}})
+    assert missing_authority_summary["finalization_contract_status"]["authority"] == {
+        "finalization_allowed": False,
+        "marker_write_allowed": False,
+        "programmatic_execution_allowed": False,
+    }
