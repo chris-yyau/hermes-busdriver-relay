@@ -44,55 +44,55 @@ DEFAULT_ROLE_ROUTES = {
 }
 
 DEFAULT_RELAY_CODING_AGENT = "codex"
-DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = True
+DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = False
 DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     "relay.litmus.reviewer": {
         "native_busdriver_role": "litmus reviewer",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.blueprint.reviewer_1": {
         "native_busdriver_role": "blueprint reviewer 1",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.blueprint.reviewer_2": {
         "native_busdriver_role": "blueprint reviewer 2",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.blueprint.reviewer_3": {
         "native_busdriver_role": "blueprint reviewer 3",
-        "route": ["grok", "gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.blueprint.arbiter": {
         "native_busdriver_role": "blueprint arbiter",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.pr.lead": {
         "native_busdriver_role": "PR lead reviewer",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.pr.backstop": {
         "native_busdriver_role": "PR security/bugs backstop",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.council.architect": {
         "native_busdriver_role": "council architect",
-        "route": ["hermes-primary", "codex"],
+        "route": ["codex"],
     },
     "relay.council.pragmatist": {
         "native_busdriver_role": "council pragmatist",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.council.critic": {
         "native_busdriver_role": "council critic",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.council.researcher": {
         "native_busdriver_role": "council researcher",
-        "route": ["grok", "gpt-5.5", "codex"],
+        "route": ["codex"],
     },
     "relay.council.skeptic": {
         "native_busdriver_role": "council skeptic",
-        "route": ["gpt-5.5", "codex"],
+        "route": ["codex"],
     },
 }
 

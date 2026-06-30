@@ -332,11 +332,11 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
     relay_cfg = tmp_path / "relay-config.json"
     relay_cfg.write_text(json.dumps({
         "coding_agent": "codex",
-        "avoid_coding_agent_for_review": True,
+        "avoid_coding_agent_for_review": False,
         "routes": {
-            "relay.litmus.reviewer": ["gpt-5.5", "codex"],
-            "relay.pr.lead": ["gpt-5.5", "codex"],
-            "relay.pr.backstop": ["gpt-5.5", "codex"],
+            "relay.litmus.reviewer": ["codex"],
+            "relay.pr.lead": ["codex"],
+            "relay.pr.backstop": ["codex"],
         },
     }))
     (repo / "work.txt").write_text("draft\n")
@@ -366,7 +366,7 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
     for role, entry in dual["configured_relay_roles"].items():
         assert entry["role"] == role
         assert entry["configured"] is True
-        assert entry["selected_agent"] == "gpt-5.5"
+        assert entry["selected_agent"] == "codex"
         assert entry["source"] == "relay_config"
         assert entry["dispatch_allowed"] is False
         assert entry["mutation_allowed"] is False
