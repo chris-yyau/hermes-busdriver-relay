@@ -21,7 +21,7 @@ Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, 
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
 
-Current status after PR #38: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification, recursive fail-closed authority checks, machine-readable finalization guardrails whose remaining-work rows report `status=policy_blocked`, a machine-readable finalization contract status/capability matrix, and embedded contract-status evidence inside finalization-readiness so downstream consumers do not need a second helper call. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented.
+Current status: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification, recursive fail-closed authority checks, machine-readable finalization guardrails whose remaining-work rows report `status=policy_blocked`, a machine-readable finalization contract status/capability matrix, embedded contract-status evidence inside finalization-readiness so downstream consumers do not need a second helper call, and a read-only balanced agent work planning envelope for one gated mutating draft lane plus parallel read-only review/status lanes. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented.
 
 ## Contents
 
@@ -41,6 +41,8 @@ scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
+scripts/hermes-busdriver-agent-balance-plan
+                                           Read-only balanced agent lane planning envelope
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
 scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher + run status lookup
@@ -138,6 +140,14 @@ scripts/hermes-busdriver-agent-draft \
 Currently only `--agent codex` is supported (others temporarily deferred). `noop` and `custom` are for tests.
 
 A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
+
+### Balanced agent work plan
+
+```bash
+scripts/hermes-busdriver-agent-balance-plan --pretty
+```
+
+This read-only helper emits `hermes-busdriver-agent-balance-plan/v0`: a deterministic planning-only envelope for one gated mutating draft implementation lane and parallel read-only review/status lanes. It does not dispatch agents, call Codex or GitHub, mutate repos, write markers, or grant commit/push/PR/merge/deploy/release/publish authority.
 
 ### Optional real-agent smoke
 

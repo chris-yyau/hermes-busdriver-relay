@@ -844,6 +844,12 @@ def test_litmus_status_subprocess_nonzero_fails_closed_even_with_valid_json_ok_f
 
 
 
+def assert_capability_entry_is_metadata_only(entry: dict[str, Any]) -> None:
+    assert set(entry) == {"path", "available"}
+    assert isinstance(entry["path"], str)
+    assert isinstance(entry["available"], bool)
+
+
 def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -851,10 +857,21 @@ def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Pa
 
     data = invoke(repo, plugin, "--relay-role", "relay.pr.backstop", "--relay-config", str(cfg))
 
-    assert data["relay_capabilities"]["relay_role"]["available"] is True
-    assert data["relay_capabilities"]["delivery_status"]["available"] is True
-    assert data["relay_capabilities"]["finalization_readiness"]["available"] is True
-    assert data["relay_capabilities"]["finalization_contract_status"]["available"] is True
+    public_helpers = {
+        "agent_balance_plan",
+        "agent_smoke",
+        "deliver",
+        "delivery_status",
+        "finalization_contract_status",
+        "finalization_readiness",
+        "relay_role",
+        "smoke",
+    }
+    assert public_helpers <= set(data["relay_capabilities"])
+    for entry in data["relay_capabilities"].values():
+        assert_capability_entry_is_metadata_only(entry)
+    for helper in public_helpers:
+        assert data["relay_capabilities"][helper]["available"] is True
     role = data["relay_role_resolution"]
     assert role["available"] is True
     assert role["ok"] is True
