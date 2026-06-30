@@ -44,6 +44,12 @@ DEFAULT_ROLE_ROUTES = {
 }
 
 DEFAULT_RELAY_CODING_AGENT = "codex"
+# Current relay policy is deliberately Codex-only / no-Claude. The same Codex
+# agent family may satisfy relay-equivalent review roles for now because the
+# user explicitly requested it; status output reports this via
+# review_independence_policy so the posture is visible instead of silent. If a
+# config opts back into avoid_coding_agent_for_review without non-Codex routes,
+# roles degrade fail-closed rather than silently claiming independent review.
 DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = False
 DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     "relay.litmus.reviewer": {

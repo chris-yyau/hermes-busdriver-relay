@@ -194,6 +194,31 @@ def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
         assert entry["mutation_allowed"] is False
 
 
+def test_status_probe_marks_codex_only_defaults_degraded_when_independence_is_explicitly_requested(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "avoid_coding_agent_for_review": True,
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert relay["role_policy"] == "codex_only_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
+    assert relay["avoid_coding_agent_for_review"] is True
+    for entry in relay["roles"].values():
+        assert entry["configured_route"] == ["codex"]
+        assert entry["selected_agent"] == "codex"
+        assert entry["same_as_coding_agent"] is True
+        assert entry["degraded"] is True
+        assert entry["config_error"] is None
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
+
+
 def test_status_probe_marks_empty_relay_equivalent_route_degraded(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
