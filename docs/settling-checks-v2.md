@@ -140,7 +140,7 @@ The litmus-status helper only reports whether existing Busdriver markers match c
 
 ## Policy-blocked finalization surfaces
 
-`hermes-busdriver-finalization-readiness` exposes this list as `finalization_guardrails.remaining_work` with guardrail schema/version/read-only metadata and repeats it in the handoff envelope so downstream status tooling can distinguish read-only handoff readiness from unsupported mutating/raw-exec operations and intentionally unavailable finalization authority. These items are not the next safe implementation slice; they require a stronger Busdriver-approved integration surface and explicit approval before any work begins.
+`hermes-busdriver-finalization-readiness` exposes this list as `finalization_guardrails.remaining_work` with guardrail schema/version/read-only metadata and repeats it in the handoff envelope so downstream status tooling can distinguish read-only handoff readiness from unsupported mutating/raw-exec operations and intentionally unavailable finalization authority. These items are not the next safe implementation slice; they require a stronger Busdriver-approved integration surface, explicit approval, and the ADR 0005 finalization authority integration contract before any mutating implementation work begins.
 
 - `hermes-busdriver-deliver` commit/push/PR/merge executor mode, if ever approved;
 - mutating final delivery result envelope;

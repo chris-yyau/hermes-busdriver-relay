@@ -21,12 +21,14 @@ Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, 
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
 
-Current status after PR #32: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification and recursive fail-closed authority checks. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later.
+Current status after PR #33: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification and recursive fail-closed authority checks. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented.
 
 ## Contents
 
 ```text
 ADRs/                                      Lightweight architecture decisions
+ADRs/0005-finalization-authority-integration-contract.md
+                                           Future authority/marker interop prerequisite contract
 docs/CURRENT_STATUS.md                     Current completion/verification state
 docs/hermes-busdriver-integration-contract-v2.md
 docs/settling-checks-v1.md                 H1-H13 v1 status map

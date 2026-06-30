@@ -50,7 +50,7 @@ Implemented:
 - `docs/hermes-busdriver-integration-contract-v2.md`
 - `docs/settling-checks-v1.md`
 - `docs/settling-checks-v2.md`
-- ADRs and README boundary docs
+- ADRs and README boundary docs, including ADR 0005's non-mutating finalization authority integration contract prerequisite
 
 ## Verification commands
 
@@ -99,8 +99,9 @@ These are not missing safe non-mutating relay work; they are blocked by design/p
 - `hermes-busdriver-deliver` mutating commit/push/PR/merge executor mode and any matching mutating final delivery result envelope
 - `hermes-busdriver-codex-goal` or draft-agent launcher finalization with commit authority
 - `.claude/hermes/jobs` queue
-- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks; `hermes-busdriver-pr-grind-loop` remains read-only and refuses mutating fix rounds / push / re-poll integration
-- Busdriver marker interop or marker writes unless Busdriver defines an explicit safe integration surface
+- commit / PR / merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks and the ADR 0005 authority contract; `hermes-busdriver-pr-grind-loop` remains read-only and refuses mutating fix rounds / push / re-poll integration
+- programmatic litmus/pre-PR dual-review execution until Busdriver-approved role mappings/invocation seams, data-egress controls, schemas, and aggregation rules exist
+- Busdriver marker interop or marker writes unless Busdriver defines an explicit safe integration surface and the ADR 0005 marker ownership/provenance contract is satisfied
 - deploy / release / publish automation
 - direct MCP/plugin routing
 - any claim that Hermes bare shell execution is Busdriver-gate-safe
