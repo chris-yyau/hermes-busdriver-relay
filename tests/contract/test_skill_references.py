@@ -13,6 +13,7 @@ PR49_TO_PR52_REFERENCES = {
     "pr52-adr0006-contract-status-lessons.md": "Preserve compatibility fields like `contract_adr`",
 }
 PR53_TO_PR55_REFERENCE = REFERENCE_DIR / "pr53-pr55-skill-sync-lessons.md"
+PR56_REFERENCE = REFERENCE_DIR / "pr56-skill-sync-delivery-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -44,6 +45,18 @@ def test_pr53_to_pr55_skill_sync_lessons_are_durable_skill_reference():
     assert PR53_TO_PR55_REFERENCE.name in skill_text
     assert "Installed-skill edits must be synced back to the repo source" in reference_text
     assert "Do not let skill-reference sync wording imply new finalization, marker-write, or non-Codex mutating authority" in reference_text
+
+
+def test_pr56_skill_sync_delivery_lessons_are_durable_skill_reference():
+    assert PR56_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR56_REFERENCE.read_text()
+
+    assert PR56_REFERENCE.name in skill_text
+    assert "Local git commit signing can break throwaway test repos" in reference_text
+    assert "PR-mode backstop verdicts must include the reviewed diff hash" in reference_text
+    assert "Manual post-hook cleanup is required when Hermes finalizes outside Claude runtime" in reference_text
+    assert "Do not forge Busdriver markers by direct file writes" in reference_text
 
 
 def test_continuation_reference_preserves_late_async_follow_up_policy():
