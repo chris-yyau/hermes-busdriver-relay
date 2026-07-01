@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against the installed Busdriver marketplace plugin `1.73.0` used by smoke.
+Last verified against the installed Busdriver marketplace plugin `1.74.0` used by smoke.
 
 ## Locations
 
@@ -66,22 +66,15 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification on `main` after PR #45 (`9773f00dfcbc6c15334c5f4f7a6e6f82dbec5083`):
+Most recent local verification on `main` at clean/synced head `affea80ff08e26c216a1594aa108cea713602d70` with Busdriver marketplace plugin `1.74.0`:
 
 ```text
-repo status: main...origin/main clean/synced
-PR #45: merged
-post-merge smoke: ok true
-py_compile: ok true for public relay scripts
-contract tests via smoke: 379 passed
-focused delivery-status/finalization-readiness tests before merge: 131 passed
-delivery-status.schema hermes-busdriver-delivery-status/v0
-delivery-status.read_only True
-finalization-readiness child delivery-status validation: schema/read_only/boolean-ok strict
-invalid delivery-status child blocker: delivery_status_schema_invalid
-finalization_readiness.ready_for_merge_handoff observed for PR #45 before merge
-finalization authority flags: commit/push/PR/merge/deploy/release/publish/marker-write false
-claude-mem boundary log: observation 33676, project busdriver, agent_type hermes
+repo status before docs refresh: main...origin/main clean/synced at affea80ff08e26c216a1594aa108cea713602d70
+open PRs: none
+installed Busdriver marketplace plugin used for smoke/status: 1.74.0
+uvx --from pytest pytest tests/contract -q: 379 passed in 78.31s
+python3 -m py_compile scripts/hermes-busdriver-*: exit 0
+scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty: ok true; py_compile ok; contract tests 379 passed; status summary package_version 1.74.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready false/status no_finalization_candidate commit/merge false; gate preflight agent_implementation_draft_allowed true commit/push/pr false
 ```
 
 ## Still intentionally deferred
