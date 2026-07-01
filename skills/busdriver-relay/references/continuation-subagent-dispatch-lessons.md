@@ -19,4 +19,5 @@ When `hermes-busdriver-litmus-status` exists but Delivery Mode still only says l
 - Do not answer only with “I will continue” or a plan. Dispatch the subagent in the same turn.
 - Do not wait for a perfect roadmap. If the repo is clean and docs identify deferred finalization evidence work, choose a narrow evidence/status slice.
 - Do not let the subagent own finalization. It returns a dirty tree; main Hermes verifies and finalizes under gates.
+- If a late async reviewer/subagent result arrives after a PR was already merged, classify it against the merged state. Non-blocking suggestions can become the next tiny follow-up PR when they are cheap, test-only, and directly improve the just-merged slice; do not silently ignore them or pretend they were handled in the earlier PR.
 - Do not infer that a read-only helper grants commit/PR/merge authority. It is evidence only.
