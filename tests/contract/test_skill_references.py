@@ -12,6 +12,7 @@ PR49_TO_PR52_REFERENCES = {
     "pr51-finalization-unlock-adr-lessons.md": "must keep authority false",
     "pr52-adr0006-contract-status-lessons.md": "Preserve compatibility fields like `contract_adr`",
 }
+PR53_TO_PR55_REFERENCE = REFERENCE_DIR / "pr53-pr55-skill-sync-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -33,6 +34,16 @@ def test_pr49_to_pr52_lessons_are_durable_skill_references():
         assert reference.exists()
         assert filename in skill_text
         assert expected_text in reference.read_text()
+
+
+def test_pr53_to_pr55_skill_sync_lessons_are_durable_skill_reference():
+    assert PR53_TO_PR55_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR53_TO_PR55_REFERENCE.read_text()
+
+    assert PR53_TO_PR55_REFERENCE.name in skill_text
+    assert "Installed-skill edits must be synced back to the repo source" in reference_text
+    assert "Do not let skill-reference sync wording imply new finalization, marker-write, or non-Codex mutating authority" in reference_text
 
 
 def test_continuation_reference_preserves_late_async_follow_up_policy():
