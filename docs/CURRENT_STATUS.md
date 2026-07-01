@@ -58,7 +58,7 @@ Implemented:
 
 ```bash
 cd /Volumes/work/projects/hermes-busdriver-relay
-uvx --from pytest pytest tests/contract -q
+uvx --from pytest pytest tests/contract -q -p no:cacheprovider
 scripts/hermes-busdriver-smoke \
   --plugin-root ~/.claude/plugins/marketplaces/busdriver \
   --pretty
@@ -66,17 +66,19 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR #49 merge on `main` at clean/synced head `039bc1d642bfe147f2427fcfbf648be0afce7d35` with Busdriver marketplace plugin `1.74.0`:
+Most recent local verification after PR #57 merge on `main` at clean/synced head `70c2a84759459fbc2f555378d442b8576cd9ba48` with Busdriver marketplace plugin `1.74.0`:
 
 ```text
-repo status after PR49 merge: main...origin/main clean/synced at 039bc1d642bfe147f2427fcfbf648be0afce7d35
+repo status after PR57 merge: main...origin/main clean/synced at 70c2a84759459fbc2f555378d442b8576cd9ba48
 open PRs: none
 relay locks: none
 installed Busdriver marketplace plugin used for smoke/status: 1.74.0
-repo skill source synced back to installed Hermes skill after PR49: diff -qr clean
-uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 379 passed in 80.27s
+repo skill source synced back to installed Hermes skill after PR57: byte-for-byte clean
+litmus/PR markers after merge: none fresh; empty main diff reports stale_or_missing as expected
+uvx --from pytest pytest tests/contract/test_skill_references.py -q -p no:cacheprovider: 5 passed in 0.01s
+uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 385 passed in 85.45s
 python3 -m py_compile scripts/hermes-busdriver-*: exit 0
-scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty: ok true; py_compile ok; contract tests pass; status summary package_version 1.74.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness remains non-mutating/no_finalization_candidate; gate preflight agent_implementation_draft_allowed true commit/push/pr false
+scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty: ok true; py_compile ok; contract tests pass; status summary package_version 1.74.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness remains non-mutating/no_finalization_candidate; finalization authority flags remain false
 ```
 
 ## Still intentionally deferred
