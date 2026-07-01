@@ -153,6 +153,10 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
     assert by_id["programmatic-litmus-pre-pr-dual-review"]["related_design_adrs"] == [
         "ADRs/0006-programmatic-dual-review-marker-interop.md"
     ]
+    assert by_id["programmatic-litmus-pre-pr-dual-review"]["contract_adrs"] == [
+        "ADRs/0005-finalization-authority-integration-contract.md",
+        "ADRs/0006-programmatic-dual-review-marker-interop.md",
+    ]
     assert "busdriver_approved_pr_grind_seam" in by_id["mutating-pr-grind-fix-push-loop"]["missing_unlock_criteria"]
     assert "latest_pr_head_tracking" in by_id["mutating-pr-grind-fix-push-loop"]["missing_unlock_criteria"]
     assert "marker_ownership_contract" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
@@ -164,6 +168,10 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
     assert "marker_freshness_windows" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
     assert by_id["busdriver-marker-interop"]["related_design_adrs"] == [
         "ADRs/0006-programmatic-dual-review-marker-interop.md"
+    ]
+    assert by_id["busdriver-marker-interop"]["contract_adrs"] == [
+        "ADRs/0005-finalization-authority-integration-contract.md",
+        "ADRs/0006-programmatic-dual-review-marker-interop.md",
     ]
     assert "hermes-busdriver-mutating-delivery-run/v0" in by_id["mutating-final-result-envelope"]["missing_future_schemas"]
     assert "hermes-busdriver-marker-interop/v0" in by_id["busdriver-marker-interop"]["missing_future_schemas"]
