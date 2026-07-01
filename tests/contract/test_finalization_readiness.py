@@ -331,6 +331,7 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
     guardrails = data["finalization_guardrails"]
     contract = data["finalization_contract_status"]
     work = guardrails["remaining_work"]
+    contract_by_id = {item["id"]: item for item in contract["remaining_work"]}
     assert guardrails["schema"] == "hermes-busdriver-finalization-guardrails/v0"
     assert guardrails["version"] == 0
     assert guardrails["read_only"] is True
@@ -365,6 +366,8 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
         "mutating-pr-grind-fix-push-loop",
         "busdriver-marker-interop",
     }
+    assert contract_by_id["programmatic-litmus-pre-pr-dual-review"]["contract_adrs"] == contract["contract_adrs"]
+    assert contract_by_id["busdriver-marker-interop"]["contract_adrs"] == contract["contract_adrs"]
     assert all(item["status"] == "policy_blocked" for item in work)
     assert all(item["safe_to_execute_by_this_helper"] is False for item in work)
     assert set(guardrails["unsupported_mutating_operations"]) == {
