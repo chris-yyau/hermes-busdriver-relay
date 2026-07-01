@@ -338,6 +338,11 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
     assert contract["schema"] == "hermes-busdriver-finalization-contract-status/v0"
     assert contract["read_only"] is True
     assert contract["current_policy"] == "non_mutating_relay_only"
+    assert contract["contract_adrs"] == [
+        "ADRs/0005-finalization-authority-integration-contract.md",
+        "ADRs/0006-programmatic-dual-review-marker-interop.md",
+    ]
+    assert contract["related_design_adrs"] == ["ADRs/0006-programmatic-dual-review-marker-interop.md"]
     assert contract["summary"] == {
         "remaining_work_count": 5,
         "policy_blocked_count": 5,
