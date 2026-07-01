@@ -22,7 +22,7 @@ Hermes may design a read-only invocation seam that records requests, observation
 
 Reviewer independence must be explicit. The same-agent policy must prevent one model/provider/session from satisfying independent roles unless Busdriver defines that as acceptable. Evidence must record model/provider/session separation, conflict rules, and any reason independence is unavailable.
 
-The evidence schema for `hermes-busdriver-dual-review-execution/v0` must include input digest, reviewed diff hash, reviewer verdicts, findings, confidence/limitations, timestamps/freshness, data egress/redaction, and artifact refs.
+The evidence schema for `hermes-busdriver-dual-review-execution/v0` must include input digest, reviewed diff hash, reviewer role mapping, reviewer verdicts, findings, confidence/limitations, aggregation decision, timestamps/freshness, data egress/redaction, and artifact refs.
 
 Aggregation must distinguish pass, actionable findings, unavailable, stale, malformed, and policy_blocked. Any missing, ambiguous, contradictory, stale, malformed, or untrusted evidence keeps all authority false.
 

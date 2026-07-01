@@ -28,8 +28,10 @@ def test_adr_0006_frames_non_mutating_dual_review_marker_interop_contract():
         "model/provider/session separation",
         "input digest",
         "reviewed diff hash",
+        "reviewer role mapping",
         "reviewer verdicts",
         "confidence/limitations",
+        "aggregation decision",
         "timestamps/freshness",
         "data egress/redaction",
         "artifact refs",
@@ -61,12 +63,15 @@ def test_adr_0006_frames_non_mutating_dual_review_marker_interop_contract():
 
 
 def test_adr_0006_is_linked_without_loosening_adr_0005_authority_contract():
-    linked_text = read(README) + "\n" + read(SETTLING_V2)
+    readme = read(README)
+    settling_v2 = read(SETTLING_V2)
     adr_0005 = read(ADR_0005)
 
-    assert "ADRs/0006-programmatic-dual-review-marker-interop.md" in linked_text
-    assert "design/spike" in linked_text
-    assert "ADR 0005" in linked_text
+    assert "ADRs/0006-programmatic-dual-review-marker-interop.md" in readme
+    for text in (readme, settling_v2):
+        assert "ADR 0006" in text
+        assert "design/spike" in text
+        assert "ADR 0005" in text
     assert "does **not** grant finalization authority" in adr_0005
     assert '"finalization_allowed": false' in adr_0005
     assert '"marker_write_allowed": false' in adr_0005
