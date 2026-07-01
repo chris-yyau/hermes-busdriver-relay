@@ -96,8 +96,8 @@ hermes-busdriver-gate preflight
   → hermes-busdriver-gate postflight
 ```
 
-The active relay surface wraps Codex only and allows draft working-tree changes only. OpenCode/Droid/Agy/Grok remain deferred until the user explicitly reopens that scope. `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` stay false until stronger finalization gates exist.
+The generic gate shape is agent-agnostic in design, but current active relay policy enables Codex only; other agents remain deferred until explicit validation and user approval. It allows draft working-tree changes only. `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` stay false until stronger finalization gates exist.
 
-`hermes-busdriver-agent-draft` is the first executable wrapper for this pattern. It acquires a Hermes `agent-draft` lock, runs gate preflight, runs Codex (or custom/noop test commands) under a best-effort PATH guard, runs gate postflight, releases the lock, and returns `status=needs_busdriver_review` on success. The PATH guard blocks common `git`/`gh` finalization commands, but it is not a full sandbox; postflight still needs to catch local commits, scope violations, hooks tamper, and ignored-file tamper.
+`hermes-busdriver-agent-draft` is the first executable wrapper for this pattern. It acquires a Hermes `agent-draft` lock, runs gate preflight, runs the selected agent/custom command under a best-effort PATH guard, runs gate postflight, releases the lock, and returns `status=needs_busdriver_review` on success. The PATH guard blocks common `git`/`gh` finalization commands, but it is not a full sandbox; postflight still needs to catch local commits, scope violations, hooks tamper, and ignored-file tamper.
 
 `hermes-busdriver-agent-smoke` is the opt-in real-adapter smoke. It creates a throwaway repo and may consume provider quota/tokens. Codex was verified this way: it added `src/codex_smoke.txt`, postflight saw only that scoped file, verifier passed, HEAD was unchanged, and status remained `needs_busdriver_review`. 
