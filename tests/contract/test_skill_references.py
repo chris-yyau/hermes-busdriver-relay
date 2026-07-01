@@ -3,8 +3,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "busdriver-relay" / "SKILL.md"
-REFERENCE = ROOT / "skills" / "busdriver-relay" / "references" / "june-2026-pr-reviewer-quality-evaluation.md"
-CONTINUATION_REFERENCE = ROOT / "skills" / "busdriver-relay" / "references" / "continuation-subagent-dispatch-lessons.md"
+REFERENCE_DIR = ROOT / "skills" / "busdriver-relay" / "references"
+REFERENCE = REFERENCE_DIR / "june-2026-pr-reviewer-quality-evaluation.md"
+CONTINUATION_REFERENCE = REFERENCE_DIR / "continuation-subagent-dispatch-lessons.md"
+PR49_TO_PR52_REFERENCES = {
+    "pr49-skill-sync-delivery-lessons.md": "Finalization-readiness expects the raw PR-grind loop payload",
+    "pr50-docs-status-refresh-lessons.md": "Preserve policy guardrails verbatim",
+    "pr51-finalization-unlock-adr-lessons.md": "must keep authority false",
+    "pr52-adr0006-contract-status-lessons.md": "Preserve compatibility fields like `contract_adr`",
+}
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -16,6 +23,16 @@ def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
     assert "June 2026 PR Reviewer Quality Evaluation" in reference_text
     assert "live unresolved non-outdated review threads" in reference_text
     assert "CodeRabbit rate-limit" in reference_text
+
+
+def test_pr49_to_pr52_lessons_are_durable_skill_references():
+    skill_text = SKILL.read_text()
+
+    for filename, expected_text in PR49_TO_PR52_REFERENCES.items():
+        reference = REFERENCE_DIR / filename
+        assert reference.exists()
+        assert filename in skill_text
+        assert expected_text in reference.read_text()
 
 
 def test_continuation_reference_preserves_late_async_follow_up_policy():
