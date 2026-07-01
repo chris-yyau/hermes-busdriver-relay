@@ -28,13 +28,8 @@ Clean means, for the latest PR HEAD:
 - comments/reviews on changed lines are fixed or explicitly justified within Busdriver discipline rails;
 - unclear policy/design/scope state bails instead of merging.
 
-Reviewer signal interpretation:
+## Reviewer Signal Interpretation
 
-- The source of truth for blockers is live unresolved non-outdated review threads plus current-head actionable review bodies/comments.
-- Reviewer check/status completion only means the reviewer ran; it is not a clean ack.
-- CodeRabbit rate-limit / no-review output is incomplete coverage, not clean.
-- cubic no-issues / summary-only output is advisory and not a clean ack by itself.
-- Devin `SUCCESS` is completion, not clean; only live unresolved inline `BUG` / `🚩` findings should block.
-- Stale, outdated, resolved, addressed-by-design, and factually incorrect findings must not block once that state is established.
+Source from `origin/main`: blockers come from live unresolved, non-outdated review threads and current-head actionable review bodies/comments. Reviewer status completion is not clean by itself; CodeRabbit rate-limit means incomplete coverage; Cubic no-issues is advisory; Devin `SUCCESS` completion is not clean. Stale, outdated, resolved, addressed-by-design, or factually incorrect findings should not block once that classification is established.
 
 A fix push invalidates the previous clean state. Start a new wait/collect/fix round for the new HEAD.
