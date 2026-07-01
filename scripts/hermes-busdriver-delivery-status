@@ -802,6 +802,7 @@ def main() -> int:
 
     result = {
         "schema": SCHEMA,
+        "read_only": True,
         "ok": bool(repo.get("ok") and busdriver.get("ok")),
         "repo": repo,
         "busdriver": busdriver,
