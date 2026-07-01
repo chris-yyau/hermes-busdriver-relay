@@ -247,6 +247,48 @@ def assert_no_positive_finalization_authority(payload: object) -> None:
             assert_no_positive_finalization_authority(item)
 
 
+def load_readiness_module():
+    return __import__("runpy").run_path(str(READINESS))
+
+
+@pytest.mark.parametrize(
+    "delivery_overrides",
+    [
+        {"schema": "wrong/v0", "read_only": True, "ok": True},
+        {"schema": "hermes-busdriver-delivery-status/v0", "read_only": False, "ok": True},
+        {"schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": "true"},
+    ],
+    ids=["wrong_schema", "read_only_false", "ok_non_boolean"],
+)
+def test_readiness_blocks_invalid_delivery_status_helper_envelope(delivery_overrides: dict[str, object]):
+    mod = load_readiness_module()
+    args = type("Args", (), {"target": "auto", "pr": None})()
+    delivery = {
+        "schema": "hermes-busdriver-delivery-status/v0",
+        "read_only": True,
+        "ok": True,
+        "repo": {"dirty": True},
+        "decision": {"blockers": [], "warnings": []},
+        **delivery_overrides,
+    }
+    phase0 = {
+        "status_schema": "hermes-busdriver-status/v0",
+        "plugin_root": {"exists": True},
+        "hooks": {"exists": True},
+        "repo": {"is_git_repo": True},
+        "relay_locks": {"active_for_repo_count": 0},
+    }
+    contract_status = {"ok": True}
+    agent_balance_plan = {"ok": True}
+
+    ready = mod["readiness"](args, delivery, phase0, contract_status, agent_balance_plan)
+
+    assert ready["ready"] is False
+    assert ready["status"] == "blocked"
+    assert "delivery_status_schema_invalid" in ready["blockers"]
+    assert_no_positive_finalization_authority(ready)
+
+
 def test_dirty_tree_generates_read_only_commit_or_pr_handoff_without_side_effects(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -1251,6 +1293,8 @@ def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
     mod = __import__("runpy").run_path(str(READINESS))
     args = __import__("types").SimpleNamespace(pr="7", target="auto")
     delivery = {
+        "schema": "hermes-busdriver-delivery-status/v0",
+        "read_only": True,
         "ok": True,
         "decision": {"status": "no_local_delivery_candidate", "blockers": [], "warnings": []},
         "repo": {"dirty": False},

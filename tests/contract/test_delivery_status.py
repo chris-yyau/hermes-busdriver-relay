@@ -188,6 +188,7 @@ def test_dirty_draft_status_is_read_only_and_non_finalizing(tmp_path: Path):
     data = invoke(repo, plugin)
 
     assert data["schema"] == "hermes-busdriver-delivery-status/v0"
+    assert data["read_only"] is True
     assert data["repo"]["dirty"] is True
     assert data["decision"]["status"] == "draft_changes_need_busdriver_finalization"
     assert_no_delivery_authority(data["decision"])

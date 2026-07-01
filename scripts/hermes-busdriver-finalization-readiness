@@ -22,6 +22,9 @@ PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization-contract-status"
 AGENT_BALANCE_PLAN = ROOT / "scripts" / "hermes-busdriver-agent-balance-plan"
 SCHEMA = "hermes-busdriver-finalization-readiness/v0"
+# Keep synchronized with scripts/hermes-busdriver-delivery-status SCHEMA.
+# The sibling is an executable helper, so validate by contract literal here rather than importing it.
+DELIVERY_STATUS_SCHEMA = "hermes-busdriver-delivery-status/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
 FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 FINALIZATION_GUARDRAILS_VERSION = 0
@@ -581,6 +584,14 @@ def infer_target(args: argparse.Namespace, delivery: dict[str, Any]) -> str:
     return "delivery"
 
 
+def delivery_status_schema_valid(delivery: dict[str, Any]) -> bool:
+    return (
+        delivery.get("schema") == DELIVERY_STATUS_SCHEMA
+        and delivery.get("read_only") is True
+        and isinstance(delivery.get("ok"), bool)
+    )
+
+
 def readiness(
     args: argparse.Namespace,
     delivery: dict[str, Any],
@@ -593,7 +604,9 @@ def readiness(
     warnings = list(delivery_decision.get("warnings") or [])
     blockers.extend(b for b in phase0_blockers(phase0) if b not in blockers)
     warnings.extend(w for w in phase0_warnings(phase0) if w not in warnings)
-    if not delivery.get("ok"):
+    if not delivery_status_schema_valid(delivery):
+        blockers.append("delivery_status_schema_invalid")
+    elif delivery.get("ok") is not True:
         blockers.append("delivery_status_failed")
     if contract_status.get("ok") is not True:
         blockers.append("finalization_contract_status_unavailable")
@@ -719,7 +732,8 @@ def main() -> int:
     result = {
         "schema": SCHEMA,
         "ok": bool(
-            delivery.get("ok")
+            delivery_status_schema_valid(delivery)
+            and delivery.get("ok") is True
             and phase0.get("status_schema") == "hermes-busdriver-status/v0"
             and contract_status.get("ok") is True
             and delivery_rc == 0
