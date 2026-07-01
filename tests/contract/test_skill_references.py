@@ -14,6 +14,7 @@ PR49_TO_PR52_REFERENCES = {
 }
 PR53_TO_PR55_REFERENCE = REFERENCE_DIR / "pr53-pr55-skill-sync-lessons.md"
 PR56_REFERENCE = REFERENCE_DIR / "pr56-skill-sync-delivery-lessons.md"
+CURRENT_STATUS_READONLY_REVIEW_REFERENCE = REFERENCE_DIR / "current-status-readonly-review-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -57,6 +58,17 @@ def test_pr56_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "PR-mode backstop verdicts must include the reviewed diff hash" in reference_text
     assert "Manual post-hook cleanup is required when Hermes finalizes outside Claude runtime" in reference_text
     assert "Do not forge Busdriver markers by direct file writes" in reference_text
+
+
+def test_current_status_readonly_review_lessons_are_durable_skill_reference():
+    assert CURRENT_STATUS_READONLY_REVIEW_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = CURRENT_STATUS_READONLY_REVIEW_REFERENCE.read_text()
+
+    assert CURRENT_STATUS_READONLY_REVIEW_REFERENCE.name in skill_text
+    assert "Treat the task as review/planning only" in reference_text
+    assert "Do not imply a full-suite/smoke result was freshly re-run unless it actually was" in reference_text
+    assert "A docs/status refresh must not imply any new authority" in reference_text
 
 
 def test_continuation_reference_preserves_late_async_follow_up_policy():
