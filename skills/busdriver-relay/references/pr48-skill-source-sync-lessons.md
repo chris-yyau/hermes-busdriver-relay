@@ -24,8 +24,12 @@ Use when continuing `hermes-busdriver-relay` and the repo copy of `skills/busdri
 ## Useful verification
 
 ```bash
+: "${REPO_SKILL_DIR:?set REPO_SKILL_DIR to the repo skill directory}"
+: "${INSTALLED_SKILL_DIR:?set INSTALLED_SKILL_DIR to the installed skill directory}"
+: "${BUSDRIVER_PLUGIN_ROOT:?set BUSDRIVER_PLUGIN_ROOT to the Busdriver plugin root}"
+
 # Repo skill equals installed skill after final sync
-diff -qr skills/busdriver-relay ~/.hermes/skills/autonomous-ai-agents/busdriver-relay
+diff -qr "$REPO_SKILL_DIR" "$INSTALLED_SKILL_DIR"
 
 # Skill/reference tests
 PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest \
@@ -35,7 +39,7 @@ PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest \
 # Full repo confidence before/after PR
 uvx --from pytest pytest tests/contract -q
 python3 -m py_compile scripts/hermes-busdriver-*
-scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty
+scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty
 ```
 
 ## Pitfalls
