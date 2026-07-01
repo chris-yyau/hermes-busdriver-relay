@@ -66,15 +66,17 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification on `main` at clean/synced head `affea80ff08e26c216a1594aa108cea713602d70` with Busdriver marketplace plugin `1.74.0`:
+Most recent local verification after PR #49 merge on `main` at clean/synced head `039bc1d642bfe147f2427fcfbf648be0afce7d35` with Busdriver marketplace plugin `1.74.0`:
 
 ```text
-repo status before docs refresh: main...origin/main clean/synced at affea80ff08e26c216a1594aa108cea713602d70
+repo status after PR49 merge: main...origin/main clean/synced at 039bc1d642bfe147f2427fcfbf648be0afce7d35
 open PRs: none
+relay locks: none
 installed Busdriver marketplace plugin used for smoke/status: 1.74.0
-uvx --from pytest pytest tests/contract -q: 379 passed in 78.31s
+repo skill source synced back to installed Hermes skill after PR49: diff -qr clean
+uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 379 passed in 80.27s
 python3 -m py_compile scripts/hermes-busdriver-*: exit 0
-scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty: ok true; py_compile ok; contract tests 379 passed; status summary package_version 1.74.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready false/status no_finalization_candidate commit/merge false; gate preflight agent_implementation_draft_allowed true commit/push/pr false
+scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty: ok true; py_compile ok; contract tests pass; status summary package_version 1.74.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness remains non-mutating/no_finalization_candidate; gate preflight agent_implementation_draft_allowed true commit/push/pr false
 ```
 
 ## Still intentionally deferred
