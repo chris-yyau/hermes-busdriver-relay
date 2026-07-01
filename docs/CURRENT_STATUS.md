@@ -28,10 +28,10 @@ Implemented:
 - `scripts/hermes-busdriver-agent-draft`
 - `scripts/hermes-busdriver-agent-balance-plan` read-only planning envelope for one gated mutating draft lane plus parallel read-only review/status lanes
 - `scripts/hermes-busdriver-agent-smoke`
-- `scripts/hermes-busdriver-delivery-status` including optional `--relay-role` / `--relay-config` resolver evidence, sanitized/normalized/redacted state-dir-aware read-only litmus/pre-PR freshness evidence, and metadata-only relay capability inventory entries for public helpers including agent-balance-plan, agent-smoke, deliver, smoke, finalization-readiness, and finalization-contract-status; litmus evidence fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
+- `scripts/hermes-busdriver-delivery-status` including a top-level `read_only: true` envelope marker, optional `--relay-role` / `--relay-config` resolver evidence, sanitized/normalized/redacted state-dir-aware read-only litmus/pre-PR freshness evidence, and metadata-only relay capability inventory entries for public helpers including agent-balance-plan, agent-smoke, deliver, smoke, finalization-readiness, and finalization-contract-status; litmus evidence fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver` including nested delivery-status timeout budgeting and `--busdriver-state-dir-name` forwarding to litmus evidence checks
 - `scripts/hermes-busdriver-litmus-status`
-- `scripts/hermes-busdriver-finalization-readiness` including advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries, embedded read-only `finalization_contract_status` evidence for downstream consumers, and embedded validated read-only `agent_balance_plan` evidence that remains advisory and non-dispatching
+- `scripts/hermes-busdriver-finalization-readiness` including strict top-level delivery-status child envelope validation (`schema`, `read_only is True`, boolean `ok`) before readiness evidence can be trusted, advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries, embedded read-only `finalization_contract_status` evidence for downstream consumers, and embedded validated read-only `agent_balance_plan` evidence that remains advisory and non-dispatching
 - `scripts/hermes-busdriver-finalization-contract-status` read-only ADR 0005 contract/capability matrix for policy-blocked remaining finalization work
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-pr-grind-loop`
@@ -66,34 +66,22 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification on `feat/balance-plan-readiness-evidence` based on `main` after PR #42 (`20e23fe70488b87c63c83e7abb5698c9a5bb9332`):
+Most recent local verification on `main` after PR #45 (`9773f00dfcbc6c15334c5f4f7a6e6f82dbec5083`):
 
 ```text
-focused balance/finalization-readiness/smoke tests: 67 passed
-finalization_readiness tests: 60 passed
-contract tests: 368 passed
-smoke_ok True
-postflight gate: ok True, changed files within scope, ignored files stable
-agent_balance_plan.schema hermes-busdriver-agent-balance-plan/v0
-agent_balance_plan.policy single_mutating_worker_multi_readonly_reviewers
-agent_balance_plan.max_mutating_draft_workers 1
-agent_balance_plan.read_only_lanes_parallelizable True
-agent_balance_plan.authority_any_true False
-agent_balance_plan.embedded_top_level True
-agent_balance_plan.embedded_handoff True
-agent_balance_plan.embedded_evidence True
-finalization_readiness.status blocked
-finalization_readiness.blockers ['litmus_status_not_fresh']
-finalization_contract_status.schema hermes-busdriver-finalization-contract-status/v0
-finalization_contract_status.current_policy non_mutating_relay_only
-finalization_contract_status.remaining_work_count 5
-finalization_contract_status.policy_blocked_count 5
-finalization_contract_status.retired_count 0
-finalization_contract_status.capability_allowed_count 0
-finalization_contract_status.finalization_allowed False
-finalization_contract_status.marker_write_allowed False
-finalization_contract_status.programmatic_execution_allowed False
-base main after PR #42: clean/synced before this branch
+repo status: main...origin/main clean/synced
+PR #45: merged
+post-merge smoke: ok true
+py_compile: ok true for public relay scripts
+contract tests via smoke: 379 passed
+focused delivery-status/finalization-readiness tests before merge: 131 passed
+delivery-status.schema hermes-busdriver-delivery-status/v0
+delivery-status.read_only True
+finalization-readiness child delivery-status validation: schema/read_only/boolean-ok strict
+invalid delivery-status child blocker: delivery_status_schema_invalid
+finalization_readiness.ready_for_merge_handoff observed for PR #45 before merge
+finalization authority flags: commit/push/PR/merge/deploy/release/publish/marker-write false
+claude-mem boundary log: observation 33676, project busdriver, agent_type hermes
 ```
 
 ## Still intentionally deferred
