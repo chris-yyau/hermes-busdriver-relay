@@ -32,7 +32,7 @@ Implemented:
 - `scripts/hermes-busdriver-deliver` including nested delivery-status timeout budgeting and `--busdriver-state-dir-name` forwarding to litmus evidence checks
 - `scripts/hermes-busdriver-litmus-status`
 - `scripts/hermes-busdriver-finalization-readiness` including strict top-level delivery-status child envelope validation (`schema`, `read_only is True`, boolean `ok`) before readiness evidence can be trusted, advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries, embedded read-only `finalization_contract_status` evidence for downstream consumers, and embedded validated read-only `agent_balance_plan` evidence that remains advisory and non-dispatching
-- `scripts/hermes-busdriver-finalization-contract-status` read-only ADR 0005 contract/capability matrix for policy-blocked remaining finalization work
+- `scripts/hermes-busdriver-finalization-contract-status` read-only ADR 0005 contract/capability matrix for policy-blocked remaining finalization work, with `contract_adrs` / `related_design_adrs` surfacing ADR 0006 design evidence for programmatic dual-review and Busdriver marker interop
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-pr-grind-loop`
 - `scripts/hermes-busdriver-smoke` including finalization-readiness smoke summaries that expose compact embedded `finalization_contract_status` schema/policy/summary/authority evidence

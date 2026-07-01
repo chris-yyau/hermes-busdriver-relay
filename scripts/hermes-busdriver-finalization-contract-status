@@ -15,6 +15,9 @@ from typing import Any
 SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
 VERSION = 0
 CONTRACT_ADR = "ADRs/0005-finalization-authority-integration-contract.md"
+ADR_0006 = "ADRs/0006-programmatic-dual-review-marker-interop.md"
+CONTRACT_ADRS = [CONTRACT_ADR, ADR_0006]
+RELATED_DESIGN_ADRS = [ADR_0006]
 CURRENT_POLICY = "non_mutating_relay_only"
 GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 SOURCE_REMAINING_WORK = "scripts/hermes-busdriver-finalization-readiness:finalization_guardrails.remaining_work"
@@ -142,8 +145,12 @@ CAPABILITY_MATRIX = [
         "operations": ["litmus_review", "pre_pr_lead_review", "pre_pr_backstop_review"],
         "missing_unlock_criteria": [
             "busdriver_approved_reviewer_role_mappings_or_native_invocation_seam",
+            "reviewer_role_mapping_contract",
             "reviewer_independence_contract",
+            "model_provider_session_independence",
             "prompt_data_egress_policy",
+            "data_egress_and_redaction",
+            "timestamps_and_freshness",
             "reviewer_input_schema",
             "reviewer_output_schema",
             "aggregation_semantics",
@@ -151,6 +158,8 @@ CAPABILITY_MATRIX = [
             "fail_closed_contract_tests",
         ],
         "missing_future_schemas": ["hermes-busdriver-dual-review-execution/v0"],
+        "contract_adrs": list(CONTRACT_ADRS),
+        "related_design_adrs": list(RELATED_DESIGN_ADRS),
         "adr_sections": [
             "Required Unlock Criteria by Surface / Programmatic litmus/pre-PR dual-review execution",
             "Data Egress, Reviewer Ownership, and Marker Ownership",
@@ -188,17 +197,23 @@ CAPABILITY_MATRIX = [
         "operations": ["busdriver_marker_write", "busdriver_marker_update", "busdriver_marker_consume"],
         "missing_unlock_criteria": [
             "busdriver_approved_marker_integration_surface",
+            "busdriver_approved_writer_identity",
+            "busdriver_trusted_writer_commands",
             "marker_ownership_contract",
             "allowed_marker_paths_and_symlink_safety",
             "marker_schema",
             "atomic_write_contract",
+            "atomic_fsync_rename_contract",
             "marker_lifecycle_contract",
             "marker_audit_provenance",
+            "marker_freshness_windows",
             "forged_stale_foreign_marker_detection",
             "busdriver_trust_semantics",
             "fail_closed_contract_tests",
         ],
         "missing_future_schemas": ["hermes-busdriver-marker-interop/v0"],
+        "contract_adrs": list(CONTRACT_ADRS),
+        "related_design_adrs": list(RELATED_DESIGN_ADRS),
         "adr_sections": [
             "Required Unlock Criteria by Surface / Marker interop and marker writes",
             "Data Egress, Reviewer Ownership, and Marker Ownership",
@@ -239,6 +254,8 @@ def build_status() -> dict[str, Any]:
         "ok": True,
         "read_only": True,
         "contract_adr": CONTRACT_ADR,
+        "contract_adrs": list(CONTRACT_ADRS),
+        "related_design_adrs": list(RELATED_DESIGN_ADRS),
         "source_remaining_work": SOURCE_REMAINING_WORK,
         "current_policy": CURRENT_POLICY,
         "policy": POLICY,

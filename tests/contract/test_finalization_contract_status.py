@@ -77,6 +77,11 @@ def test_contract_status_emits_read_only_policy_blocked_matrix():
     assert data["ok"] is True
     assert data["read_only"] is True
     assert data["contract_adr"] == "ADRs/0005-finalization-authority-integration-contract.md"
+    assert data["contract_adrs"] == [
+        "ADRs/0005-finalization-authority-integration-contract.md",
+        "ADRs/0006-programmatic-dual-review-marker-interop.md",
+    ]
+    assert data["related_design_adrs"] == ["ADRs/0006-programmatic-dual-review-marker-interop.md"]
     assert data["source_remaining_work"] == "scripts/hermes-busdriver-finalization-readiness:finalization_guardrails.remaining_work"
     assert data["current_policy"] == "non_mutating_relay_only"
     assert data["guardrails_schema"] == "hermes-busdriver-finalization-guardrails/v0"
@@ -132,11 +137,34 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
     assert "busdriver_approved_reviewer_role_mappings_or_native_invocation_seam" in by_id[
         "programmatic-litmus-pre-pr-dual-review"
     ]["missing_unlock_criteria"]
+    assert "reviewer_role_mapping_contract" in by_id[
+        "programmatic-litmus-pre-pr-dual-review"
+    ]["missing_unlock_criteria"]
+    assert "model_provider_session_independence" in by_id[
+        "programmatic-litmus-pre-pr-dual-review"
+    ]["missing_unlock_criteria"]
+    assert "timestamps_and_freshness" in by_id[
+        "programmatic-litmus-pre-pr-dual-review"
+    ]["missing_unlock_criteria"]
+    assert "data_egress_and_redaction" in by_id[
+        "programmatic-litmus-pre-pr-dual-review"
+    ]["missing_unlock_criteria"]
     assert "marker_write_separation_contract" in by_id["programmatic-litmus-pre-pr-dual-review"]["missing_unlock_criteria"]
+    assert by_id["programmatic-litmus-pre-pr-dual-review"]["related_design_adrs"] == [
+        "ADRs/0006-programmatic-dual-review-marker-interop.md"
+    ]
     assert "busdriver_approved_pr_grind_seam" in by_id["mutating-pr-grind-fix-push-loop"]["missing_unlock_criteria"]
     assert "latest_pr_head_tracking" in by_id["mutating-pr-grind-fix-push-loop"]["missing_unlock_criteria"]
     assert "marker_ownership_contract" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert "busdriver_approved_writer_identity" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert "busdriver_trusted_writer_commands" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
     assert "atomic_write_contract" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert "atomic_fsync_rename_contract" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert "allowed_marker_paths_and_symlink_safety" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert "marker_freshness_windows" in by_id["busdriver-marker-interop"]["missing_unlock_criteria"]
+    assert by_id["busdriver-marker-interop"]["related_design_adrs"] == [
+        "ADRs/0006-programmatic-dual-review-marker-interop.md"
+    ]
     assert "hermes-busdriver-mutating-delivery-run/v0" in by_id["mutating-final-result-envelope"]["missing_future_schemas"]
     assert "hermes-busdriver-marker-interop/v0" in by_id["busdriver-marker-interop"]["missing_future_schemas"]
 
