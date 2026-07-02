@@ -86,7 +86,7 @@ def test_relay_completion_sweep_lessons_are_durable_skill_reference():
     skill_text = SKILL.read_text()
     reference_text = RELAY_COMPLETION_SWEEP_REFERENCE.read_text()
 
-    assert RELAY_COMPLETION_SWEEP_REFERENCE.name in skill_text
+    assert "references/relay-completion-sweep-lessons.md" in skill_text
     assert "Do a final Phase-0 sweep after every merged slice" in reference_text
     assert "PR-grind `BLOCKED` during early CI/reviewer startup is not permission to merge" in reference_text
     assert "Do not keep retrying after a clean PR-grind result" in reference_text
