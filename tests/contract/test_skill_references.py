@@ -17,6 +17,7 @@ PR56_REFERENCE = REFERENCE_DIR / "pr56-skill-sync-delivery-lessons.md"
 CURRENT_STATUS_READONLY_REVIEW_REFERENCE = REFERENCE_DIR / "current-status-readonly-review-lessons.md"
 RELAY_COMPLETION_SWEEP_REFERENCE = REFERENCE_DIR / "relay-completion-sweep-lessons.md"
 PR60_REFERENCE = REFERENCE_DIR / "pr60-skill-sync-delivery-lessons.md"
+PR61_TO_PR62_REFERENCE = REFERENCE_DIR / "pr61-pr62-continuation-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -104,3 +105,17 @@ def test_pr60_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "Durability tests should assert relative reference paths" in reference_text
     assert "After PR creation outside Claude runtime, run post-PR marker cleanup manually" in reference_text
     assert "Release finalization locks with the same branch identity" in reference_text
+
+
+def test_pr61_to_pr62_continuation_lessons_are_durable_skill_reference():
+    assert PR61_TO_PR62_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR61_TO_PR62_REFERENCE.read_text()
+
+    assert "references/pr61-pr62-continuation-lessons.md" in skill_text
+    assert "Prefer live observed plugin version over the planned value" in reference_text
+    assert "If interrupted after corrected postflight, resume from the dirty docs branch" in reference_text
+    assert "finalization_allowed=false" not in reference_text
+    assert "/Users/vfrvndtt" not in reference_text
+    assert "/tmp/pr62_current_status_verifier.py" not in reference_text
+    assert "<Hermes agent-run baseline.json>" in reference_text
