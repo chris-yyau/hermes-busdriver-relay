@@ -101,4 +101,6 @@ def test_pr60_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "references/pr60-skill-sync-delivery-lessons.md" in skill_text
     assert "Agent-draft invocations need explicit repo/plugin root" in reference_text
     assert "Recover generated ignored-cache postflight blockers surgically" in reference_text
+    assert "Durability tests should assert relative reference paths" in reference_text
     assert "After PR creation outside Claude runtime, run post-PR marker cleanup manually" in reference_text
+    assert "Release finalization locks with the same branch identity" in reference_text
