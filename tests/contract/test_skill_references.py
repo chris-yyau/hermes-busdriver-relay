@@ -18,6 +18,7 @@ CURRENT_STATUS_READONLY_REVIEW_REFERENCE = REFERENCE_DIR / "current-status-reado
 RELAY_COMPLETION_SWEEP_REFERENCE = REFERENCE_DIR / "relay-completion-sweep-lessons.md"
 PR60_REFERENCE = REFERENCE_DIR / "pr60-skill-sync-delivery-lessons.md"
 PR61_TO_PR62_REFERENCE = REFERENCE_DIR / "pr61-pr62-continuation-lessons.md"
+PR63_TO_PR64_REFERENCE = REFERENCE_DIR / "pr63-pr64-skill-sync-redaction-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -118,4 +119,21 @@ def test_pr61_to_pr62_continuation_lessons_are_durable_skill_reference():
     assert "finalization_allowed=false" not in reference_text
     assert "/Users/vfrvndtt" not in reference_text
     assert "/tmp/pr62_current_status_verifier.py" not in reference_text
+    assert "<Hermes agent-run baseline.json>" in reference_text
+
+
+def test_pr63_to_pr64_skill_sync_redaction_lessons_are_durable_skill_reference():
+    assert PR63_TO_PR64_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR63_TO_PR64_REFERENCE.read_text()
+
+    assert "references/pr63-pr64-skill-sync-redaction-lessons.md" in skill_text
+    assert "Sanitize installed-skill references before repo sync" in reference_text
+    assert "Patch installed and repo copies together when redacting synced references" in reference_text
+    assert "Durability tests should include negative leakage assertions" in reference_text
+    assert "Keep docs/status refreshes evidence-only" in reference_text
+    assert "/Users/vfrvndtt" not in reference_text
+    assert "/tmp/" not in reference_text
+    assert ".hermes/agent-runs" not in reference_text
+    assert "<current-status-verifier>" in reference_text
     assert "<Hermes agent-run baseline.json>" in reference_text
