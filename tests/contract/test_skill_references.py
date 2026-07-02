@@ -15,6 +15,7 @@ PR49_TO_PR52_REFERENCES = {
 PR53_TO_PR55_REFERENCE = REFERENCE_DIR / "pr53-pr55-skill-sync-lessons.md"
 PR56_REFERENCE = REFERENCE_DIR / "pr56-skill-sync-delivery-lessons.md"
 CURRENT_STATUS_READONLY_REVIEW_REFERENCE = REFERENCE_DIR / "current-status-readonly-review-lessons.md"
+RELAY_COMPLETION_SWEEP_REFERENCE = REFERENCE_DIR / "relay-completion-sweep-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -78,3 +79,14 @@ def test_continuation_reference_preserves_late_async_follow_up_policy():
     assert "late async reviewer/subagent result arrives after a PR was already merged" in reference_text
     assert "Non-blocking suggestions can become the next tiny follow-up PR" in reference_text
     assert "do not silently ignore them or pretend they were handled in the earlier PR" in reference_text
+
+
+def test_relay_completion_sweep_lessons_are_durable_skill_reference():
+    assert RELAY_COMPLETION_SWEEP_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = RELAY_COMPLETION_SWEEP_REFERENCE.read_text()
+
+    assert RELAY_COMPLETION_SWEEP_REFERENCE.name in skill_text
+    assert "Do a final Phase-0 sweep after every merged slice" in reference_text
+    assert "PR-grind `BLOCKED` during early CI/reviewer startup is not permission to merge" in reference_text
+    assert "Do not keep retrying after a clean PR-grind result" in reference_text
