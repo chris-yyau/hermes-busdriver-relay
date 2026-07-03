@@ -20,6 +20,14 @@ PR60_REFERENCE = REFERENCE_DIR / "pr60-skill-sync-delivery-lessons.md"
 PR61_TO_PR62_REFERENCE = REFERENCE_DIR / "pr61-pr62-continuation-lessons.md"
 PR63_TO_PR64_REFERENCE = REFERENCE_DIR / "pr63-pr64-skill-sync-redaction-lessons.md"
 PR66_REFERENCE = REFERENCE_DIR / "pr66-current-status-refresh-lessons.md"
+PR67_REFERENCE = REFERENCE_DIR / "pr67-skill-sync-review-fix-lessons.md"
+PR68_REFERENCE = REFERENCE_DIR / "pr68-late-async-test-followup-lessons.md"
+READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE = REFERENCE_DIR / "read-only-skill-sync-audit-lessons.md"
+PRIVATE_PATH_LEAKS = (
+    "/" + "Users/" + "vfrvndtt",
+    "/" + "tmp/",
+    ".hermes/" + "agent-runs",
+)
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -118,8 +126,8 @@ def test_pr61_to_pr62_continuation_lessons_are_durable_skill_reference():
     assert "Prefer live observed plugin version over the planned value" in reference_text
     assert "If interrupted after corrected postflight, resume from the dirty docs branch" in reference_text
     assert "finalization_allowed=false" not in reference_text
-    assert "/Users/vfrvndtt" not in reference_text
-    assert "/tmp/pr62_current_status_verifier.py" not in reference_text
+    assert PRIVATE_PATH_LEAKS[0] not in reference_text
+    assert (PRIVATE_PATH_LEAKS[1] + "pr62_current_status_verifier.py") not in reference_text
     assert "<Hermes agent-run baseline.json>" in reference_text
 
 
@@ -133,9 +141,8 @@ def test_pr63_to_pr64_skill_sync_redaction_lessons_are_durable_skill_reference()
     assert "Patch installed and repo copies together when redacting synced references" in reference_text
     assert "Durability tests should include negative leakage assertions" in reference_text
     assert "Keep docs/status refreshes evidence-only" in reference_text
-    assert "/Users/vfrvndtt" not in reference_text
-    assert "/tmp/" not in reference_text
-    assert ".hermes/agent-runs" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
     assert "<current-status-verifier>" in reference_text
     assert "<Hermes agent-run baseline.json>" in reference_text
 
@@ -155,6 +162,53 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "saved PR base branch" in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
-    assert "/Users/vfrvndtt" not in reference_text
-    assert "/tmp/" not in reference_text
-    assert ".hermes/agent-runs" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pr67_skill_sync_review_fix_lessons_are_durable_skill_reference():
+    assert PR67_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR67_REFERENCE.read_text()
+
+    assert "references/pr67-skill-sync-review-fix-lessons.md" in skill_text
+    assert "Do not weaken fail-closed helper semantics in lessons" in reference_text
+    assert "After PR creation, prefer follow-up commits over amend" in reference_text
+    assert "Restart all latest-head evidence after a follow-up push" in reference_text
+    assert "Carry the live PR base branch through cleanup lessons" in reference_text
+    assert "Do not hard-code `main` or `main...origin/main` in reusable cleanup/final-audit guidance" in reference_text
+    assert "switch back to `main`" not in reference_text
+    assert "saved base branch against its upstream" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pr68_late_async_test_followup_lessons_are_durable_skill_reference():
+    assert PR68_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR68_REFERENCE.read_text()
+
+    assert "references/pr68-late-async-test-followup-lessons.md" in skill_text
+    assert "Classify late async results against current merged state" in reference_text
+    assert "Convert cheap test-only non-blocking suggestions into tiny follow-up PRs" in reference_text
+    assert "Keep follow-up scope minimal" in reference_text
+    assert "Remote branch deletion can already be done by GitHub merge" in reference_text
+    assert "remote ref does not exist" in reference_text
+    assert "fetch --prune" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
+    assert READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE.read_text()
+
+    assert "references/read-only-skill-sync-audit-lessons.md" in skill_text
+    assert "Stay strictly read-only" in reference_text
+    assert "Confirm the selected slice from live drift" in reference_text
+    assert "Patch installed and repo copies to the same sanitized text" in reference_text
+    assert "Preserve authority boundaries" in reference_text
+    assert "CURRENT_STATUS follow-up after merge" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
