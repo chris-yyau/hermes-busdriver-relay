@@ -148,6 +148,8 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "references/pr66-current-status-refresh-lessons.md" in skill_text
     assert "Keep CURRENT_STATUS refreshes evidence-only" in reference_text
     assert "Do not rely on shell expansion inside `hermes-busdriver-deliver --verifier`" in reference_text
+    assert "keep the wrapper fail-closed" in reference_text
+    assert "Do not convert a nonzero helper return into warning-only success" in reference_text
     assert "Finalization locks are branch-keyed" in reference_text
     assert "End with a final audit after docs/status refresh merges" in reference_text
     assert "/Users/vfrvndtt" not in reference_text
