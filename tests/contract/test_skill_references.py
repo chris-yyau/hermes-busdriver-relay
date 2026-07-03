@@ -156,5 +156,5 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
     assert "/Users/vfrvndtt" not in reference_text
-    assert "/tmp/pr66" not in reference_text
+    assert "/tmp/" not in reference_text
     assert ".hermes/agent-runs" not in reference_text
