@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against the installed Busdriver marketplace plugin `1.76.1` used by smoke.
+Last verified against the installed Busdriver marketplace plugin `1.77.0` used by smoke.
 
 ## Locations
 
@@ -66,19 +66,19 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR #63 merge on `main` at clean/synced head `aba438eef0696135d0969088f03e348f5054acef` with Busdriver marketplace plugin `1.76.1`:
+Most recent local verification after PR #65 merge on `main` at clean/synced head `f28b623b2092d1f0ac1927e965b94e4f9d51290f` with Busdriver marketplace plugin `1.77.0`:
 
 ```text
-repo status after PR63 merge: main...origin/main clean/synced at aba438eef0696135d0969088f03e348f5054acef
+repo status after PR65 merge: main...origin/main clean/synced at f28b623b2092d1f0ac1927e965b94e4f9d51290f
 open PRs: none
 relay locks: none
-installed Busdriver marketplace plugin used for smoke/status: 1.76.1
-repo skill source synced back to installed Hermes skill after PR63: byte-for-byte clean
+installed Busdriver marketplace plugin used for smoke/status: 1.77.0
+repo skill source synced back to installed Hermes skill after PR65: byte-for-byte clean
 litmus/PR markers after merge: none fresh; empty main diff reports stale_or_missing as expected
-uvx --from pytest pytest tests/contract/test_skill_references.py -q -p no:cacheprovider: 9 passed in 0.02s
-uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 389 passed in 69.96s (0:01:09)
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_skill_references.py -q -p no:cacheprovider: 10 passed in 0.03s
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 390 passed in 81.51s (0:01:21)
 python3 -m py_compile scripts/hermes-busdriver-*: exit 0
-scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty: ok true; py_compile ok; contract tests pass; status summary plugin/package version 1.76.1; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness remains non-mutating/no_finalization_candidate; finalization authority flags remain false
+scripts/hermes-busdriver-smoke --plugin-root "$BUSDRIVER_PLUGIN_ROOT" --repo . --pretty: ok true; py_compile ok; contract tests pass (390 passed in 82.08s (0:01:22)); status summary plugin/package version 1.77.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness remains non-mutating/no_finalization_candidate; finalization authority flags remain false
 ```
 
 ## Still intentionally deferred
