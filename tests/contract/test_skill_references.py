@@ -23,6 +23,9 @@ PR66_REFERENCE = REFERENCE_DIR / "pr66-current-status-refresh-lessons.md"
 PR67_REFERENCE = REFERENCE_DIR / "pr67-skill-sync-review-fix-lessons.md"
 PR68_REFERENCE = REFERENCE_DIR / "pr68-late-async-test-followup-lessons.md"
 READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE = REFERENCE_DIR / "read-only-skill-sync-audit-lessons.md"
+IDLE_CLEAN_FINALIZATION_READINESS_REFERENCE = REFERENCE_DIR / "idle-clean-finalization-readiness-lessons.md"
+IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE = REFERENCE_DIR / "idle-finalization-readiness-status-audit-lessons.md"
+SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-current-status-convergence-lessons.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -219,3 +222,33 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "CURRENT_STATUS follow-up after merge" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
+
+
+def test_idle_and_convergence_lessons_are_durable_skill_references():
+    skill_text = SKILL.read_text()
+    references = {
+        IDLE_CLEAN_FINALIZATION_READINESS_REFERENCE: [
+            "distinguish **no candidate** from **blocked candidate**",
+            "stale-litmus detail in `delivery_status.decision.blockers`",
+            "Leave the dirty tree for main Hermes/operator verification/finalization",
+        ],
+        IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE: [
+            "distinguish **no finalization candidate exists** from **a candidate exists but is blocked**",
+            "Dirty draft changes with stale/blocked litmus evidence must remain `blocked`",
+            "PR/merge paths with stale/non-clean evidence must remain blocked",
+        ],
+        SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE: [
+            "Run a whole-skill installed-vs-repo comparison",
+            "CURRENT_STATUS required fresh tokens are present and stale tokens are absent",
+            "claude-mem is updated when configured/approved",
+        ],
+    }
+
+    for reference, expected_phrases in references.items():
+        assert reference.exists()
+        assert f"references/{reference.name}" in skill_text
+        reference_text = reference.read_text()
+        for phrase in expected_phrases:
+            assert phrase in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text

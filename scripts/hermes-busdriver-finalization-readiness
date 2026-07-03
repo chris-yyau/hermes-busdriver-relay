@@ -592,6 +592,17 @@ def delivery_status_schema_valid(delivery: dict[str, Any]) -> bool:
     )
 
 
+def is_idle_without_finalization_candidate(args: argparse.Namespace, delivery: dict[str, Any]) -> bool:
+    if args.pr:
+        return False
+    repo = delivery.get("repo") if isinstance(delivery.get("repo"), dict) else {}
+    decision = delivery.get("decision") if isinstance(delivery.get("decision"), dict) else {}
+    return repo.get("dirty") is False and (
+        decision.get("stage") == "no_local_changes"
+        or decision.get("status") == "no_local_delivery_candidate"
+    )
+
+
 def readiness(
     args: argparse.Namespace,
     delivery: dict[str, Any],
@@ -612,6 +623,8 @@ def readiness(
         blockers.append("finalization_contract_status_unavailable")
     if agent_balance_plan.get("ok") is not True:
         blockers.append("agent_balance_plan_unavailable")
+    if is_idle_without_finalization_candidate(args, delivery):
+        blockers = [b for b in blockers if b != "litmus_status_not_fresh"]
 
     repo = delivery.get("repo") or {}
     target = infer_target(args, delivery)
