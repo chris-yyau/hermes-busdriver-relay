@@ -319,6 +319,29 @@ def test_dirty_tree_generates_read_only_commit_or_pr_handoff_without_side_effect
     assert not (repo / ".opencode").exists()
 
 
+def test_clean_idle_repo_reports_no_finalization_candidate_despite_stale_litmus(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    litmus = litmus_status_fixture(tmp_path / "blocked-litmus-status.json", repo=repo, status="blocked")
+
+    cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["delivery_status"]["decision"]["stage"] == "no_local_changes"
+    assert data["delivery_status"]["repo"]["dirty"] is False
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "no_finalization_candidate"
+    assert "litmus_status_not_fresh" in data["delivery_status"]["decision"]["blockers"]
+    assert "litmus_status_not_fresh" not in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert data["handoff_envelope"]["readiness_status"] == "no_finalization_candidate"
+    assert data["decision"]["status"] == "no_finalization_candidate"
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+    assert_no_positive_finalization_authority(data)
+
+
 def test_readiness_handoff_includes_machine_readable_remaining_finalization_work(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
