@@ -152,6 +152,9 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "Do not convert a nonzero helper return into warning-only success" in reference_text
     assert "Finalization locks are branch-keyed" in reference_text
     assert "End with a final audit after docs/status refresh merges" in reference_text
+    assert "saved PR base branch" in reference_text
+    assert "main...origin/main" not in reference_text
+    assert "switch back to `main`" not in reference_text
     assert "/Users/vfrvndtt" not in reference_text
     assert "/tmp/pr66" not in reference_text
     assert ".hermes/agent-runs" not in reference_text
