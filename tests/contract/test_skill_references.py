@@ -155,10 +155,13 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "references/pr66-current-status-refresh-lessons.md" in skill_text
     assert "Keep CURRENT_STATUS refreshes evidence-only" in reference_text
     assert "Do not rely on shell expansion inside `hermes-busdriver-deliver --verifier`" in reference_text
+    assert "Do not treat dirty-tree smoke failure as a docs/status regression" in reference_text
+    assert "deliver verify on the dirty docs-only draft" in reference_text
+    assert "smoke with resolved absolute plugin root on the clean committed branch" in reference_text
     assert "keep the wrapper fail-closed" in reference_text
     assert "Do not convert a nonzero helper return into warning-only success" in reference_text
-    assert "Finalization locks are branch-keyed" in reference_text
-    assert "End with a final audit after docs/status refresh merges" in reference_text
+    assert "6. **Finalization locks are branch-keyed" in reference_text
+    assert "7. **End with a final audit after docs/status refresh merges" in reference_text
     assert "saved PR base branch" in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
@@ -208,6 +211,10 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "Stay strictly read-only" in reference_text
     assert "Confirm the selected slice from live drift" in reference_text
     assert "Patch installed and repo copies to the same sanitized text" in reference_text
+    assert "avoid adding the raw forbidden sentinel strings in new test constants" in reference_text
+    assert "include that sanitized reference in the same repo sync" in reference_text
+    assert "run a final whole-skill installed-vs-repo comparison" in reference_text
+    assert "classify it as a blocker or explicit scope decision" in reference_text
     assert "Preserve authority boundaries" in reference_text
     assert "CURRENT_STATUS follow-up after merge" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
