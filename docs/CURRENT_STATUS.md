@@ -66,18 +66,18 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR #69 merge on `main` at clean/synced head `7493701ff07e36cfbbc1507d04ae7f8ae5fa6ef2` with Busdriver marketplace plugin `1.78.0`:
+Most recent local verification after PR #71 merge on `main` at clean/synced head `f6b2e6bdbd1945ea34c51adecc6083427b62c692` with Busdriver marketplace plugin `1.78.0`:
 
 ```text
-repo status after PR69 merge: main...origin/main clean/synced at 7493701ff07e36cfbbc1507d04ae7f8ae5fa6ef2
+repo status after PR71 merge: main...origin/main clean/synced at f6b2e6bdbd1945ea34c51adecc6083427b62c692
 open PRs: []
 relay locks: count 0
 installed Busdriver marketplace plugin used for smoke/status: 1.78.0
-repo skill source synced back to installed Hermes skill after PR69: missing=[], extra=[], diffs=[], repo_ref_count=66, installed_ref_count=66
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/contract/test_skill_references.py -q -p no:cacheprovider: 14 passed in 0.03s
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/contract -q -p no:cacheprovider: 394 passed in 128.21s (0:02:08)
+repo skill source synced back to installed Hermes skill after PR71: missing=[], extra=[], diffs=[], repo_ref_count=66, installed_ref_count=66
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/contract/test_skill_references.py -q -p no:cacheprovider: 14 passed in 0.04s
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/contract -q -p no:cacheprovider: 394 passed in 100.26s (0:01:40)
 python3 -m compileall -q scripts tests: passed
-python3 scripts/hermes-busdriver-smoke --plugin-root /Volumes/work/projects/busdriver --repo . --pretty: ok true; py_compile ok; contract tests pass (394 passed in 125.59s (0:02:05)); status summary package_version 1.78.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready=false/status=blocked; commit/merge/finalization authority flags false
+python3 scripts/hermes-busdriver-smoke --plugin-root /Volumes/work/projects/busdriver --repo . --pretty: ok true; py_compile ok; contract tests pass (394 passed in 98.61s (0:01:38)); status summary package_version 1.78.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready=false/status=blocked; commit/merge/finalization authority flags false
 ```
 
 ## Still intentionally deferred
