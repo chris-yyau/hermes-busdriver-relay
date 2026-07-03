@@ -19,6 +19,7 @@ RELAY_COMPLETION_SWEEP_REFERENCE = REFERENCE_DIR / "relay-completion-sweep-lesso
 PR60_REFERENCE = REFERENCE_DIR / "pr60-skill-sync-delivery-lessons.md"
 PR61_TO_PR62_REFERENCE = REFERENCE_DIR / "pr61-pr62-continuation-lessons.md"
 PR63_TO_PR64_REFERENCE = REFERENCE_DIR / "pr63-pr64-skill-sync-redaction-lessons.md"
+PR66_REFERENCE = REFERENCE_DIR / "pr66-current-status-refresh-lessons.md"
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
@@ -137,3 +138,18 @@ def test_pr63_to_pr64_skill_sync_redaction_lessons_are_durable_skill_reference()
     assert ".hermes/agent-runs" not in reference_text
     assert "<current-status-verifier>" in reference_text
     assert "<Hermes agent-run baseline.json>" in reference_text
+
+
+def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
+    assert PR66_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR66_REFERENCE.read_text()
+
+    assert "references/pr66-current-status-refresh-lessons.md" in skill_text
+    assert "Keep CURRENT_STATUS refreshes evidence-only" in reference_text
+    assert "Do not rely on shell expansion inside `hermes-busdriver-deliver --verifier`" in reference_text
+    assert "Finalization locks are branch-keyed" in reference_text
+    assert "End with a final audit after docs/status refresh merges" in reference_text
+    assert "/Users/vfrvndtt" not in reference_text
+    assert "/tmp/pr66" not in reference_text
+    assert ".hermes/agent-runs" not in reference_text
