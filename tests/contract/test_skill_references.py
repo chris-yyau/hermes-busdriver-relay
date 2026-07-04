@@ -248,6 +248,9 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "Do not create a new one-session skill" in reference_text
     assert "Treat meta skill-review prompts as part of the current convergence loop" in reference_text
     assert "During an explicit skill-library review turn, only mutate the skill library" in reference_text
+    assert "treat it as an interrupt" in reference_text
+    assert "dispatch agents, or touch PR markers" in reference_text
+    assert "stop with a concise report" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
