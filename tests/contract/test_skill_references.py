@@ -30,6 +30,7 @@ RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE = REFERENCE_DIR / "relay-router-agent-ro
 RELAY_ROUTER_ROLE_POLICY_REFERENCE = REFERENCE_DIR / "relay-router-role-policy-2026-07.md"
 SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE = REFERENCE_DIR / "skill-sync-pr75-router-role-lessons.md"
 PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lessons.md"
+POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE = REFERENCE_DIR / "post-merge-skill-drift-before-status-refresh.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -313,6 +314,13 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             "After PR reviewer fixes, restart latest-head evidence",
             "Treat reviewer-bot “trivial” comments as blocking when PR-grind classifies them actionable",
             "If skill maintenance during delivery creates a new installed-only reference, sync it in the same PR before status refresh",
+        ],
+        POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE: [
+            "After every skill-sync PR merge, return to the synced base branch and run the whole-skill installed-vs-repo comparison again",
+            "Only after installed skill and repo source compare clean should `docs/CURRENT_STATUS.md` become the last evidence-only refresh slice",
+            "hermes-busdriver-litmus-status` may report `branch_diff_hash_unavailable: empty diff`",
+            "hermes-busdriver-finalization-contract-status` is currently a repo-cwd helper with no `--repo` option",
+            "Do not refresh `CURRENT_STATUS` between two skill-sync PRs",
         ],
     }
 
