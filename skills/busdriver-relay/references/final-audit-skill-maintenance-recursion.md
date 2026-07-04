@@ -9,6 +9,7 @@ Use when a Busdriver-relay delivery is in the convergence/final-audit phase and 
 3. **Separate two kinds of learning.** Session-specific PR/head/test evidence belongs in `docs/CURRENT_STATUS.md` or PR bodies; reusable process lessons belong in a class-level reference under `references/` and should be synced installed↔repo exactly once per convergence loop.
 4. **Do not update skills while merely reporting a pending async backstop unless the lesson is already stable.** Extra installed-skill edits after a fresh backstop invalidate the final-audit clean-skill condition and can also invalidate already-collected evidence if committed later.
 5. **Final audit pass criteria include no newly-created skill drift.** The completion audit should verify: clean synced base, open PRs `[]`, relay locks `0`, no topic refs, no fresh markers, installed↔repo skill compare clean, `CURRENT_STATUS` required tokens present/stale tokens absent, focused/full tests pass, compileall passes, smoke `ok=true`, and finalization policy remains fail-closed.
+6. **Handle explicit skill-library review requests as a single consolidated maintenance step.** If the user asks to review the conversation and update skills while relay delivery is still converging, make at most one class-level installed-skill update unless a real safety/correctness issue requires more. Prefer patching this umbrella/reference over creating another narrow PR/session reference, and then resume delivery with a planned repo↔installed sync if the project requires clean skill compare.
 
 ## Safe convergence pattern
 
