@@ -53,6 +53,7 @@ scripts/hermes-busdriver-finalization-readiness
                                            Read-only finalization handoff envelope
 scripts/hermes-busdriver-finalization-contract-status
                                            Read-only ADR 0005 finalization contract/capability matrix
+scripts/hermes-busdriver-relay-brief      Read-only compact roadmap/status briefing for Telegram
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-pr-grind-loop     Read-only bounded PR-grind polling loop
 scripts/hermes-busdriver-smoke             Safe smoke runner
@@ -247,6 +248,15 @@ scripts/hermes-busdriver-finalization-contract-status --pretty
 ```
 
 This read-only helper emits `hermes-busdriver-finalization-contract-status/v0`: a machine-readable ADR 0005 status/capability matrix for the same `finalization_guardrails.remaining_work` IDs surfaced by finalization-readiness. It keeps legacy `contract_adr` compatibility while also exposing `contract_adrs` and `related_design_adrs`, including ADR 0006 as the non-mutating design/spike pointer for `programmatic-litmus-pre-pr-dual-review` and `busdriver-marker-interop`. Each row remains `status=policy_blocked`, `retired=false`, and `capability_allowed=false`, with missing unlock criteria such as Busdriver-approved seams, mutating schemas, hook-runtime/equivalent proof, programmatic-review contracts, reviewer independence/freshness/egress-redaction evidence, PR-grind mutation contracts, and marker ownership/atomicity/fsync-rename/path-symlink/trust semantics. It does not inspect or mutate target repos, write markers, run dispatchers, retire remaining work, or grant finalization authority.
+
+### Compact relay brief
+
+```bash
+scripts/hermes-busdriver-relay-brief --pretty
+scripts/hermes-busdriver-relay-brief --brief
+```
+
+This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the five current roadmap tasks: ADR0005 unlock contract, mutating PR-grind fix-loop design, marker interop contract, OpenCode adapter proof, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` stops cleanup loops when the repo and skill source are clean but finalization remains policy-blocked.
 
 ### PR-grind readiness check
 
