@@ -270,6 +270,8 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "do not promise the next repository action in that same reply" in reference_text
     assert "Treat “be active” skill-library prompts as permission to improve skills, not to resume delivery" in reference_text
     assert "do not use the “be active” wording as permission to inspect repos" in reference_text
+    assert "Avoid recursive micro-lessons from repeated skill-library interrupts" in reference_text
+    assert "do not manufacture another near-duplicate rule just to be active" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
