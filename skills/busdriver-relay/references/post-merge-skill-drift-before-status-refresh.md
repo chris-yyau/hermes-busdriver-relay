@@ -14,6 +14,7 @@ Correct sequence:
 4. Treat reviewer-bot actionable comments as PR-grind blockers even when the bot labels them trivial/low severity; make the minimal fix unless evidence shows the comment is stale, outdated, or non-actionable.
 5. For completion audits on clean `main`, `hermes-busdriver-litmus-status` may report `branch_diff_hash_unavailable: empty diff`; this is expected diagnostic evidence when there is no PR diff, not a code regression. Pair it with marker cleanup/staleness checks rather than treating it as a fresh PR-review requirement.
 6. `hermes-busdriver-finalization-contract-status` is currently a repo-cwd helper with no `--repo` option; run it from the target repo instead of passing `--repo` during final audit/status evidence collection.
+7. Any commit made after an async PR backstop verdict invalidates that verdict, even if the new commit is another tiny skill-sync/docs-only fix. Recompute the branch diff hash, rerun PR-mode Codex lead if needed, dispatch a fresh read-only backstop for the new hash, and only then write the trusted backstop/PR marker. Never persist a backstop JSON whose `reviewed_diff_hash` belongs to a prior HEAD.
 
 ## Pitfalls
 

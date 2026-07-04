@@ -312,7 +312,7 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             "Use the installed plugin version for smoke/status evidence",
             "Pre-PR dual-voice sequence is still mandatory after commit",
             "After PR reviewer fixes, restart latest-head evidence",
-            "Treat reviewer-bot “trivial” comments as blocking when PR-grind classifies them actionable",
+            "Treat reviewer-bot “trivial” comments as blocking when PR-grind classifies them as actionable",
             "If skill maintenance during delivery creates a new installed-only reference, sync it in the same PR before status refresh",
         ],
         POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE: [
@@ -320,6 +320,8 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             "Only after installed skill and repo source compare clean should `docs/CURRENT_STATUS.md` become the last evidence-only refresh slice",
             "hermes-busdriver-litmus-status` may report `branch_diff_hash_unavailable: empty diff`",
             "hermes-busdriver-finalization-contract-status` is currently a repo-cwd helper with no `--repo` option",
+            "Any commit made after an async PR backstop verdict invalidates that verdict",
+            "Never persist a backstop JSON whose `reviewed_diff_hash` belongs to a prior HEAD",
             "Do not refresh `CURRENT_STATUS` between two skill-sync PRs",
         ],
     }
