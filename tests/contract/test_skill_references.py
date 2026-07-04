@@ -104,6 +104,7 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
         RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE: [
             "Busdriver + Claude Code = canonical authority",
             "Hard rule: **Only Claude/Busdriver may claim done",
+            "future-only design target",
             '"relay.pr.backstop": ["claude-code"]',
             "Authority constraints remain false for all router/status roles",
             "primary-controller agent",

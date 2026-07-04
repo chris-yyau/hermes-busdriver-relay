@@ -43,9 +43,9 @@ The next safe relay build is a read-only Hermes router/status expansion, not Pi:
 6. Treat OpenCode+Go as a candidate only after read-only smoke and isolated draft smoke.
 7. Keep Grok/Gemini read-only until data-egress and invocation contracts exist.
 
-## Suggested config shape
+## Future router config shape
 
-Stay compatible with the current relay-owned config contract:
+This is a future-only design target that stays compatible with the relay-owned config JSON contract. Do not copy it as a current resolver-ready config until the matching router role inventory exists; today's resolver may reject roles such as `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, or `relay.ide.manual` as `unknown_role`.
 
 ```json
 {
