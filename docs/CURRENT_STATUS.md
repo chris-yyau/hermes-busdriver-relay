@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against the installed Busdriver marketplace plugin `1.78.0` used by smoke.
+Last verified against the installed Busdriver marketplace plugin `1.79.0` used by smoke.
 
 ## Locations
 
@@ -66,18 +66,22 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR #76 merge on `main` at clean/synced head `fc0f7786eb10c9e749fc6ad910d9bebada720ff5` with Busdriver marketplace plugin `1.78.0`:
+Most recent local verification after PR #79 merge on `main` at clean/synced head `fd88b2e19040b567645528bc072d0539ad623b63` with Busdriver marketplace plugin `1.79.0`:
 
 ```text
-repo status after PR76 merge: main...origin/main clean/synced at fc0f7786eb10c9e749fc6ad910d9bebada720ff5
+repo status after PR79 merge: main...origin/main clean/synced at fd88b2e19040b567645528bc072d0539ad623b63
 open PRs: []
 relay locks: count 0
-installed Busdriver marketplace plugin used for smoke/status: 1.78.0
-repo skill source synced back to installed Hermes skill after PR76: missing=[], extra=[], diffs=[], repo_ref_count=72, installed_ref_count=72
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_finalization_readiness.py tests/contract/test_delivery_status.py tests/contract/test_skill_references.py -q -p no:cacheprovider: 149 passed in 41.53s
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 398 passed in 80.59s (0:01:20)
+topic refs for PR78/PR79 follow-up branches: none locally or on origin after fetch/prune cleanup
+installed Busdriver marketplace plugin used for smoke/status: 1.79.0
+Busdriver source checkout package observed during Phase 0: 1.78.0
+repo skill source synced back to installed Hermes skill after PR79: missing=[], extra=[], diffs=[], repo_ref_count=74, installed_ref_count=74
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_finalization_readiness.py tests/contract/test_delivery_status.py tests/contract/test_skill_references.py -q -p no:cacheprovider: 149 passed in 41.50s
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 398 passed in 79.91s (0:01:19)
 python3 -m compileall -q scripts tests: passed
-scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty: ok true; py_compile ok; contract tests pass (398 passed in 81.84s (0:01:21)); status summary package_version 1.78.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready=false/status=no_finalization_candidate; commit/merge/finalization authority flags false
+scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty: ok true; py_compile ok; contract tests pass (398 passed in 85.04s (0:01:25)); status summary package_version 1.79.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready=false/status=no_finalization_candidate; commit/merge/finalization authority flags false
+scripts/hermes-busdriver-litmus-status --repo . --base-ref origin/main --pretty: ok false/status blocked with blocker branch_diff_hash_unavailable: empty diff; this is expected on clean main with no branch diff. PR-mode artifacts from the latest Delivery Mode review were present but fresh_for_branch_diff=false, so no fresh PR marker authorizes the clean-main state.
+scripts/hermes-busdriver-finalization-contract-status --pretty: ok true; read_only true; schema hermes-busdriver-finalization-contract-status/v0; decision status policy_blocked/reason adr_0005_unlock_contract_not_satisfied; capability_allowed_count=0; remaining_work_count=5; policy_blocked_count=5; commit/push/PR/merge/deploy/release/publish/marker/finalization authority flags false
 ```
 
 ## Still intentionally deferred
