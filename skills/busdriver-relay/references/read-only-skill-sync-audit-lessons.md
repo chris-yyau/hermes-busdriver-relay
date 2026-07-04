@@ -9,6 +9,7 @@ Use when the user asks for a read-only audit/planning lane around syncing instal
 3. **Confirm the selected slice from live drift.** The slice is appropriate when installed skill references or SKILL pointers exist only in the installed Hermes skill or differ from repo source after recent PRs. Prefer this skill-sync slice before a CURRENT_STATUS refresh, because status docs will otherwise become stale again after the skill-sync merge.
 4. **Review proposed WIP without owning it.** If a mutating lane has already copied references into the repo, inspect diffs and tests, but do not stage/fix/overwrite. Report exact remaining blockers and recommended checks.
 5. **Run only read-only focused validation.** Safe examples: `git status`, `git diff`, `diff -qr`, `gh pr list`, lock status, leakage scans, and focused tests that do not mutate repo state. Label any full suite/smoke/deliver verification not actually run as recommended follow-up.
+6. **Validate concurrent skill-sync WIP without taking ownership.** If the repo becomes dirty during the audit and the WIP appears to copy installed-only drift into the repo source, it is acceptable to run focused read-only tests against that dirty WIP and report the results as evidence for the proposed slice. Distinguish pre-WIP failures that prove the drift from post-WIP passes that validate someone else's draft; do not stage, fix, or claim authorship.
 
 ## Redaction and authority requirements
 

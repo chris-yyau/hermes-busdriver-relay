@@ -29,6 +29,7 @@ SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-cu
 RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE = REFERENCE_DIR / "relay-router-agent-role-split.md"
 RELAY_ROUTER_ROLE_POLICY_REFERENCE = REFERENCE_DIR / "relay-router-role-policy-2026-07.md"
 SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE = REFERENCE_DIR / "skill-sync-pr75-router-role-lessons.md"
+PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lessons.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -129,6 +130,9 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             assert phrase in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
             assert leaked_path not in reference_text
+        if reference == PR78_SKILL_SYNC_PRE_PR_REFERENCE:
+            assert "/Volumes/" not in reference_text
+            assert "~/.claude/plugins" not in reference_text
 
 
 def test_skill_sync_pr75_router_role_lessons_are_durable_skill_reference():
@@ -266,6 +270,8 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "Patch installed and repo copies to the same sanitized text" in reference_text
     assert "avoid adding the raw forbidden sentinel strings in new test constants" in reference_text
     assert "include that sanitized reference in the same repo sync" in reference_text
+    assert "Validate concurrent skill-sync WIP without taking ownership" in reference_text
+    assert "Distinguish pre-WIP failures that prove the drift from post-WIP passes" in reference_text
     assert "run a final whole-skill installed-vs-repo comparison" in reference_text
     assert "classify it as a blocker or explicit scope decision" in reference_text
     assert "Preserve authority boundaries" in reference_text
@@ -289,8 +295,22 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
         ],
         SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE: [
             "Run a whole-skill installed-vs-repo comparison",
+            "If final-audit skill maintenance creates a new installed-only class-level reference",
+            "sync it to repo with durability assertions, then refresh CURRENT_STATUS against the latest merged head",
+            "For a user-explicit safe continuation slice that says to leave the working tree dirty for main Hermes",
+            "watch the focused test fail against the stale repo source",
+            "Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope",
+            "Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible",
+            "Run `git fetch --prune` during merge cleanup before the completion audit",
+            "no open PRs, relay topic branches, or stale remote-tracking topic branches remain",
             "CURRENT_STATUS required fresh tokens are present and stale tokens are absent",
             "claude-mem is updated when configured/approved",
+        ],
+        PR78_SKILL_SYNC_PRE_PR_REFERENCE: [
+            "Do a final whole-skill compare after subagents return and after any main-Hermes patch",
+            "Use the installed plugin version for smoke/status evidence",
+            "Pre-PR dual-voice sequence is still mandatory after commit",
+            "After PR reviewer fixes, restart latest-head evidence",
         ],
     }
 
@@ -302,3 +322,6 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             assert phrase in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
             assert leaked_path not in reference_text
+        if reference == PR78_SKILL_SYNC_PRE_PR_REFERENCE:
+            assert "/Volumes/" not in reference_text
+            assert "~/.claude/plugins" not in reference_text
