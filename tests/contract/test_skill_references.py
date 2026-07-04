@@ -225,6 +225,8 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "Treat clean-main litmus empty-diff output as marker-sanity evidence" in reference_text
     assert "Run `finalization-contract-status` from the target repo cwd" in reference_text
     assert "Use a doc freshness validator before committing" in reference_text
+    assert "If the final completion audit finds skill drift created by the status refresh itself" in reference_text
+    assert "Do not mark the relay complete while installed skill and repo skill source differ" in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
