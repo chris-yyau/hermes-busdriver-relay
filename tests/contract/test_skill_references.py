@@ -251,6 +251,10 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "treat it as an interrupt" in reference_text
     assert "dispatch agents, or touch PR markers" in reference_text
     assert "stop with a concise report" in reference_text
+    assert "Re-check installed↔repo skill state before consuming a fresh backstop" in reference_text
+    assert "never use a PASS bound to the pre-refinement diff" in reference_text
+    assert "Honor tool-scope limits during explicit memory/skill reviews" in reference_text
+    assert "do not call repository, GitHub, terminal, search/read, delegation, marker, or PR tools" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
