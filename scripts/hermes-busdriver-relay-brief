@@ -67,7 +67,7 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     },
     {
         "id": "opencode-adapter-proof",
-        "label": "OpenCode adapter proof slice",
+        "label": "OpenCode candidate proof",
         "status": "candidate_only_requires_separate_smoke_contract",
         "evidence": [
             "skills/busdriver-relay/SKILL.md",
@@ -77,7 +77,7 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     },
     {
         "id": "status-ux-layer",
-        "label": "Compact relay status / Telegram briefing",
+        "label": "Status/UX compact relay briefing",
         "status": "implemented_by_hermes_busdriver_relay_brief",
         "evidence": ["scripts/hermes-busdriver-relay-brief"],
         "safe_next": "use_this_read_only_helper_for_idle_blocked_next_slice_summaries",
@@ -107,7 +107,7 @@ def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedPr
 
 
 def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | None:
-    proc = run(["git", *args], repo)
+    proc = run(["git", "--no-optional-locks", *args], repo)
     if proc.returncode != 0:
         return None
     if preserve_leading:
@@ -116,18 +116,24 @@ def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | N
 
 
 def repo_summary(repo: Path) -> dict[str, Any]:
-    branch = git_value(repo, "branch", "--show-current")
-    head = git_value(repo, "rev-parse", "HEAD")
-    origin_main = git_value(repo, "rev-parse", "origin/main")
-    porcelain = git_value(repo, "status", "--short", preserve_leading=True)
+    git_root = git_value(repo, "rev-parse", "--show-toplevel")
+    git_ok = bool(git_root)
+    branch = git_value(repo, "branch", "--show-current") if git_ok else None
+    head = git_value(repo, "rev-parse", "HEAD") if git_ok else None
+    origin_main = git_value(repo, "rev-parse", "origin/main") if git_ok else None
+    porcelain = git_value(repo, "status", "--short", preserve_leading=True) if git_ok else None
+    status_available = porcelain is not None
     state = {
         "path": str(repo),
+        "git_ok": git_ok,
+        "git_root": git_root,
+        "status_available": status_available,
         "branch": branch,
         "head": head,
         "head_short": head[:12] if head else None,
         "origin_main": origin_main,
         "synced_with_origin_main": bool(head and origin_main and head == origin_main),
-        "dirty": bool(porcelain),
+        "dirty": bool(porcelain) if status_available else None,
         "porcelain": porcelain.splitlines() if porcelain else [],
     }
     return state
@@ -141,6 +147,8 @@ def file_list(root: Path) -> list[Path]:
 
 def skill_compare(repo: Path, installed: Path) -> dict[str, Any]:
     repo_skill = repo / "skills" / "busdriver-relay"
+    if not repo_skill.exists() or not repo_skill.is_dir():
+        return {"checked": False, "reason": "repo_skill_missing", "path": str(installed), "repo_skill_path": str(repo_skill)}
     if not installed.exists():
         return {"checked": False, "reason": "installed_skill_missing", "path": str(installed)}
     repo_files = file_list(repo_skill)
@@ -190,6 +198,8 @@ def contract_status_summary() -> dict[str, Any]:
 
 
 def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    if not repo_state.get("git_ok") or not repo_state.get("status_available"):
+        return {"status": "blocked_unverified_repo_state", "next_safe_slice": "inspect_repo_git_status"}
     if repo_state.get("dirty"):
         return {"status": "needs_local_reconciliation", "next_safe_slice": "inspect_and_reconcile_dirty_tree"}
     if not skill_state.get("checked"):
@@ -243,7 +253,7 @@ def render_brief(payload: dict[str, Any]) -> str:
         f"repo: {repo.get('branch')} {repo.get('head_short')} dirty={repo.get('dirty')} synced={repo.get('synced_with_origin_main')}",
         f"skill-sync: {skill_text}",
         f"contract: {contract.get('decision_status')} remaining={contract.get('remaining_work_count')} allowed={contract.get('capability_allowed_count')}",
-        "roadmap: ADR0005 contract, PR-grind design, marker interop contract, OpenCode candidate proof, and Status/UX are represented as read-only/policy-blocked tasks",
+        "roadmap: " + ", ".join(task.get("label", task.get("id", "unknown")) for task in payload["roadmap_tasks"]) + " are represented as read-only/policy-blocked tasks",
         "authority: all false",
         f"next: {decision.get('next_safe_slice')}",
     ]

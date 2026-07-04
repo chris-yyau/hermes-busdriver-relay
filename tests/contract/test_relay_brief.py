@@ -151,10 +151,10 @@ def test_relay_brief_preserves_git_short_status_columns(tmp_path):
 
 def test_relay_brief_blocks_when_installed_skill_unverified(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    tracked = repo / "tracked.txt"
-    tracked.write_text("content\n")
-    init_git_repo(repo, tracked)
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    init_git_repo(repo)
 
     proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(tmp_path / "missing-skill"))
     data = json.loads(proc.stdout)
@@ -166,6 +166,40 @@ def test_relay_brief_blocks_when_installed_skill_unverified(tmp_path):
     assert data["decision"]["next_safe_slice"] == "inspect_installed_skill_path"
     for flag in BLOCKED_AUTHORITY_FLAGS:
         assert data["decision"][flag] is False
+
+
+def test_relay_brief_blocks_when_repo_skill_source_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("content\n")
+    init_git_repo(repo, tracked)
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["ok"] is False
+    assert data["skill_sync"]["checked"] is False
+    assert data["skill_sync"]["reason"] == "repo_skill_missing"
+    assert data["decision"]["status"] == "blocked_unverified_skill_sync"
+
+
+def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):
+    repo = tmp_path / "not-a-repo"
+    repo.mkdir()
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["ok"] is False
+    assert data["repo"]["git_ok"] is False
+    assert data["repo"]["status_available"] is False
+    assert data["decision"]["status"] == "blocked_unverified_repo_state"
+    assert data["decision"]["next_safe_slice"] == "inspect_repo_git_status"
 
 
 def test_relay_brief_treats_empty_installed_skill_env_as_unset():
