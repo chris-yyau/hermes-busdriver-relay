@@ -257,6 +257,8 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "do not call repository, GitHub, terminal, search/read, delegation, marker, or PR tools" in reference_text
     assert "Do not consume pending Delivery Mode events during a skill-only interrupt" in reference_text
     assert "do not acknowledge, validate, dispatch around, write verdicts, or advance PR state" in reference_text
+    assert "Let the interrupt reply be only the skill-library outcome" in reference_text
+    assert "the final response should not include a Delivery Mode progress update" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
