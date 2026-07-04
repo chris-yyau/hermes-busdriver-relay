@@ -26,6 +26,8 @@ READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE = REFERENCE_DIR / "read-only-skill-sync-aud
 IDLE_CLEAN_FINALIZATION_READINESS_REFERENCE = REFERENCE_DIR / "idle-clean-finalization-readiness-lessons.md"
 IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE = REFERENCE_DIR / "idle-finalization-readiness-status-audit-lessons.md"
 SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-current-status-convergence-lessons.md"
+RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE = REFERENCE_DIR / "relay-router-agent-role-split.md"
+RELAY_ROUTER_ROLE_POLICY_REFERENCE = REFERENCE_DIR / "relay-router-role-policy-2026-07.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -94,6 +96,38 @@ def test_continuation_reference_preserves_late_async_follow_up_policy():
     assert "late async reviewer/subagent result arrives after a PR was already merged" in reference_text
     assert "Non-blocking suggestions can become the next tiny follow-up PR" in reference_text
     assert "do not silently ignore them or pretend they were handled in the earlier PR" in reference_text
+
+
+def test_relay_router_role_policy_references_are_durable_skill_references():
+    skill_text = SKILL.read_text()
+    references = {
+        RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE: [
+            "Busdriver + Claude Code = canonical authority",
+            "Hard rule: **Only Claude/Busdriver may claim done",
+            "future-only design target",
+            "non-copyable design-target roles",
+            '"avoid_coding_agent_for_review": false',
+            '"relay.litmus.reviewer": ["codex"]',
+            '"relay.pr.backstop": ["claude-code"]',
+            "Authority constraints remain false for all router/status roles",
+            "primary-controller agent",
+        ],
+        RELAY_ROUTER_ROLE_POLICY_REFERENCE: [
+            "relay.blueprint.reviewer_2 = claude-code",
+            "relay.litmus.reviewer = codex",
+            "relay.pr.lead     = fresh-codex",
+            "Keep all finalization/commit/push/PR/merge/marker-write flags false",
+        ],
+    }
+
+    for reference, expected_phrases in references.items():
+        assert reference.exists()
+        assert f"references/{reference.name}" in skill_text
+        reference_text = reference.read_text()
+        for phrase in expected_phrases:
+            assert phrase in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
 
 
 def test_relay_completion_sweep_lessons_are_durable_skill_reference():
