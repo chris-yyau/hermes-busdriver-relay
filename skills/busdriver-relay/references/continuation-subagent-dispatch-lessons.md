@@ -1,12 +1,13 @@
 # Continuation + Subagent Dispatch Lessons
 
-Use when the user says variants of “繼續”, “繼續 subagent 完成 relay”, “完成整個 relay”, or complains that Hermes is not delegating enough.
+Use when the user says variants of “繼續”, “接下來呢”, “繼續 subagent 完成 relay”, “完成整個 relay”, or complains that Hermes is not delegating enough.
 
 ## Durable workflow lesson
 
 - Treat the message as an instruction to **continue the relay pipeline**, not as a request for a status-only summary.
 - First do a small Phase-0 read-only status refresh: repo branch/dirty state, current HEAD, open PRs, and current relay docs/status.
 - If the previous slice is merged/clean and no explicit next task is supplied, choose the next smallest safe relay slice from live docs/status rather than asking the user to pick.
+- If docs/status and skill-sync surfaces are clean, inspect read-only status helpers for semantic mismatches exposed by the final audit (for example clean idle/no-PR readiness reporting a blocker when there is no finalization candidate). Treat those as narrow status-UX slices only when they preserve every authority flag as false and do not weaken fail-closed behavior for dirty worktrees, PR paths, malformed helper evidence, or drift/lock blockers.
 - Dispatch a mutating subagent for the implementation slice immediately, with strict scope, TDD, verifier commands, and explicit bans on commit/push/PR/merge/marker writes.
 - Keep main Hermes as operator/verifier/finalizer: after subagent completion, read back files/diff, run focused/full tests + smoke/static scan, then perform Delivery Mode finalization only through litmus/pre-PR and latest-head PR-grind semantics.
 
@@ -17,6 +18,7 @@ When `hermes-busdriver-litmus-status` exists but Delivery Mode still only says l
 ## Pitfalls
 
 - Do not answer only with “I will continue” or a plan. Dispatch the subagent in the same turn.
+- Do not answer “what next?” with a menu when a safe obvious continuation can be discovered. Run the Phase-0 sweep, pick the smallest safe evidence/status slice, and start it; only ask if the next slice requires a real product/policy trade-off.
 - Do not wait for a perfect roadmap. If the repo is clean and docs identify deferred finalization evidence work, choose a narrow evidence/status slice.
 - Do not let the subagent own finalization. It returns a dirty tree; main Hermes verifies and finalizes under gates.
 - If a late async reviewer/subagent result arrives after a PR was already merged, classify it against the merged state. Non-blocking suggestions can become the next tiny follow-up PR when they are cheap, test-only, and directly improve the just-merged slice; do not silently ignore them or pretend they were handled in the earlier PR.
