@@ -50,17 +50,15 @@ This is a future-only design target that stays compatible with the relay-owned c
 ```json
 {
   "coding_agent": "codex",
-  "avoid_coding_agent_for_review": true,
+  "avoid_coding_agent_for_review": false,
   "routes": {
-    "relay.impl.primary": ["codex"],
-    "relay.impl.secondary": ["opencode"],
-    "relay.review.fast": ["grok"],
-    "relay.review.long_context": ["gemini"],
-    "relay.ide.manual": ["cursor"],
+    "relay.litmus.reviewer": ["codex"],
     "relay.pr.backstop": ["claude-code"]
   }
 }
 ```
+
+Future router inventory work can then add the non-copyable design-target roles `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, and `relay.ide.manual` once the resolver/status helpers know those role names.
 
 Authority constraints remain false for all router/status roles. Only the separately gated Codex draft launcher may mutate the draft working tree, and it still returns `needs_busdriver_review`.
 
