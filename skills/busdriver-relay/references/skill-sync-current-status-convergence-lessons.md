@@ -28,6 +28,7 @@ Do not stop at the first clean PR if either of these surfaces is still stale:
 - For a user-explicit safe continuation slice that says to leave the working tree dirty for main Hermes, stop at a verified draft: add/update the durable contract assertion first, watch the focused test fail against the stale repo source, sync only the scoped reference drift, rerun focused tests and `git diff --check`, compare the synced repo reference against the installed skill copy, and report the exact dirty files. Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope.
 - Keep each convergence step tiny and explicit: one skill-sync PR or one docs-only evidence refresh PR, then PR-grind, merge, cleanup, and final audit.
 - Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible, because it records the latest merged PR/head and verification evidence; any skill-sync PR merged after it will make it stale again.
+- Run `git fetch --prune` during merge cleanup before the completion audit so stale remote-tracking topic branches are observable as state, not hidden inside a checklist item.
 
 ## Completion audit
 
@@ -35,7 +36,7 @@ End only when all are true:
 
 - base branch equals its upstream and `base...origin/base` diff is empty;
 - worktree is clean;
-- no open PRs, relay topic branches, or stale remote-tracking topic branches remain (run fetch/prune after merge cleanup);
+- no open PRs, relay topic branches, or stale remote-tracking topic branches remain;
 - relay lock count is zero;
 - installed Hermes skill and repo skill source have no missing/extra/different references;
 - CURRENT_STATUS required fresh tokens are present and stale tokens are absent;
