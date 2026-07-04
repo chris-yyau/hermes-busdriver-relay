@@ -24,7 +24,10 @@ Do not stop at the first clean PR if either of these surfaces is still stale:
 - If a docs/status refresh is dirty, do not interpret `hermes-busdriver-smoke` dirty-tree preflight failure as a docs regression. Run docs freshness checks, `git diff --check`, focused/full tests, compileall, and deliver-verify first; commit, then run smoke on the clean branch.
 - After every merged skill-sync PR, re-check whether CURRENT_STATUS needs another evidence-only refresh.
 - After every merged CURRENT_STATUS PR, re-check whole-skill installed-vs-repo drift before finalizing.
+- If final-audit skill maintenance creates a new installed-only class-level reference while closing reviewer feedback, treat that as another tiny skill-sync slice before the docs refresh. Do not delete the useful installed reference just to force alignment; sync it to repo with durability assertions, then refresh CURRENT_STATUS against the latest merged head.
+- For a user-explicit safe continuation slice that says to leave the working tree dirty for main Hermes, stop at a verified draft: add/update the durable contract assertion first, watch the focused test fail against the stale repo source, sync only the scoped reference drift, rerun focused tests and `git diff --check`, compare the synced repo reference against the installed skill copy, and report the exact dirty files. Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope.
 - Keep each convergence step tiny and explicit: one skill-sync PR or one docs-only evidence refresh PR, then PR-grind, merge, cleanup, and final audit.
+- Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible, because it records the latest merged PR/head and verification evidence; any skill-sync PR merged after it will make it stale again.
 
 ## Completion audit
 
@@ -32,7 +35,7 @@ End only when all are true:
 
 - base branch equals its upstream and `base...origin/base` diff is empty;
 - worktree is clean;
-- no open PRs or relay topic branches remain;
+- no open PRs, relay topic branches, or stale remote-tracking topic branches remain (run fetch/prune after merge cleanup);
 - relay lock count is zero;
 - installed Hermes skill and repo skill source have no missing/extra/different references;
 - CURRENT_STATUS required fresh tokens are present and stale tokens are absent;

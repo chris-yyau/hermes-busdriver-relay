@@ -266,6 +266,8 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "Patch installed and repo copies to the same sanitized text" in reference_text
     assert "avoid adding the raw forbidden sentinel strings in new test constants" in reference_text
     assert "include that sanitized reference in the same repo sync" in reference_text
+    assert "Validate concurrent skill-sync WIP without taking ownership" in reference_text
+    assert "Distinguish pre-WIP failures that prove the drift from post-WIP passes" in reference_text
     assert "run a final whole-skill installed-vs-repo comparison" in reference_text
     assert "classify it as a blocker or explicit scope decision" in reference_text
     assert "Preserve authority boundaries" in reference_text
@@ -289,6 +291,13 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
         ],
         SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE: [
             "Run a whole-skill installed-vs-repo comparison",
+            "If final-audit skill maintenance creates a new installed-only class-level reference",
+            "sync it to repo with durability assertions, then refresh CURRENT_STATUS against the latest merged head",
+            "For a user-explicit safe continuation slice that says to leave the working tree dirty for main Hermes",
+            "watch the focused test fail against the stale repo source",
+            "Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope",
+            "Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible",
+            "no open PRs, relay topic branches, or stale remote-tracking topic branches remain",
             "CURRENT_STATUS required fresh tokens are present and stale tokens are absent",
             "claude-mem is updated when configured/approved",
         ],
