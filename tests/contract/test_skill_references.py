@@ -23,6 +23,8 @@ PR66_REFERENCE = REFERENCE_DIR / "pr66-current-status-refresh-lessons.md"
 PR67_REFERENCE = REFERENCE_DIR / "pr67-skill-sync-review-fix-lessons.md"
 PR68_REFERENCE = REFERENCE_DIR / "pr68-late-async-test-followup-lessons.md"
 READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE = REFERENCE_DIR / "read-only-skill-sync-audit-lessons.md"
+ROADMAP_READONLY_AUDIT_REFERENCE = REFERENCE_DIR / "roadmap-readonly-audit-lessons.md"
+PERIODIC_DISK_CLEANUP_CRON_REFERENCE = REFERENCE_DIR / "periodic-disk-cleanup-cron-lessons.md"
 IDLE_CLEAN_FINALIZATION_READINESS_REFERENCE = REFERENCE_DIR / "idle-clean-finalization-readiness-lessons.md"
 IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE = REFERENCE_DIR / "idle-finalization-readiness-status-audit-lessons.md"
 SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-current-status-convergence-lessons.md"
@@ -327,6 +329,37 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "classify it as a blocker or explicit scope decision" in reference_text
     assert "Preserve authority boundaries" in reference_text
     assert "CURRENT_STATUS follow-up after merge" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_roadmap_readonly_audit_lessons_are_durable_skill_reference():
+    assert ROADMAP_READONLY_AUDIT_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = ROADMAP_READONLY_AUDIT_REFERENCE.read_text()
+
+    assert "references/roadmap-readonly-audit-lessons.md" in skill_text
+    assert "completed contract, policy-blocked finalization" in reference_text
+    assert "remaining_work_count=5" in reference_text
+    assert "capability_allowed_count=0" in reference_text
+    assert "Preserve `git status --short` leading whitespace" in reference_text
+    assert "OpenCode remains a candidate/status slice" in reference_text
+    assert "non_codex_agent_enablement_allowed=false" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_periodic_disk_cleanup_cron_lessons_are_durable_skill_reference():
+    assert PERIODIC_DISK_CLEANUP_CRON_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PERIODIC_DISK_CLEANUP_CRON_REFERENCE.read_text()
+
+    assert "references/periodic-disk-cleanup-cron-lessons.md" in skill_text
+    assert "script-only cron job" in reference_text
+    assert "no_agent=true" in reference_text
+    assert "empty stdout means silent/no delivery" in reference_text
+    assert "Do not automatically clean other agents' durable state" in reference_text
+    assert "Report local Time Machine/APFS snapshots as a hint only" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
