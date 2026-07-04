@@ -268,6 +268,8 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "Do not summarize, validate, or consume the async event in the same reply" in reference_text
     assert "A skill-library review turn is not a Delivery Mode handoff" in reference_text
     assert "do not promise the next repository action in that same reply" in reference_text
+    assert "Treat “be active” skill-library prompts as permission to improve skills, not to resume delivery" in reference_text
+    assert "do not use the “be active” wording as permission to inspect repos" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
