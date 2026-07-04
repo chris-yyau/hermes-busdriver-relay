@@ -230,8 +230,10 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "restart the final audit from the saved PR base branch" in reference_text
     assert "Do not mark the relay complete while installed skill and repo skill source differ" in reference_text
     assert "Move temp/cache roots off the system volume when long verification loops hit ENOSPC" in reference_text
+    assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime" in reference_text
     assert "export `TMPDIR`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and `XDG_CACHE_HOME`" in reference_text
     assert "This is a durable workaround for macOS APFS system-volume pressure" in reference_text
+    assert "/Volumes/" not in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
