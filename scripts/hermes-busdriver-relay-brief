@@ -87,8 +87,9 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only Hermes Busdriver relay briefing")
+    default_installed_skill = os.environ.get("HERMES_BUSDRIVER_INSTALLED_SKILL_DIR") or str(DEFAULT_INSTALLED_SKILL)
     parser.add_argument("--repo", default=str(ROOT), help="Relay repo path, default: this checkout")
-    parser.add_argument("--installed-skill", default=os.environ.get("HERMES_BUSDRIVER_INSTALLED_SKILL_DIR", str(DEFAULT_INSTALLED_SKILL)))
+    parser.add_argument("--installed-skill", default=default_installed_skill)
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     parser.add_argument("--brief", action="store_true", help="Print Telegram-friendly text instead of JSON")
     return parser.parse_args()

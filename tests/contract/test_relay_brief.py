@@ -166,3 +166,11 @@ def test_relay_brief_blocks_when_installed_skill_unverified(tmp_path):
     assert data["decision"]["next_safe_slice"] == "inspect_installed_skill_path"
     for flag in BLOCKED_AUTHORITY_FLAGS:
         assert data["decision"][flag] is False
+
+
+def test_relay_brief_treats_empty_installed_skill_env_as_unset():
+    proc = run_brief("--pretty", env={"HERMES_BUSDRIVER_INSTALLED_SKILL_DIR": ""})
+    data = json.loads(proc.stdout)
+
+    assert data["skill_sync"]["path"].endswith("/.hermes/skills/autonomous-ai-agents/busdriver-relay")
+    assert data["skill_sync"]["path"] != data["repo"]["path"]
