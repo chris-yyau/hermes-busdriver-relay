@@ -28,6 +28,7 @@ IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE = REFERENCE_DIR / "idle-final
 SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-current-status-convergence-lessons.md"
 RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE = REFERENCE_DIR / "relay-router-agent-role-split.md"
 RELAY_ROUTER_ROLE_POLICY_REFERENCE = REFERENCE_DIR / "relay-router-role-policy-2026-07.md"
+SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE = REFERENCE_DIR / "skill-sync-pr75-router-role-lessons.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -128,6 +129,21 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             assert phrase in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
             assert leaked_path not in reference_text
+
+
+def test_skill_sync_pr75_router_role_lessons_are_durable_skill_reference():
+    assert SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE.read_text()
+
+    assert "references/skill-sync-pr75-router-role-lessons.md" in skill_text
+    assert "Make copyable config snippets executable against today's helper contracts" in reference_text
+    assert "label them as non-copyable/future-only until resolver/status inventory supports them" in reference_text
+    assert "avoid_coding_agent_for_review=false" in reference_text
+    assert "After every fix push, restart latest-head PR-grind" in reference_text
+    assert "docs/status convergence slice" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
 
 
 def test_relay_completion_sweep_lessons_are_durable_skill_reference():
