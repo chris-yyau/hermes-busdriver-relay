@@ -19,6 +19,8 @@ Use when continuing relay completion through a small skill-sync/reference slice 
 5. **Pre-PR dual-voice sequence is still mandatory after commit.** PR-mode Codex lead writes only `pr-codex-lead.local.json`; it is not enough for `gh pr create`. Wait for/read the independent backstop, persist it with `run-review-loop.sh --write-backstop-verdict`, then run `--write-pr-marker` before pushing/opening the PR.
 6. **Do not claim delivery complete at PR-mode Codex lead.** The exact resume point should name the PR diff hash, lead artifact freshness, missing backstop/marker files, and the next gate command class.
 7. **After PR reviewer fixes, restart latest-head evidence.** A follow-up commit invalidates the old branch diff hash; rerun focused/full verification, smoke, commit-mode litmus, PR-mode Codex lead, independent backstop, trusted marker writing, push, and latest-head PR-grind before merge.
+8. **Treat reviewer-bot “trivial” comments as blocking when PR-grind classifies them actionable.** If CodeRabbit or another bot posts a low/trivial maintainability comment but the relay PR-grind checker returns `needs_fix`, make the minimal documentation/test fix rather than arguing severity. Only skip with explicit evidence that the comment is stale/outdated/non-actionable.
+9. **If skill maintenance during delivery creates a new installed-only reference, sync it in the same PR before status refresh.** Add the reference file to repo source, add a SKILL.md pointer, add durability assertions, sanitize private paths, and rerun whole-skill compare. Do not leave a known installed-only reference for the later `CURRENT_STATUS` slice.
 
 ## Pitfalls
 

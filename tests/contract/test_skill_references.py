@@ -311,6 +311,8 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             "Use the installed plugin version for smoke/status evidence",
             "Pre-PR dual-voice sequence is still mandatory after commit",
             "After PR reviewer fixes, restart latest-head evidence",
+            "Treat reviewer-bot “trivial” comments as blocking when PR-grind classifies them actionable",
+            "If skill maintenance during delivery creates a new installed-only reference, sync it in the same PR before status refresh",
         ],
     }
 
