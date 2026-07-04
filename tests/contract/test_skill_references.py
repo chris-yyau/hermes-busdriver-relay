@@ -244,6 +244,7 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "avoid infinite skill-sync recursion" in reference_text
     assert "Batch skill-maintenance lessons before the final status refresh" in reference_text
     assert "do not add more skill lessons unless safety/correctness requires it" in reference_text
+    assert "Handle explicit skill-library review requests as a single consolidated maintenance step" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
