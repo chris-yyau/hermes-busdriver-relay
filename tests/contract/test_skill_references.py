@@ -221,6 +221,10 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "6. **Finalization locks are branch-keyed" in reference_text
     assert "7. **End with a final audit after docs/status refresh merges" in reference_text
     assert "saved PR base branch" in reference_text
+    assert "Distinguish installed-plugin smoke evidence from source-checkout version evidence" in reference_text
+    assert "Treat clean-main litmus empty-diff output as marker-sanity evidence" in reference_text
+    assert "Run `finalization-contract-status` from the target repo cwd" in reference_text
+    assert "Use a doc freshness validator before committing" in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
