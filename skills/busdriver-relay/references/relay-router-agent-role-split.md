@@ -57,7 +57,7 @@ Stay compatible with the current relay-owned config contract:
     "relay.review.fast": ["grok"],
     "relay.review.long_context": ["gemini"],
     "relay.ide.manual": ["cursor"],
-    "relay.pr.backstop": ["codex"]
+    "relay.pr.backstop": ["claude-code"]
   }
 }
 ```
@@ -66,4 +66,4 @@ Authority constraints remain false for all router/status roles. Only the separat
 
 ## Purchasing / tool-selection implication
 
-Do not solve Claude quota pressure by adding another主控 agent. Use Codex as the primary fallback implementation worker; if Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor can remain a manual IDE sidecar.
+Do not solve Claude quota pressure by adding another primary-controller agent. Use Codex as the primary fallback implementation worker; if Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor can remain a manual IDE sidecar.
