@@ -78,8 +78,8 @@ installed Busdriver marketplace plugin used for smoke/status: 1.79.0
 repo skill source synced back to installed Hermes skill during this slice: missing=[], extra=[], diffs=[], repo_files=78, installed_files=78
 Hermes safe disk cleanup cron: job f188db308f14, schedule 0 4 * * *, no_agent script hermes_safe_disk_cleanup.py; script dry-run after initial cleanup reported 0 removable candidates and stays silent below report thresholds
 scripts/hermes-busdriver-relay-brief --brief: contract policy_blocked; remaining=5; allowed=0; authority all false; skill-sync clean; dirty branch reports local reconciliation until committed
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_skill_references.py tests/contract/test_relay_brief.py -q -p no:cacheprovider: 23 passed
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 404 passed
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_skill_references.py tests/contract/test_relay_brief.py -q -p no:cacheprovider: 25 passed
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 406 passed
 python3 -m compileall -q scripts tests: passed
 scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty after the branch is committed: py_compile ok; contract tests pass; status summary package_version 1.79.0; runtime check mutating_launcher_allowed false; finalization readiness authority flags false
 scripts/hermes-busdriver-finalization-contract-status --pretty: ok true; read_only true; schema hermes-busdriver-finalization-contract-status/v0; decision status policy_blocked/reason adr_0005_unlock_contract_not_satisfied; capability_allowed_count=0; remaining_work_count=5; policy_blocked_count=5; commit/push/PR/merge/deploy/release/publish/marker/finalization authority flags false

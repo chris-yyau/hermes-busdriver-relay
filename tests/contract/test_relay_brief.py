@@ -30,6 +30,21 @@ EXPECTED_TASKS = {
 }
 
 
+def init_git_repo(repo: Path, tracked_file: Path | None = None) -> None:
+    subprocess.run(["git", "init"], cwd=repo, text=True, capture_output=True, check=True)
+    if tracked_file is not None:
+        subprocess.run(["git", "add", str(tracked_file.relative_to(repo))], cwd=repo, text=True, capture_output=True, check=True)
+    else:
+        subprocess.run(["git", "add", "."], cwd=repo, text=True, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
 def run_brief(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     full_env = os.environ.copy()
     if env:
@@ -91,15 +106,7 @@ def test_relay_brief_reports_installed_skill_drift_without_mutation(tmp_path):
     repo_skill = repo / "skills" / "busdriver-relay"
     repo_skill.mkdir(parents=True)
     (repo_skill / "SKILL.md").write_text("# repo skill\n")
-    subprocess.run(["git", "init"], cwd=repo, text=True, capture_output=True, check=True)
-    subprocess.run(["git", "add", "skills/busdriver-relay/SKILL.md"], cwd=repo, text=True, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
-        cwd=repo,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+    init_git_repo(repo)
 
     installed_skill = tmp_path / "installed-skill"
     reference_dir = installed_skill / "references"
@@ -117,5 +124,45 @@ def test_relay_brief_reports_installed_skill_drift_without_mutation(tmp_path):
     assert "references/extra.md" in data["skill_sync"]["missing"]
     assert data["decision"]["status"] == "needs_skill_source_sync"
     assert data["decision"]["next_safe_slice"] == "sync_installed_skill_reference_back_to_repo"
+    for flag in BLOCKED_AUTHORITY_FLAGS:
+        assert data["decision"][flag] is False
+
+    brief = run_brief("--brief", "--repo", str(repo), "--installed-skill", str(installed_skill)).stdout
+    assert "skill-sync: drift missing=1 extra=0 diffs=1" in brief
+
+
+def test_relay_brief_preserves_git_short_status_columns(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("before\n")
+    init_git_repo(repo, tracked)
+    tracked.write_text("after\n")
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["dirty"] is True
+    assert data["repo"]["porcelain"] == [" M tracked.txt"]
+    assert data["decision"]["status"] == "needs_local_reconciliation"
+
+
+def test_relay_brief_blocks_when_installed_skill_unverified(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("content\n")
+    init_git_repo(repo, tracked)
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(tmp_path / "missing-skill"))
+    data = json.loads(proc.stdout)
+
+    assert data["ok"] is False
+    assert data["skill_sync"]["checked"] is False
+    assert data["skill_sync"]["reason"] == "installed_skill_missing"
+    assert data["decision"]["status"] == "blocked_unverified_skill_sync"
+    assert data["decision"]["next_safe_slice"] == "inspect_installed_skill_path"
     for flag in BLOCKED_AUTHORITY_FLAGS:
         assert data["decision"][flag] is False

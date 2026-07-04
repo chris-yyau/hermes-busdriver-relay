@@ -95,13 +95,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
+    try:
+        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        if not stderr:
+            stderr = f"timed out after {timeout}s"
+        return subprocess.CompletedProcess(argv, 124, stdout, stderr)
 
 
-def git_value(repo: Path, *args: str) -> str | None:
+def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | None:
     proc = run(["git", *args], repo)
     if proc.returncode != 0:
         return None
+    if preserve_leading:
+        return proc.stdout.rstrip("\n")
     return proc.stdout.strip()
 
 
@@ -109,7 +118,7 @@ def repo_summary(repo: Path) -> dict[str, Any]:
     branch = git_value(repo, "branch", "--show-current")
     head = git_value(repo, "rev-parse", "HEAD")
     origin_main = git_value(repo, "rev-parse", "origin/main")
-    porcelain = git_value(repo, "status", "--short")
+    porcelain = git_value(repo, "status", "--short", preserve_leading=True)
     state = {
         "path": str(repo),
         "branch": branch,
@@ -182,6 +191,8 @@ def contract_status_summary() -> dict[str, Any]:
 def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
     if repo_state.get("dirty"):
         return {"status": "needs_local_reconciliation", "next_safe_slice": "inspect_and_reconcile_dirty_tree"}
+    if not skill_state.get("checked"):
+        return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_installed_skill_path"}
     if skill_state.get("checked") and not skill_state.get("clean"):
         return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
     if contract.get("ok") and contract.get("policy_blocked_count", 0) > 0:
@@ -196,10 +207,11 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     skill_state = skill_compare(repo, installed)
     contract = contract_status_summary()
     decision = decide(repo_state, skill_state, contract)
+    ok = bool(contract.get("ok")) and bool(skill_state.get("checked"))
     return {
         "schema": "hermes-busdriver-relay-brief/v0",
         "version": 0,
-        "ok": True,
+        "ok": ok,
         "read_only": True,
         "repo": repo_state,
         "skill_sync": skill_state,
@@ -217,7 +229,14 @@ def render_brief(payload: dict[str, Any]) -> str:
     decision = payload["decision"]
     skill_text = "unavailable"
     if skill.get("checked"):
-        skill_text = "clean" if skill.get("clean") else f"drift diffs={len(skill.get('diffs', []))}"
+        skill_text = (
+            "clean"
+            if skill.get("clean")
+            else "drift "
+            f"missing={len(skill.get('missing', []))} "
+            f"extra={len(skill.get('extra', []))} "
+            f"diffs={len(skill.get('diffs', []))}"
+        )
     lines = [
         "Hermes Busdriver Relay brief",
         f"repo: {repo.get('branch')} {repo.get('head_short')} dirty={repo.get('dirty')} synced={repo.get('synced_with_origin_main')}",
