@@ -31,6 +31,7 @@ RELAY_ROUTER_ROLE_POLICY_REFERENCE = REFERENCE_DIR / "relay-router-role-policy-2
 SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE = REFERENCE_DIR / "skill-sync-pr75-router-role-lessons.md"
 PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lessons.md"
 POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE = REFERENCE_DIR / "post-merge-skill-drift-before-status-refresh.md"
+FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE = REFERENCE_DIR / "final-audit-skill-maintenance-recursion.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -226,9 +227,24 @@ def test_pr66_current_status_refresh_lessons_are_durable_skill_reference():
     assert "Run `finalization-contract-status` from the target repo cwd" in reference_text
     assert "Use a doc freshness validator before committing" in reference_text
     assert "If the final completion audit finds skill drift created by the status refresh itself" in reference_text
+    assert "restart the final audit from the saved PR base branch" in reference_text
     assert "Do not mark the relay complete while installed skill and repo skill source differ" in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_reference():
+    assert FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE.read_text()
+
+    assert "references/final-audit-skill-maintenance-recursion.md" in skill_text
+    assert "avoid infinite skill-sync recursion" in reference_text
+    assert "Batch skill-maintenance lessons before the final status refresh" in reference_text
+    assert "do not add more skill lessons unless safety/correctness requires it" in reference_text
+    assert "Do not declare completion while installed skill and repo source differ" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
