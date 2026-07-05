@@ -1,6 +1,6 @@
 # Current Status — Hermes Busdriver Relay
 
-Last verified against the installed Busdriver marketplace plugin `1.79.0` used by smoke.
+Last verified against the installed Busdriver marketplace plugin `1.79.2` used by smoke.
 
 ## Locations
 
@@ -68,20 +68,20 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification for the roadmap-status/cleanup slice on `feat/roadmap-status-cleanup` with Busdriver marketplace plugin `1.79.0`:
+Most recent local verification after PR103 final-audit skill-source convergence on clean `main` with Busdriver marketplace plugin `1.79.2`:
 
 ```text
-base before branch: main...origin/main clean/synced at c0fa1fd4adbb0d63f030bc3b4a224bba1b4e4a90
-open PRs at Phase 0: []
-relay locks at Phase 0: count 0
-installed Busdriver marketplace plugin used for smoke/status: 1.79.0
-repo skill source synced back to installed Hermes skill during this slice: missing=[], extra=[], diffs=[], repo_files=79, installed_files=79
-Hermes safe disk cleanup cron: job f188db308f14, schedule 0 4 * * *, no_agent script hermes_safe_disk_cleanup.py; script dry-run after initial cleanup reported 0 removable candidates and stays silent below report thresholds
-scripts/hermes-busdriver-relay-brief --brief: contract policy_blocked; remaining=5; allowed=0; authority all false; skill-sync clean; dirty branch reports local reconciliation until committed
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_skill_references.py tests/contract/test_relay_brief.py -q -p no:cacheprovider: 34 passed
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 415 passed
-python3 -m compileall -q scripts tests: passed
-scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty after the branch is committed: py_compile ok; contract tests pass; status summary package_version 1.79.0; runtime check mutating_launcher_allowed false; finalization readiness authority flags false
+base after PR103 merge: main...origin/main clean/synced at 06460d6e88270cc103c7afd497c4d7dd47167468
+open PRs at final audit: []
+relay locks at final audit: count 0
+installed Busdriver marketplace plugin used for smoke/status: 1.79.2
+repo skill source synced with installed Hermes skill: missing=[], extra=[], diffs=[], repo_files=82, installed_files=82
+scripts/hermes-busdriver-relay-brief --brief: contract policy_blocked; remaining=5; allowed=0; authority all false; skill-sync clean; next none_stop_cleanup_loop_until_busdriver_approves_new_surface
+python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py skill-compare: clean=true, missing=[], extra=[], diffs=[]
+python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py focused: 21 passed
+python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py contract: 421 passed
+python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py compileall: passed
+scripts/hermes-busdriver-smoke --repo . --pretty: ok=true; py_compile ok; contract tests pass (421 passed); finalization policy remains fail-closed
 scripts/hermes-busdriver-finalization-contract-status --pretty: ok true; read_only true; schema hermes-busdriver-finalization-contract-status/v0; decision status policy_blocked/reason adr_0005_unlock_contract_not_satisfied; capability_allowed_count=0; remaining_work_count=5; policy_blocked_count=5; commit/push/PR/merge/deploy/release/publish/marker/finalization authority flags false
 ```
 
