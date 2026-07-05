@@ -12,7 +12,7 @@ Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-br
 
 2. **Read-only helpers should avoid incidental Git writes.**
    - Use `git --no-optional-locks status --short` for status probes that claim `read_only=true`; plain `git status` can refresh the index.
-   - Preserve the two-column porcelain status format: do not `.strip()` `git status --short` output, because a leading space distinguishes unstaged-only changes (` M file`) from staged changes (`M  file`).
+   - Preserve the two-column porcelain status format: do not `.strip()` `git status --short` output, because the leading index/worktree columns distinguish unstaged-only changes from staged changes.
 
 3. **Brief text should reveal all drift classes and derive from source data.**
    - A one-line status like `drift diffs=N` hides missing/extra file drift; include `missing=N extra=N diffs=N`.

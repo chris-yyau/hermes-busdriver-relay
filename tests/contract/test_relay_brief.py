@@ -202,6 +202,38 @@ def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):
     assert data["decision"]["next_safe_slice"] == "inspect_repo_git_status"
 
 
+def test_relay_brief_ok_false_when_repo_git_unverified_even_if_skill_sync_checked(tmp_path):
+    repo = tmp_path / "not-a-git-repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["git_ok"] is False
+    assert data["skill_sync"]["checked"] is True
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked_unverified_repo_state"
+
+
+def test_relay_brief_missing_repo_path_returns_structured_unverified_repo_state(tmp_path):
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+
+    proc = run_brief("--pretty", "--repo", str(tmp_path / "missing-repo"), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["ok"] is False
+    assert data["repo"]["git_ok"] is False
+    assert data["repo"]["status_available"] is False
+    assert data["decision"]["status"] == "blocked_unverified_repo_state"
+
+
 def test_relay_brief_treats_empty_installed_skill_env_as_unset():
     proc = run_brief("--pretty", env={"HERMES_BUSDRIVER_INSTALLED_SKILL_DIR": ""})
     data = json.loads(proc.stdout)

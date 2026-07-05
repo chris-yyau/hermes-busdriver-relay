@@ -104,6 +104,8 @@ def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedPr
         if not stderr:
             stderr = f"timed out after {timeout}s"
         return subprocess.CompletedProcess(argv, 124, stdout, stderr)
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
 def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | None:
@@ -218,7 +220,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     skill_state = skill_compare(repo, installed)
     contract = contract_status_summary()
     decision = decide(repo_state, skill_state, contract)
-    ok = bool(contract.get("ok")) and bool(skill_state.get("checked"))
+    ok = bool(repo_state.get("git_ok")) and bool(repo_state.get("status_available")) and bool(contract.get("ok")) and bool(skill_state.get("checked"))
     return {
         "schema": "hermes-busdriver-relay-brief/v0",
         "version": 0,
