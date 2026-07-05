@@ -28,9 +28,14 @@ Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-br
 4. **PR-grind after reviewer fixes must restart from the latest head.**
    - After every fix push, rerun local verification and then start a new latest-head PR-grind pass.
    - Reviewer comments that look minor/trivial still block if the PR-grind checker classifies them as actionable.
+   - If the checker still reports addressed findings as active after the fix push, inspect live review-thread state with GraphQL (`isResolved` / `isOutdated`) and resolve only the threads whose findings are demonstrably fixed by current code and tests. Resolving review threads is a GitHub mutation and belongs only inside explicit PR-grind finalization, never as a way to bypass unaddressed feedback.
    - Do not merge after a fix push until latest-head PR-grind is clean; wait/needs-fix/block states all preserve authority flags false.
 
-5. **Recurring cleanup jobs should be captured as class-level relay knowledge, not a one-off task note.**
+5. **Use the right verifier at each phase.**
+   - Dirty pre-commit working trees can make full smoke fail at the gate/preflight stage even when the tracked fix is correct; use targeted/focused/full contract tests, `diff --check`, compileall, and `deliver --operation verify` before commit, then require full smoke again after commit/merge on a clean tree.
+   - Treat dirty-tree smoke failure as a phase/cleanliness signal, not as proof the code fix failed, but do not claim final completion until smoke passes on the clean post-merge base.
+
+6. **Recurring cleanup jobs should be captured as class-level relay knowledge, not a one-off task note.**
    - Use script-only `no_agent=true` cron for routine disk cleanup.
    - Keep stdout silent unless action/pressure/warnings are worth notifying.
    - Restrict automatic deletion to Hermes-owned or repo-local generated artifacts; never clear Claude/Codex/Grok/OpenCode/claude-mem durable state from a routine job.
