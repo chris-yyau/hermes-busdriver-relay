@@ -35,6 +35,7 @@ SKILL_SYNC_PR75_ROUTER_ROLE_REFERENCE = REFERENCE_DIR / "skill-sync-pr75-router-
 PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lessons.md"
 POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE = REFERENCE_DIR / "post-merge-skill-drift-before-status-refresh.md"
 FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE = REFERENCE_DIR / "final-audit-skill-maintenance-recursion.md"
+PI_ADAPTER_CANDIDATE_WORKFLOW_REFERENCE = REFERENCE_DIR / "pi-adapter-candidate-workflow.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -276,6 +277,25 @@ def test_final_audit_skill_maintenance_recursion_lessons_are_durable_skill_refer
     assert "Avoid recursive micro-lessons from repeated skill-library interrupts" in reference_text
     assert "do not manufacture another near-duplicate rule just to be active" in reference_text
     assert "Do not declare completion while installed skill and repo source differ" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
+    assert PI_ADAPTER_CANDIDATE_WORKFLOW_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PI_ADAPTER_CANDIDATE_WORKFLOW_REFERENCE.read_text()
+
+    assert "references/pi-adapter-candidate-workflow.md" in skill_text
+    assert "Pi = Busdriver-compatible tool-harness / adapter candidate" in reference_text
+    assert "`createAgentSession()` uses a ResourceLoader" in reference_text
+    assert "not through the ResourceLoader itself" in reference_text
+    assert "Launch Pi with built-in mutating tools disabled" in reference_text
+    assert "Only after these smokes should Pi replace OpenCode" in reference_text
+    assert "avoid double Busdriver workflow" in reference_text
+    assert "Use `pi --mode json`" in reference_text
+    assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime/pi-busdriver-smoke/" in reference_text
+    assert "/Volumes/" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
