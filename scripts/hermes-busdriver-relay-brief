@@ -205,6 +205,8 @@ def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: di
     if repo_state.get("dirty"):
         return {"status": "needs_local_reconciliation", "next_safe_slice": "inspect_and_reconcile_dirty_tree"}
     if not skill_state.get("checked"):
+        if skill_state.get("reason") == "repo_skill_missing":
+            return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_repo_skill_source"}
         return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_installed_skill_path"}
     if skill_state.get("checked") and not skill_state.get("clean"):
         return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
@@ -217,7 +219,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     repo = Path(args.repo).resolve()
     installed = Path(args.installed_skill).expanduser().resolve()
     repo_state = repo_summary(repo)
-    skill_state = skill_compare(repo, installed)
+    skill_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
+    skill_state = skill_compare(skill_root, installed)
     contract = contract_status_summary()
     decision = decide(repo_state, skill_state, contract)
     ok = bool(repo_state.get("git_ok")) and bool(repo_state.get("status_available")) and bool(contract.get("ok")) and bool(skill_state.get("checked"))

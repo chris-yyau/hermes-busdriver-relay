@@ -7,8 +7,9 @@ Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-br
 1. **Compact status helpers must fail closed on unverified inputs.**
    - A missing installed skill path must not be treated as clean skill sync; report a blocked/unverified skill-sync state.
    - A valid Git checkout that lacks `skills/busdriver-relay` must not be treated as a clean relay source; report repo skill source missing.
-   - A non-Git or Git-status-failing `--repo` must not be reported as clean; expose repo Git/status availability and block the idle-clean decision.
-   - Top-level `ok` should reflect critical child evidence such as contract-status success and skill-sync checked status.
+   - A non-Git, missing, or Git-status-failing `--repo` must not be reported as clean; expose repo Git/status availability and block the idle-clean decision with structured JSON instead of tracebacks.
+   - If `--repo` points inside a worktree subdirectory, resolve the Git root before comparing repo skill source to the installed skill.
+   - Top-level `ok` should reflect critical child evidence such as repo Git/status verification, contract-status success, and skill-sync checked status.
 
 2. **Read-only helpers should avoid incidental Git writes.**
    - Use `git --no-optional-locks status --short` for status probes that claim `read_only=true`; plain `git status` can refresh the index.

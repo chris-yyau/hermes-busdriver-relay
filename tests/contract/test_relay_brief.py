@@ -184,6 +184,29 @@ def test_relay_brief_blocks_when_repo_skill_source_missing(tmp_path):
     assert data["skill_sync"]["checked"] is False
     assert data["skill_sync"]["reason"] == "repo_skill_missing"
     assert data["decision"]["status"] == "blocked_unverified_skill_sync"
+    assert data["decision"]["next_safe_slice"] == "inspect_repo_skill_source"
+
+
+def test_relay_brief_uses_git_root_for_skill_sync_when_repo_is_subdirectory(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    init_git_repo(repo)
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["git_ok"] is True
+    assert data["repo"]["git_root"] == str(repo)
+    assert data["skill_sync"]["checked"] is True
+    assert data["skill_sync"]["clean"] is True
 
 
 def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):
