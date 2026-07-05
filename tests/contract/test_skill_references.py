@@ -298,8 +298,13 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "avoid double Busdriver workflow" in reference_text
     assert "Use `pi --mode json`" in reference_text
     assert "gated draft runtime candidate" in reference_text
+    assert "A formal `hermes-busdriver-agent-draft → preflight → Pi custom command → postflight`" in reference_text
+    assert "Still not validated:" in reference_text
+    assert "hermes-busdriver-agent-draft --agent custom" in reference_text
     assert "generic OpenCode-under-Hermes-gate" in reference_text
     assert "currently blocked/degraded for Busdriver-plugin comparison" in reference_text
+    assert "by explicitly selecting `--agent summary`" not in reference_text
+    assert "A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher." not in reference_text
     assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime/pi-busdriver-smoke/" in reference_text
     assert "/Volumes/" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:

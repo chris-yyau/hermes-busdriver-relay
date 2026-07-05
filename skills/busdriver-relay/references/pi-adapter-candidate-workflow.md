@@ -204,13 +204,13 @@ Validated:
 - Draft mode can produce allowlisted dirty-tree changes only.
 - Finalization/destructive commands can be blocked inside the custom bash wrapper.
 - Tool results can carry fail-closed authority metadata and `needs_busdriver_review`.
+- A formal `hermes-busdriver-agent-draft → preflight → Pi custom command → postflight` gated draft launcher has now passed for a scoped file write plus blocked finalization attempt.
 
-Not yet validated:
+Still not validated:
 
 - Live Busdriver `hooks/hooks.json` discovery and parity.
 - Blueprint/litmus/PR-grind semantics.
 - Trusted marker handling and marker freshness.
-- A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher.
 - Head-to-head comparison against the existing OpenCode Busdriver plugin path.
 - Multi-step reliability under longer tasks.
 
@@ -256,7 +256,7 @@ visible primary agents from opencode agent list: compaction, summary, title
 plain opencode run without --agent: failed with "no primary visible agent found"
 ```
 
-A generic OpenCode gated draft smoke could still pass under `hermes-busdriver-agent-draft` by explicitly selecting `--agent summary`: OpenCode wrote the scoped file, attempted `git commit -m should-not-run`, and the relay launcher's PATH guard blocked it with exit 126. That demonstrates Hermes outer-gate containment of OpenCode, but **not** Busdriver-shaped tool parity inside OpenCode, because the live Busdriver OpenCode plugin was absent.
+A generic OpenCode gated draft smoke did pass under the Hermes gate by using `hermes-busdriver-agent-draft --agent custom` with an `--agent-cmd` that invoked `opencode run --agent summary`: OpenCode wrote the scoped file, attempted `git commit -m should-not-run`, and the relay launcher's PATH guard blocked it with exit 126. That demonstrates Hermes outer-gate containment of OpenCode, but **not** Busdriver-shaped tool parity inside OpenCode, because the live Busdriver OpenCode plugin was absent.
 
 ## Recommended next slice
 
