@@ -326,6 +326,28 @@ def test_relay_brief_uses_git_root_for_skill_sync_when_repo_is_subdirectory(tmp_
     assert data["skill_sync"]["clean"] is True
 
 
+def test_relay_brief_contract_status_comes_from_requested_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    init_git_repo(repo)
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["git_root"] == str(repo)
+    assert data["skill_sync"]["clean"] is True
+    assert data["finalization_contract_status"]["ok"] is False
+    assert data["finalization_contract_status"]["error"] == "contract_status_missing"
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked_unknown_contract_state"
+
+
 def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):
     repo = tmp_path / "not-a-repo"
     repo.mkdir()
