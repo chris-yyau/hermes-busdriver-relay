@@ -36,6 +36,9 @@ PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lesso
 POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE = REFERENCE_DIR / "post-merge-skill-drift-before-status-refresh.md"
 FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE = REFERENCE_DIR / "final-audit-skill-maintenance-recursion.md"
 PI_ADAPTER_CANDIDATE_WORKFLOW_REFERENCE = REFERENCE_DIR / "pi-adapter-candidate-workflow.md"
+PR106_EXPANDED_SKILL_SYNC_PR_GRIND_REFERENCE = (
+    REFERENCE_DIR / "pr106-expanded-skill-sync-pr-grind-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -294,8 +297,31 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "Only after these smokes should Pi replace OpenCode" in reference_text
     assert "avoid double Busdriver workflow" in reference_text
     assert "Use `pi --mode json`" in reference_text
+    assert "gated draft runtime candidate" in reference_text
+    assert "A formal `hermes-busdriver-agent-draft → preflight → Pi custom command → postflight`" in reference_text
+    assert "Still not validated:" in reference_text
+    assert "hermes-busdriver-agent-draft --agent custom" in reference_text
+    assert "generic OpenCode-under-Hermes-gate" in reference_text
+    assert "currently blocked/degraded for Busdriver-plugin comparison" in reference_text
+    assert "by explicitly selecting `--agent summary`" not in reference_text
+    assert "A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher." not in reference_text
     assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime/pi-busdriver-smoke/" in reference_text
     assert "/Volumes/" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pr106_expanded_skill_sync_pr_grind_lessons_are_durable_skill_reference():
+    assert PR106_EXPANDED_SKILL_SYNC_PR_GRIND_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR106_EXPANDED_SKILL_SYNC_PR_GRIND_REFERENCE.read_text()
+
+    assert "references/pr106-expanded-skill-sync-pr-grind-lessons.md" in skill_text
+    assert "New reference files need durability tests in the same PR" in reference_text
+    assert "Do not dismiss reviewer-bot “convention” comments" in reference_text
+    assert "Patch installed and repo copies together for reviewer doc fixes" in reference_text
+    assert "Resolved threads may need one more PR-grind poll" in reference_text
+    assert "Use scoped git identity/signing env for final full-suite verification" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
