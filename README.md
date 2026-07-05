@@ -31,6 +31,8 @@ ADRs/0005-finalization-authority-integration-contract.md
                                            Future authority/marker interop prerequisite contract
 ADRs/0006-programmatic-dual-review-marker-interop.md
                                            Non-mutating programmatic dual-review / marker-interop design spike
+ADRs/0007-pi-tool-harness-adapter.md       Pi target-state draft-only tool-harness adapter boundary
+docs/coding-workflow-authority-map.md      Cross-agent authority boundary map v0.1
 docs/CURRENT_STATUS.md                     Current completion/verification state
 docs/hermes-busdriver-integration-contract-v2.md
 docs/settling-checks-v1.md                 H1-H13 v1 status map
@@ -43,6 +45,8 @@ scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
 scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
 scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
+scripts/pi/run-pi-busdriver-draft          Pi constrained tool-harness adapter wrapper
+adapters/pi/                               Pi Busdriver-shaped tools and result schema
 scripts/hermes-busdriver-agent-balance-plan
                                            Read-only balanced agent lane planning envelope
 scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
@@ -140,7 +144,7 @@ scripts/hermes-busdriver-agent-draft \
   --pretty
 ```
 
-Currently only `--agent codex` is supported (others temporarily deferred). `noop` and `custom` are for tests.
+Currently `--agent codex` is the normal implemented draft lane. `--agent pi` is available only through the constrained Pi adapter proof: built-in Pi tools are disabled, only `bd_*` tools are exposed, and the run must emit `pi-result.json` with all authority flags false. `noop` and `custom` are for tests.
 
 A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
 
@@ -157,11 +161,12 @@ This read-only helper emits `hermes-busdriver-agent-balance-plan/v0`: a determin
 ```bash
 scripts/hermes-busdriver-agent-smoke \
   --plugin-root /path/to/busdriver \
-  --agent codex \
+  --agent pi \
+  --pi-bin /path/to/pi \
   --pretty
 ```
 
-This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`. The constrained Pi adapter has also been verified with this pattern: Pi ran with built-ins disabled, used only the relay `bd_*` tools, created `src/pi_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
 
 ### Delivery status
 

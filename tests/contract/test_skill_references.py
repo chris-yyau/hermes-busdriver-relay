@@ -307,7 +307,7 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "avoid double Busdriver workflow" in reference_text
     assert "Use `pi --mode json`" in reference_text
     assert "gated draft runtime candidate" in reference_text
-    assert "A formal `hermes-busdriver-agent-draft → preflight → Pi custom command → postflight`" in reference_text
+    assert "The formal `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` gated draft launcher has now passed" in reference_text
     assert "Still not validated:" in reference_text
     assert "hermes-busdriver-agent-draft --agent custom" in reference_text
     assert "generic OpenCode-under-Hermes-gate" in reference_text

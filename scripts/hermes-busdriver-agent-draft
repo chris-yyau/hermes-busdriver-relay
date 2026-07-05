@@ -25,6 +25,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 
 BLOCKED_GIT = {"commit", "push", "merge", "rebase", "reset", "tag"}
@@ -150,12 +151,37 @@ def release_lock(args: argparse.Namespace, token: str) -> dict[str, Any]:
     return data
 
 
-def agent_command(args: argparse.Namespace, prompt_path: Path) -> list[str]:
+def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) -> list[str]:
     if args.agent_cmd:
         return ["bash", "-c", args.agent_cmd]
     prompt_ref = f"Follow the instructions in {prompt_path}. Work in draft mode only. Do not run git commit, git push, gh pr create, gh pr merge, deploy, release, or write Busdriver PASS/skip markers. Return a concise summary of files changed, tests run, and blockers."
     if args.agent == "codex":
         return ["codex", "exec", prompt_ref]
+    if args.agent == "pi":
+        pi_timeout = max(1, args.timeout - 30) if args.timeout > 30 else max(1, args.timeout - 1)
+        cmd = [
+            sys.executable,
+            str(PI_WRAPPER),
+            "--repo",
+            args.repo,
+            "--prompt-file",
+            str(prompt_path),
+            "--run-dir",
+            str(run_dir),
+            "--pi-bin",
+            args.pi_bin,
+            "--model",
+            args.pi_model,
+            "--timeout",
+            str(pi_timeout),
+        ]
+        if args.pi_provider:
+            cmd += ["--provider", args.pi_provider]
+        for p in args.scope_include or []:
+            cmd += ["--scope-include", p]
+        for p in args.scope_exclude or []:
+            cmd += ["--scope-exclude", p]
+        return cmd
     if args.agent == "noop":
         return ["bash", "-lc", "echo HERMES_AGENT_DRAFT_NOOP"]
     raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"unsupported_agent:{args.agent}"}))
@@ -165,8 +191,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["codex", "noop", "custom"], default="codex", help="Temporarily only codex is supported for active Hermes draft work. noop/custom for tests.")
+    ap.add_argument("--agent", choices=["codex", "pi", "noop", "custom"], default="codex", help="Codex is the current normal draft lane; pi is a constrained adapter lane when its schema/wrapper/smoke proof is present. noop/custom for tests.")
     ap.add_argument("--agent-cmd", help="Custom shell command for tests/advanced use. Prompt is available via HERMES_AGENT_PROMPT_FILE.")
+    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
+    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")
+    ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")
     ap.add_argument("--scope-include", action="append")
@@ -184,6 +213,7 @@ def main() -> int:
         ap.error("--agent-cmd is required when --agent custom")
 
     repo = git_root(Path(args.repo).expanduser())
+    args.repo = str(repo)
     state = state_root(args.state_dir)
     run_dir = state / "agent-runs" / f"{timestamp()}-{args.agent}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -222,7 +252,7 @@ def main() -> int:
             print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
             return 2
 
-        cmd = agent_command(args, prompt_path)
+        cmd = agent_command(args, prompt_path, run_dir)
         env = os.environ.copy()
         env.update({
             "PATH": str(guard_bin) + os.pathsep + env.get("PATH", ""),
@@ -245,10 +275,25 @@ def main() -> int:
             "stdout_tail": tail(agent.stdout),
             "stderr_tail": tail(agent.stderr),
         }
+        pi_artifact_ok = True
+        if args.agent == "pi":
+            pi_artifact_ok = False
+            artifact_path = run_dir / "pi-result.json"
+            if artifact_path.exists():
+                try:
+                    report["pi_artifact"] = json.loads(artifact_path.read_text())
+                    report["pi_artifact_path"] = str(artifact_path)
+                    pi_artifact_ok = report["pi_artifact"].get("status") == "needs_busdriver_review" and report["pi_artifact"].get("ok") is True
+                    if not pi_artifact_ok:
+                        report["pi_artifact_error"] = "not_successful"
+                except Exception as exc:
+                    report["pi_artifact_error"] = f"parse_failed:{exc}"
+            else:
+                report["pi_artifact_error"] = "missing"
 
         post = gate_postflight(args, baseline)
         report["postflight"] = post
-        report["ok"] = bool(agent.returncode == 0 and post.get("ok"))
+        report["ok"] = bool(agent.returncode == 0 and post.get("ok") and pi_artifact_ok)
         report["status"] = "needs_busdriver_review" if report["ok"] else "blocked"
         report["decision"] = post.get("decision")
         print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))

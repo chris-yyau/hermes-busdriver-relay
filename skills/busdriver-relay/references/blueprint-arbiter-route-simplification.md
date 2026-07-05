@@ -30,4 +30,4 @@ bash tests/test-blueprint-review-oracle-arbiter-contract.sh
 git diff --check
 ```
 
-Path casing on macOS mattered for one shell test: running from `/Volumes/Work/Projects/busdriver` matched the test’s `$PWD` expectation, while `/Volumes/work/projects/busdriver` caused the project-local `.claude` deny-rule assertion to fail even though the implementation was unchanged. Prefer the canonical `git rev-parse --show-toplevel` spelling when running these tests.
+Path casing on macOS mattered for one shell test: running from the canonical Busdriver source path matched the test’s `$PWD` expectation, while the same path with different volume casing caused the project-local `.claude` deny-rule assertion to fail even though the implementation was unchanged. Prefer the canonical `git rev-parse --show-toplevel` spelling when running these tests.

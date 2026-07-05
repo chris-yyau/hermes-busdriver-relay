@@ -29,7 +29,8 @@ For PR45-style helper-contract work, the docs should explicitly mention:
 Docs-only status refreshes still need full relay verification because stale docs can mislead future agents:
 
 ```bash
-python3 scripts/hermes-busdriver-smoke --repo /Volumes/work/projects/hermes-busdriver-relay
+RELAY_REPO=/path/to/hermes-busdriver-relay
+python3 scripts/hermes-busdriver-smoke --repo "$RELAY_REPO"
 python3 - <<'PY'
 from pathlib import Path
 for rel in ['README.md', 'docs/CURRENT_STATUS.md', 'docs/settling-checks-v2.md']:
