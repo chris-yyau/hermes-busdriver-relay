@@ -54,25 +54,25 @@ Do not frame Pi as an immediate Busdriver authority or direct replacement for Co
 Pi = Busdriver-compatible tool-harness / adapter candidate
 ```
 
-Pi may challenge OpenCode specifically in the **secondary adapter / tool-shape** role, because Pi's tool layer may be easier to reshape around Busdriver semantics. But OpenCode should not be removed immediately because the user already has an OpenCode Busdriver plugin pipeline and Chinese-model agent/tool lane.
+Treat the current Pi lane wording as **target state** until the in-repo adapter, schema, wrapper, smoke, and contract tests pass. Codex remains the current implemented normal draft lane. OpenCode is currently a generic/opencode-go lane because the user deleted the OpenCode Busdriver plugin; do not describe it as a Busdriver-compatible plugin lane unless a new adapter/plugin is installed and verified.
 
-Recommended interim map:
-
-```text
-implementation.primary        = Codex
-implementation.secondary      = OpenCode          # existing candidate / plugin lane
-adapter.tool_harness.candidate = Pi               # new challenger for Busdriver-shaped tools
-Busdriver/Claude              = authority
-Hermes                        = router/operator/verifier
-```
-
-If Pi wins validation, a future policy may become:
+Recommended authority map:
 
 ```text
-implementation.primary       = Codex
-adapter.tool_harness.primary = Pi
-opencode                     = tertiary / Chinese-model / legacy-plugin lane
+authority.canonical                    = ClaudeCode / Busdriver
+operator.router                        = Hermes
+operator.verifier                      = Hermes
+implementation.primary.current         = Codex
+tool_harness.primary_candidate         = Pi
+implementation.secondary.future_candidate = OpenCode only after adapter/smoke/tests; otherwise generic lane only
+read_only.fast_review                  = Grok
+read_only.long_context_review          = Gemini
+manual.sidecar                         = Cursor
+finalization.operator_path             = Hermes Delivery Mode, only on explicit user request
+finalization.authority_path            = ClaudeCode / Busdriver
 ```
+
+Hard rule: this is an authority-boundary map, not an agent-quality ranking. A stronger/faster/paid model does not get more authority. Authority comes only from ClaudeCode/Busdriver trusted runtime, explicitly implemented Hermes-equivalent gates, or explicit Hermes Delivery Mode with required evidence.
 
 ## Smoke test pattern that worked
 
@@ -87,9 +87,16 @@ Create a throwaway git repo and a Pi extension such as `busdriver-tools.ts` that
 ```text
 bd_status        # read-only structured repo/status envelope
 bd_read          # guarded read inside cwd; blocks .git/.claude/.opencode paths
-bd_write_draft   # draft-only write; allowed only in PI_BD_MODE=draft and allowlisted path
-bd_bash          # narrow bash wrapper; allowlist read-only git status/diff; block commit/push/PR/merge/destructive commands
+bd_write_draft   # draft-only write; allowed only in PI_BD_MODE=draft and allowlisted path; records operation_id + before/after hash; refuses symlink escape
+bd_bash          # argv-only and allowlist-only wrapper; no shell expansion / bash -c; allow safe git status/diff/log/test/lint commands only
+bd_artifact      # structured worker artifact ending in needs_busdriver_review or blocked, never done/finalized
 ```
+
+Hardening requirements:
+
+- `bd_bash` must be argv-only and allowlist-only. Do not expose arbitrary shell strings. No inherited cwd outside repo root, no network by default, no finalization commands, no marker writes.
+- `bd_write_draft` must enforce repo-root containment, declared scope/include policy, `.git/**` / `.claude/**` / `.opencode/**` / trusted-marker deny rules, symlink-escape refusal, normalized path recording, `operation_id`, and `before_hash` / `after_hash` audit fields.
+- Every non-authority worker result should fit a common `hermes-worker-result/v0` envelope and keep all commit/push/PR/merge/marker/deploy/finalization flags false. Treat claims like `done`, `complete`, `ready_to_merge`, or `merged` as worker self-report only.
 
 Launch Pi with built-ins disabled:
 
@@ -188,11 +195,13 @@ Use `pi --mode json` when verifying wrappers so Hermes can parse the actual tool
    - Require structured artifact output ending in `needs_busdriver_review`.
    - Hermes reconciles actual git diff/status against Pi's claims.
 
-3. **Pi vs OpenCode comparison**
-   - Run the same small adapter task through OpenCode's existing plugin lane and Pi's custom-tool lane.
-   - Compare tool controllability, gate parity, state-dir handling, artifact quality, prevention of finalization escape, and draft quality.
+3. **In-repo Pi adapter proof**
+   - Since the user has confirmed Pi as the chosen tool-harness direction, do not require a fresh OpenCode parity contest before the Pi adapter proof.
+   - Add a real in-repo Pi adapter schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation.
+   - Keep Pi target-state until those schema/wrapper/smoke/contract tests pass.
+   - Treat OpenCode comparison as optional future evidence: if requested, label it either generic OpenCode-under-Hermes-gate containment or rebuild a Busdriver-compatible OpenCode adapter first.
 
-Only after these smokes should Pi replace OpenCode in any formal secondary adapter role.
+Only after the in-repo schema/wrapper/smoke/contract tests pass should Pi be treated as an enabled mutating draft lane. Until then, Pi is the confirmed target-state adapter candidate, not a current production route.
 
 ## Verdict from the initial smoke
 
@@ -211,7 +220,7 @@ Still not validated:
 - Live Busdriver `hooks/hooks.json` discovery and parity.
 - Blueprint/litmus/PR-grind semantics.
 - Trusted marker handling and marker freshness.
-- Head-to-head comparison against the existing OpenCode Busdriver plugin path.
+- OpenCode comparison remains optional future evidence; the live Busdriver OpenCode plugin path is currently absent/degraded.
 - Multi-step reliability under longer tasks.
 
 ## Follow-up gated draft smoke
@@ -260,12 +269,27 @@ A generic OpenCode gated draft smoke did pass under the Hermes gate by using `he
 
 ## Recommended next slice
 
-The next safe implementation slice is no longer the first Pi gate smoke; that has passed. The next promotion gate is a real same-task Pi-vs-OpenCode comparison only after either:
+The next safe implementation slice is no longer the first Pi gate smoke; that has passed. Since the user has confirmed Pi as the chosen tool-harness direction, the next promotion gate is an in-repo Pi adapter proof: schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation while all finalization flags remain false.
 
-1. the intended OpenCode Busdriver plugin lane is present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved; or
-2. the comparison is explicitly scoped as generic OpenCode-under-Hermes-gate, not OpenCode Busdriver-plugin parity.
+Before implementing that slice in `hermes-busdriver-relay`, create/select a separate git worktree and branch when the relay repo has existing WIP. Do not start Pi adapter implementation in the dirty primary relay worktree unless the user explicitly accepts that scope. Record the selected worktree path in the run artifact/brief so later verification knows which worktree owns the draft.
 
-Until then, Pi may challenge OpenCode for the tool-harness role, but OpenCode should be described as currently blocked/degraded for Busdriver-plugin comparison in this environment.
+OpenCode comparison is now optional future evidence, not a prerequisite for choosing Pi. If the user explicitly asks for it, first state whether the comparison is generic OpenCode-under-Hermes-gate containment or true Busdriver-compatible OpenCode parity. True parity requires the intended OpenCode Busdriver plugin lane to be present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved.
+
+Until then, Pi is the confirmed target-state tool-harness direction, while OpenCode should be described as currently blocked/degraded for Busdriver-plugin comparison in this environment.
+
+## Continuation discipline during comparison work
+
+When the user's active goal is to compare OpenCode and Pi, treat skill-source hygiene as a prerequisite, not as the destination. If a live check reveals installed↔repo skill drift, complete the tiny sync slice first and end on a clean brief. Then immediately frame the next comparison slice in terms of the user's actual comparison goal:
+
+```text
+clean skill-source loop
+→ implement the in-repo Pi adapter proof with schema, launcher wrapper, postflight contracts, real-agent smoke, and authority-flag validation
+→ keep OpenCode comparison optional and explicitly scoped if requested
+→ compare only after labeling generic OpenCode containment vs true Busdriver-plugin parity
+→ preserve tool controllability, gate parity, state-dir handling, artifact quality, finalization containment, and data-egress boundaries
+```
+
+Do not let repeated skill-sync/final-audit work obscure the comparison question. Preserve the distinction between (a) Pi's gated draft-runtime evidence, (b) generic OpenCode containment under Hermes' outer gate, and (c) true OpenCode Busdriver-plugin parity.
 
 ## Hermes responsibility in this workflow
 

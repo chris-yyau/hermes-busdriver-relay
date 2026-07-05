@@ -256,7 +256,7 @@ scripts/hermes-busdriver-relay-brief --pretty
 scripts/hermes-busdriver-relay-brief --brief
 ```
 
-This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the five current roadmap tasks: ADR0005 unlock contract, mutating PR-grind fix-loop design, marker interop contract, OpenCode adapter proof, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` stops cleanup loops when the repo and skill source are clean but finalization remains policy-blocked.
+This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the five current roadmap tasks: ADR0005 unlock contract, mutating PR-grind fix-loop design, marker interop contract, Pi adapter proof, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` stops cleanup loops when the repo and skill source are clean but finalization remains policy-blocked.
 
 ### PR-grind readiness check
 
