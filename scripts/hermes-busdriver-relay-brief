@@ -66,14 +66,15 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
         "safe_next": "report_marker_freshness_only_do_not_write_busdriver_markers",
     },
     {
-        "id": "opencode-adapter-proof",
-        "label": "OpenCode candidate proof",
-        "status": "candidate_only_requires_separate_smoke_contract",
+        "id": "pi-adapter-proof",
+        "label": "Pi adapter proof",
+        "status": "target_state_requires_schema_wrapper_smoke_contract",
         "evidence": [
-            "skills/busdriver-relay/SKILL.md",
-            "tests/contract/test_status_probe.py",
+            "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md",
+            "skills/busdriver-relay/references/coding-workflow-authority-map-v0.1.md",
+            "tests/contract/test_relay_brief.py",
         ],
-        "safe_next": "do_not_enable_non_codex_mutating_adapter_without_separate_gate_smoke_and_user_intent",
+        "safe_next": "implement_pi_adapter_schema_wrapper_smoke_contract_before_mutating_draft_use",
     },
     {
         "id": "status-ux-layer",

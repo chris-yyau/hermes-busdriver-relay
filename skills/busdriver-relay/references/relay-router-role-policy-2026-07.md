@@ -6,9 +6,9 @@ Session outcome: the user refined Hermes/Busdriver relay role assignment after c
 
 - **Busdriver + Claude Code** remain canonical authority for workflow, gates, reviews, litmus/pre-PR/PR-grind semantics, commits, PRs, merges, and finalization.
 - **Hermes** remains GPT-based relay/router/status/finalization-support. It should expose route/status/handoff envelopes and coordinate draft/review lanes, not become a second Busdriver.
-- **Pi** is deferred; do not make it a critical pipeline layer unless a specific capability cannot be satisfied by Busdriver/Hermes/OpenCode+Go.
+- **Pi** is the confirmed primary Busdriver-compatible tool-harness / adapter candidate. Keep it as target-state until schema, wrapper, smoke, and contract tests pass; it is not Busdriver authority.
 - **Codex** is the current primary implementation draft worker.
-- **OpenCode** is the second implementation lane/candidate, behind Codex. Keep it draft-only/non-finalizing unless a future adapter contract proves equivalent gates/smoke.
+- **OpenCode** is a generic/opencode-go experiment or future comparison lane unless a Busdriver-compatible adapter/plugin is rebuilt and verified. It is not the selected tool-harness direction now that Pi is confirmed.
 
 ## Relay role map
 
@@ -61,11 +61,12 @@ PR lead should be a fresh Codex session, not the same implementation context.
 ### Implementation
 
 ```text
-implementation.primary   = codex
-implementation.secondary = opencode
+implementation.primary.current            = codex
+tool_harness.primary_candidate            = pi
+implementation.secondary.future_candidate = opencode only after adapter/smoke/tests; otherwise generic lane only
 ```
 
-The user will decide implementation routing directly. Do not promote Grok/Cursor Composer into the formal implementation lane unless the user changes this policy later.
+The user has confirmed Pi for the tool-harness direction. Do not promote Grok/Cursor Composer into the formal implementation lane unless the user changes this policy later, and do not present OpenCode as Busdriver-compatible unless its adapter/plugin is restored and verified.
 
 ## UltraOracle placement
 

@@ -25,7 +25,7 @@ EXPECTED_TASKS = {
     "adr0005-unlock-contract",
     "mutating-pr-grind-fix-loop",
     "marker-interop-contract",
-    "opencode-adapter-proof",
+    "pi-adapter-proof",
     "status-ux-layer",
 }
 
@@ -95,7 +95,7 @@ def test_relay_brief_reports_requested_roadmap_tasks_read_only_and_authority_fal
     assert task_by_id["adr0005-unlock-contract"]["status"] == "contract_complete_authority_policy_blocked"
     assert task_by_id["mutating-pr-grind-fix-loop"]["status"] == "read_only_design_complete_mutating_loop_policy_blocked"
     assert task_by_id["marker-interop-contract"]["status"] == "design_contract_complete_marker_write_policy_blocked"
-    assert task_by_id["opencode-adapter-proof"]["status"] == "candidate_only_requires_separate_smoke_contract"
+    assert task_by_id["pi-adapter-proof"]["status"] == "target_state_requires_schema_wrapper_smoke_contract"
     assert task_by_id["status-ux-layer"]["status"] == "implemented_by_hermes_busdriver_relay_brief"
 
 
@@ -109,7 +109,7 @@ def test_relay_brief_text_is_telegram_friendly_and_does_not_claim_authority(tmp_
     assert "Hermes Busdriver Relay brief" in text
     assert "skill-sync:" in text
     assert "contract: policy_blocked" in text
-    assert "OpenCode candidate proof" in text
+    assert "Pi adapter proof" in text
     assert "Status/UX" in text
     assert "authority: all false" in text
     assert "next:" in text
