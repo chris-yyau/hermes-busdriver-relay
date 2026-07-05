@@ -96,8 +96,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
-        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False, env=env)
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
@@ -209,7 +210,11 @@ def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: di
             return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_repo_skill_source"}
         return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_installed_skill_path"}
     if skill_state.get("checked") and not skill_state.get("clean"):
-        return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
+        if skill_state.get("extra") and not skill_state.get("missing") and not skill_state.get("diffs"):
+            return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_repo_skill_reference_to_installed_skill"}
+        if skill_state.get("missing") and not skill_state.get("extra"):
+            return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
+        return {"status": "needs_skill_source_sync", "next_safe_slice": "reconcile_skill_source_drift"}
     if contract.get("ok") and contract.get("policy_blocked_count", 0) > 0:
         return {"status": "idle_clean_policy_blocked_finalization", "next_safe_slice": "none_stop_cleanup_loop_until_busdriver_approves_new_surface"}
     return {"status": "blocked_unknown_contract_state", "next_safe_slice": "inspect_contract_status_helper"}

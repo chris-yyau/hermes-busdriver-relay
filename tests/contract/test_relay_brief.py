@@ -131,6 +131,27 @@ def test_relay_brief_reports_installed_skill_drift_without_mutation(tmp_path):
     assert "skill-sync: drift missing=1 extra=0 diffs=1" in brief
 
 
+def test_relay_brief_reports_repo_only_skill_drift_with_repo_to_installed_hint(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    (repo_skill / "repo-only.md").write_text("repo-only\n")
+    init_git_repo(repo)
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["skill_sync"]["missing"] == []
+    assert data["skill_sync"]["extra"] == ["repo-only.md"]
+    assert data["decision"]["status"] == "needs_skill_source_sync"
+    assert data["decision"]["next_safe_slice"] == "sync_repo_skill_reference_to_installed_skill"
+
+
 def test_relay_brief_preserves_git_short_status_columns(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -146,6 +167,41 @@ def test_relay_brief_preserves_git_short_status_columns(tmp_path):
 
     assert data["repo"]["dirty"] is True
     assert data["repo"]["porcelain"] == [" M tracked.txt"]
+    assert data["decision"]["status"] == "needs_local_reconciliation"
+
+
+def test_relay_brief_strips_inherited_git_identity_environment(tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    other_file = other / "other.txt"
+    other_file.write_text("clean\n")
+    init_git_repo(other, other_file)
+
+    target = tmp_path / "target"
+    repo_skill = target / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    tracked = target / "tracked.txt"
+    tracked.write_text("before\n")
+    init_git_repo(target)
+    tracked.write_text("after\n")
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief(
+        "--pretty",
+        "--repo",
+        str(target),
+        "--installed-skill",
+        str(installed_skill),
+        env={"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)},
+    )
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["git_root"] == str(target)
+    assert data["repo"]["dirty"] is True
     assert data["decision"]["status"] == "needs_local_reconciliation"
 
 
