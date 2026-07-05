@@ -25,6 +25,7 @@ PR68_REFERENCE = REFERENCE_DIR / "pr68-late-async-test-followup-lessons.md"
 READ_ONLY_SKILL_SYNC_AUDIT_REFERENCE = REFERENCE_DIR / "read-only-skill-sync-audit-lessons.md"
 ROADMAP_READONLY_AUDIT_REFERENCE = REFERENCE_DIR / "roadmap-readonly-audit-lessons.md"
 PERIODIC_DISK_CLEANUP_CRON_REFERENCE = REFERENCE_DIR / "periodic-disk-cleanup-cron-lessons.md"
+PR98_ROADMAP_BRIEF_CLEANUP_REFERENCE = REFERENCE_DIR / "pr98-roadmap-brief-cleanup-lessons.md"
 IDLE_CLEAN_FINALIZATION_READINESS_REFERENCE = REFERENCE_DIR / "idle-clean-finalization-readiness-lessons.md"
 IDLE_FINALIZATION_READINESS_STATUS_AUDIT_REFERENCE = REFERENCE_DIR / "idle-finalization-readiness-status-audit-lessons.md"
 SKILL_SYNC_CURRENT_STATUS_CONVERGENCE_REFERENCE = REFERENCE_DIR / "skill-sync-current-status-convergence-lessons.md"
@@ -360,6 +361,22 @@ def test_periodic_disk_cleanup_cron_lessons_are_durable_skill_reference():
     assert "empty stdout means silent/no delivery" in reference_text
     assert "Do not automatically clean other agents' durable state" in reference_text
     assert "Report local Time Machine/APFS snapshots as a hint only" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pr98_roadmap_brief_cleanup_lessons_are_durable_skill_reference():
+    assert PR98_ROADMAP_BRIEF_CLEANUP_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR98_ROADMAP_BRIEF_CLEANUP_REFERENCE.read_text()
+
+    assert "references/pr98-roadmap-brief-cleanup-lessons.md" in skill_text
+    assert "Compact status helpers must fail closed on unverified inputs" in reference_text
+    assert "git --no-optional-locks status --short" in reference_text
+    assert "Preserve the two-column porcelain status format" in reference_text
+    assert "missing=N extra=N diffs=N" in reference_text
+    assert "restart from the latest head" in reference_text
+    assert "script-only `no_agent=true` cron" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
