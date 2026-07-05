@@ -17,6 +17,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INSTALLED_SKILL = Path.home() / ".hermes" / "skills" / "autonomous-ai-agents" / "busdriver-relay"
+CONTRACT_STATUS_SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
 
 AUTHORITY_FALSE: dict[str, bool] = {
     "finalization_allowed": False,
@@ -199,18 +200,37 @@ def contract_status_summary(repo_root: Path) -> dict[str, Any]:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         return {"ok": False, "error": f"contract_status_json_invalid: {exc}"}
-    decision = payload.get("decision", {}) if isinstance(payload, dict) else {}
-    matrix = payload.get("remaining_work", []) if isinstance(payload, dict) else []
-    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "contract_status_json_not_object"}
+    schema = payload.get("schema")
+    if schema != CONTRACT_STATUS_SCHEMA:
+        return {
+            "ok": False,
+            "error": "contract_status_schema_invalid",
+            "schema": schema,
+            "expected_schema": CONTRACT_STATUS_SCHEMA,
+        }
+    read_only = payload.get("read_only") is True
+    if not read_only:
+        return {"ok": False, "error": "contract_status_not_read_only", "schema": schema, "read_only": read_only}
+    decision = payload.get("decision", {})
+    if not isinstance(decision, dict):
+        decision = {}
+    matrix = payload.get("remaining_work", [])
+    if not isinstance(matrix, list):
+        matrix = []
+    summary = payload.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
     return {
         "ok": payload.get("ok") is True,
-        "schema": payload.get("schema"),
-        "read_only": payload.get("read_only") is True,
+        "schema": schema,
+        "read_only": read_only,
         "current_policy": payload.get("current_policy"),
         "decision_status": decision.get("status"),
         "remaining_work_count": summary.get("remaining_work_count", len(matrix)),
-        "policy_blocked_count": summary.get("policy_blocked_count", sum(1 for row in matrix if row.get("status") == "policy_blocked")),
-        "capability_allowed_count": summary.get("capability_allowed_count", sum(1 for row in matrix if row.get("capability_allowed") is True)),
+        "policy_blocked_count": summary.get("policy_blocked_count", sum(1 for row in matrix if isinstance(row, dict) and row.get("status") == "policy_blocked")),
+        "capability_allowed_count": summary.get("capability_allowed_count", sum(1 for row in matrix if isinstance(row, dict) and row.get("capability_allowed") is True)),
     }
 
 
