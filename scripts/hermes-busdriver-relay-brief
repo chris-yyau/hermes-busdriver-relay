@@ -124,7 +124,7 @@ def repo_summary(repo: Path) -> dict[str, Any]:
     branch = git_value(repo, "branch", "--show-current") if git_ok else None
     head = git_value(repo, "rev-parse", "HEAD") if git_ok else None
     origin_main = git_value(repo, "rev-parse", "origin/main") if git_ok else None
-    porcelain = git_value(repo, "status", "--short", preserve_leading=True) if git_ok else None
+    porcelain = git_value(repo, "-c", "status.showUntrackedFiles=all", "status", "--short", "--untracked-files=all", preserve_leading=True) if git_ok else None
     status_available = porcelain is not None
     state = {
         "path": str(repo),
@@ -154,6 +154,8 @@ def skill_compare(repo: Path, installed: Path) -> dict[str, Any]:
         return {"checked": False, "reason": "repo_skill_missing", "path": str(installed), "repo_skill_path": str(repo_skill)}
     if not installed.exists():
         return {"checked": False, "reason": "installed_skill_missing", "path": str(installed)}
+    if not installed.is_dir():
+        return {"checked": False, "reason": "installed_skill_not_directory", "path": str(installed)}
     repo_files = file_list(repo_skill)
     installed_files = file_list(installed)
     missing = [str(path) for path in installed_files if path not in repo_files]
@@ -222,7 +224,7 @@ def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: di
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     repo = Path(args.repo).resolve()
-    installed = Path(args.installed_skill).expanduser().resolve()
+    installed = Path(args.installed_skill or str(DEFAULT_INSTALLED_SKILL)).expanduser().resolve()
     repo_state = repo_summary(repo)
     skill_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
     skill_state = skill_compare(skill_root, installed)

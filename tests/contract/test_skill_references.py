@@ -372,9 +372,11 @@ def test_pr98_roadmap_brief_cleanup_lessons_are_durable_skill_reference():
 
     assert "references/pr98-roadmap-brief-cleanup-lessons.md" in skill_text
     assert "Compact status helpers must fail closed on unverified inputs" in reference_text
-    assert "git --no-optional-locks status --short" in reference_text
+    assert "Strip inherited `GIT_*` identity/path variables" in reference_text
+    assert "status.showUntrackedFiles=all" in reference_text
     assert "Preserve the two-column porcelain status format" in reference_text
     assert "missing=N extra=N diffs=N" in reference_text
+    assert "right reconciliation direction" in reference_text
     assert "restart from the latest head" in reference_text
     assert "script-only `no_agent=true` cron" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:

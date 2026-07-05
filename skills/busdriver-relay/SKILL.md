@@ -437,7 +437,7 @@ See also `references/claude-mem-push.md` (Hermes→claude-mem push patterns afte
 
 ## Status/UX and cleanup implementation pitfalls
 
-When maintaining compact relay status helpers or cleanup support, consult `references/pr98-roadmap-brief-cleanup-lessons.md`. Key rules: fail closed when repo Git state, repo skill source, installed skill path, or contract-status evidence is unverified; use `git --no-optional-locks` for read-only status probes; preserve `git status --short` leading columns; surface missing/extra/diff skill drift separately; derive brief roadmap text from the canonical task list; and restart latest-head PR-grind after every reviewer-fix push before any merge.
+When maintaining compact relay status helpers or cleanup support, consult `references/pr98-roadmap-brief-cleanup-lessons.md`. Key rules: fail closed when repo Git state, repo skill source, installed skill path, or contract-status evidence is unverified; strip inherited `GIT_*` variables and use `git --no-optional-locks` plus config-stable untracked-file status probes for read-only dirty checks; preserve `git status --short` leading columns; surface missing/extra/diff skill drift separately with the correct reconciliation direction; derive brief roadmap text from the canonical task list; and restart latest-head PR-grind after every reviewer-fix push before any merge.
 
 ## Verification Checklist
 
