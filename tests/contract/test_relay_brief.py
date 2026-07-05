@@ -30,6 +30,20 @@ EXPECTED_TASKS = {
 }
 
 
+
+
+def make_repo_with_skill(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+    return repo, installed_skill
+
+
 def init_git_repo(repo: Path, tracked_file: Path | None = None) -> None:
     subprocess.run(["git", "init"], cwd=repo, text=True, capture_output=True, check=True)
     if tracked_file is not None:
@@ -145,7 +159,6 @@ def test_relay_brief_reports_repo_only_skill_drift_with_repo_to_installed_hint(t
     installed_skill = tmp_path / "installed-skill"
     installed_skill.mkdir()
     (installed_skill / "SKILL.md").write_text("# repo skill\n")
-
     proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
 
@@ -319,7 +332,6 @@ def test_relay_brief_uses_git_root_for_skill_sync_when_repo_is_subdirectory(tmp_
     installed_skill = tmp_path / "installed-skill"
     installed_skill.mkdir()
     (installed_skill / "SKILL.md").write_text("# repo skill\n")
-
     proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
 
@@ -330,15 +342,8 @@ def test_relay_brief_uses_git_root_for_skill_sync_when_repo_is_subdirectory(tmp_
 
 
 def test_relay_brief_contract_status_comes_from_requested_repo(tmp_path):
-    repo = tmp_path / "repo"
-    repo_skill = repo / "skills" / "busdriver-relay"
-    repo_skill.mkdir(parents=True)
-    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    repo, installed_skill = make_repo_with_skill(tmp_path)
     init_git_repo(repo)
-
-    installed_skill = tmp_path / "installed-skill"
-    installed_skill.mkdir()
-    (installed_skill / "SKILL.md").write_text("# repo skill\n")
 
     proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
@@ -352,10 +357,7 @@ def test_relay_brief_contract_status_comes_from_requested_repo(tmp_path):
 
 
 def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_path):
-    repo = tmp_path / "repo"
-    repo_skill = repo / "skills" / "busdriver-relay"
-    repo_skill.mkdir(parents=True)
-    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    repo, installed_skill = make_repo_with_skill(tmp_path)
     scripts = repo / "scripts"
     scripts.mkdir()
     contract_helper = scripts / "hermes-busdriver-finalization-contract-status"
@@ -381,10 +383,6 @@ def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_pa
     subdir.mkdir()
     init_git_repo(repo)
 
-    installed_skill = tmp_path / "installed-skill"
-    installed_skill.mkdir()
-    (installed_skill / "SKILL.md").write_text("# repo skill\n")
-
     proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
 
@@ -406,10 +404,7 @@ def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_pa
 
 
 def test_relay_brief_rejects_unknown_contract_status_schema(tmp_path):
-    repo = tmp_path / "repo"
-    repo_skill = repo / "skills" / "busdriver-relay"
-    repo_skill.mkdir(parents=True)
-    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    repo, installed_skill = make_repo_with_skill(tmp_path)
     scripts = repo / "scripts"
     scripts.mkdir()
     contract_helper = scripts / "hermes-busdriver-finalization-contract-status"
@@ -428,10 +423,6 @@ def test_relay_brief_rejects_unknown_contract_status_schema(tmp_path):
         "}))\n"
     )
     init_git_repo(repo)
-
-    installed_skill = tmp_path / "installed-skill"
-    installed_skill.mkdir()
-    (installed_skill / "SKILL.md").write_text("# repo skill\n")
 
     proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
