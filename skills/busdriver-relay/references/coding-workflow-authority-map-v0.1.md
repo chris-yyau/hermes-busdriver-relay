@@ -123,15 +123,17 @@ Pi's value is not that it can write code; Pi's value is that it can only write t
 Use argv-only, allowlist-only command execution:
 
 ```json
-{ "cmd": "git", "args": ["diff", "--name-only"] }
+{ "cmd": "git", "args": ["diff", "--no-ext-diff", "--no-textconv", "--name-only"] }
 ```
+
+Any `git diff` form exposed through `bd_bash` must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute.
 
 Do not expose free-form shell strings, `bash -c`, shell expansion, inherited cwd outside repo root, network commands by default, finalization commands, or marker writes.
 
 Allowlist examples:
 
 ```text
-git status / diff / diff --name-only / rev-parse / log --oneline
+git status / diff --no-ext-diff --no-textconv / diff --no-ext-diff --no-textconv --name-only / rev-parse / log --oneline
 test runners
 linters
 typecheckers

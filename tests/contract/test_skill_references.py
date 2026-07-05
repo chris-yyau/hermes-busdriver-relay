@@ -348,6 +348,8 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     assert "OpenCode   = generic/opencode-go lane unless" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
+    assert "diff --no-ext-diff --no-textconv --name-only" in reference_text
+    assert "external diff drivers/textconv filters cannot execute" in reference_text
     assert "Reviewer data-egress gate" in reference_text
     assert "A stronger model does not get more authority" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
