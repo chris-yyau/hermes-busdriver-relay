@@ -301,6 +301,7 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "Only after the in-repo schema/wrapper/smoke/contract tests pass" in reference_text
     assert "Since the user has confirmed Pi as the chosen tool-harness direction" in reference_text
     assert "bd_bash` must be argv-only and allowlist-only" in reference_text
+    assert "Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv`" in reference_text
     assert "hermes-worker-result/v0" in reference_text
     assert "avoid double Busdriver workflow" in reference_text
     assert "Use `pi --mode json`" in reference_text
