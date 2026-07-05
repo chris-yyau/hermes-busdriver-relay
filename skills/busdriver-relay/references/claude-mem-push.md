@@ -34,8 +34,9 @@ claude-mem is **not** fed automatically by Hermes. It is populated by Claude Cod
 ```python
 import sqlite3, time, json
 from datetime import datetime, timezone
+from pathlib import Path
 
-conn = sqlite3.connect("/Users/vfrvndtt/.claude-mem/claude-mem.db")
+conn = sqlite3.connect(Path.home() / ".claude-mem" / "claude-mem.db")
 cur = conn.cursor()
 
 sid = "2e79ad84-604f-486e-b046-21c7cad8e65d"  # from discovery

@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Run Pi as a Busdriver-shaped draft-only tool harness.
+
+This wrapper is target-state adapter glue for hermes-busdriver-agent-draft --agent pi.
+It launches Pi with built-ins/extensions disabled, exposes only adapters/pi bd_* tools,
+requires a structured pi-result artifact, and keeps all finalization authority false.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, NoReturn
+
+ROOT = Path(__file__).resolve().parents[2]
+TOOLS = ROOT / "adapters" / "pi" / "busdriver-tools.ts"
+PI_RESULT_SCHEMA_PATH = ROOT / "adapters" / "pi" / "pi-result.schema.json"
+SCHEMA = "hermes-pi-busdriver-draft/v0"
+PI_RESULT_SCHEMA = "pi-busdriver-result/v0"
+AUTHORITY_FALSE_FIELDS = [
+    "finalization_allowed",
+    "commit_allowed",
+    "push_allowed",
+    "pr_allowed",
+    "merge_allowed",
+    "marker_write_allowed",
+    "deploy_allowed",
+    "release_allowed",
+    "publish_allowed",
+]
+GIT_TIMEOUT = 30
+
+
+def authority_false_payload() -> dict[str, bool]:
+    return {field: False for field in AUTHORITY_FALSE_FIELDS}
+
+
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True, capture_output=True, timeout=timeout)
+
+
+def timeout_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def startup_failure(error: str, **extra: Any) -> NoReturn:
+    payload: dict[str, Any] = {
+        "schema": SCHEMA,
+        "ok": False,
+        "status": "blocked",
+        "error": error,
+        **extra,
+        **authority_false_payload(),
+        "authority": authority_false_payload(),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    raise SystemExit(2)
+
+
+def git_root(repo: Path) -> Path:
+    try:
+        cp = run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"], timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        startup_failure("git_root_timeout", stderr=timeout_text(exc.stderr))
+    if cp.returncode != 0:
+        startup_failure("not_a_git_repo", stderr=cp.stderr.strip())
+    return Path(cp.stdout.strip())
+
+
+def git_value(repo: Path, *args: str) -> str:
+    try:
+        cp = run(["git", "-C", str(repo), *args], timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ""
+    return cp.stdout.strip() if cp.returncode == 0 else ""
+
+
+def tail(text: str, n: int = 8000) -> str:
+    return text[-n:]
+
+
+def split_scope(values: list[str] | None) -> list[str]:
+    return [v for v in (values or []) if v]
+
+
+def glob_to_regex(pattern: str) -> re.Pattern[str]:
+    regex = ""
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i + 3] == "**/":
+            regex += r"(?:.*/)?"
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            regex += r".*"
+            i += 2
+        elif pattern[i] == "*":
+            regex += r"[^/]*"
+            i += 1
+        elif pattern[i] == "?":
+            regex += r"[^/]"
+            i += 1
+        else:
+            regex += re.escape(pattern[i])
+            i += 1
+    return re.compile(rf"^{regex}$")
+
+
+def scope_matches(path: str, pattern: str) -> bool:
+    return path == pattern or bool(glob_to_regex(pattern).match(path))
+
+
+def scope_errors_for_path(path: str, scope_include: list[str], scope_exclude: list[str]) -> list[str]:
+    rel = path.replace("\\", "/")
+    if rel.startswith("/") or rel == "" or rel.startswith("../") or "/../" in rel:
+        return [f"file_outside_scope:{path}"]
+    errors: list[str] = []
+    if scope_include and not any(scope_matches(rel, pat) for pat in scope_include):
+        errors.append(f"file_outside_scope:{path}")
+    if any(scope_matches(rel, pat) for pat in scope_exclude):
+        errors.append(f"file_in_denied_scope:{path}")
+    return errors
+
+
+def json_type_matches(value: Any, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    return True
+
+
+def validate_json_schema(data: Any, schema: dict[str, Any], path: str = "$.") -> list[str]:
+    """Small local validator for adapters/pi/pi-result.schema.json.
+
+    The wrapper avoids a runtime jsonschema dependency, so this implements the
+    schema features used by the Pi result contract, including
+    additionalProperties=false.
+    """
+    errors: list[str] = []
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str) and not json_type_matches(data, expected_type):
+        return [f"{path}:type:{expected_type}"]
+    if "const" in schema and data != schema["const"]:
+        errors.append(f"{path}:const")
+    if "enum" in schema and data not in schema["enum"]:
+        errors.append(f"{path}:enum")
+    if isinstance(data, str) and "maxLength" in schema and len(data) > int(schema["maxLength"]):
+        errors.append(f"{path}:maxLength")
+    if isinstance(data, dict):
+        required = schema.get("required") or []
+        for key in required:
+            if key not in data:
+                errors.append(f"{path}{key}:required")
+        properties = schema.get("properties") or {}
+        if schema.get("additionalProperties") is False:
+            for key in data:
+                if key not in properties:
+                    errors.append(f"{path}{key}:additionalProperty")
+        for key, subschema in properties.items():
+            if key in data and isinstance(subschema, dict):
+                errors.extend(validate_json_schema(data[key], subschema, f"{path}{key}."))
+    if isinstance(data, list):
+        if schema.get("uniqueItems") is True:
+            seen: set[str] = set()
+            for item in data:
+                marker = json.dumps(item, sort_keys=True)
+                if marker in seen:
+                    errors.append(f"{path}:uniqueItems")
+                    break
+                seen.add(marker)
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for idx, item in enumerate(data):
+                errors.extend(validate_json_schema(item, item_schema, f"{path}{idx}."))
+    return errors
+
+
+def validate_artifact(data: Any, scope_include: list[str] | None = None, scope_exclude: list[str] | None = None) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        return ["artifact_not_object"]
+    try:
+        schema = json.loads(PI_RESULT_SCHEMA_PATH.read_text())
+        errors.extend(f"schema_validation:{err}" for err in validate_json_schema(data, schema))
+    except Exception as exc:  # pragma: no cover - defensive fail closed
+        errors.append(f"schema_validation_unavailable:{exc}")
+    if data.get("schema") != PI_RESULT_SCHEMA:
+        errors.append("schema_mismatch")
+    if data.get("status") not in {"needs_busdriver_review", "blocked"}:
+        errors.append("status_not_allowed")
+    if data.get("not_busdriver_native_claude_runtime") is not True:
+        errors.append("missing_not_busdriver_native_claude_runtime")
+    for field in AUTHORITY_FALSE_FIELDS:
+        if data.get(field) is not False:
+            errors.append(f"authority_field_not_false:{field}")
+    authority = data.get("authority") or {}
+    if not isinstance(authority, dict):
+        errors.append("authority_not_object")
+    else:
+        for field in AUTHORITY_FALSE_FIELDS:
+            if authority.get(field) is not False:
+                errors.append(f"nested_authority_field_not_false:{field}")
+    files_changed = data.get("files_changed")
+    if not isinstance(files_changed, list) or not all(isinstance(x, str) for x in files_changed):
+        errors.append("files_changed_not_string_list")
+    else:
+        includes = split_scope(scope_include)
+        excludes = split_scope(scope_exclude)
+        for changed in files_changed:
+            errors.extend(scope_errors_for_path(changed, includes, excludes))
+    if data.get("status") == "needs_busdriver_review" and data.get("ok") is not True:
+        errors.append("artifact_ok_not_true")
+    return errors
+
+
+def artifact_blockers(data: Any) -> list[str]:
+    if isinstance(data, dict) and data.get("status") == "blocked":
+        return ["artifact_status_blocked"]
+    return []
+
+
+def build_prompt(prompt_file: Path) -> str:
+    original = prompt_file.read_text()
+    return (
+        original.strip()
+        + "\n\n"
+        + "You are running inside the Hermes Pi Busdriver-shaped draft adapter. "
+        + "Use only bd_status, bd_read, bd_write_draft, bd_bash, and bd_artifact. "
+        + "Do not claim done/finalized/merged. Do not commit, push, create PRs, merge, deploy, release, or write trusted markers. "
+        + "End by calling bd_artifact with status needs_busdriver_review or blocked."
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--prompt-file", required=True)
+    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN") or shutil.which("pi") or "pi")
+    ap.add_argument("--model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"))
+    ap.add_argument("--provider", default=os.environ.get("PI_BD_PROVIDER", ""))
+    ap.add_argument("--scope-include", action="append")
+    ap.add_argument("--scope-exclude", action="append")
+    ap.add_argument("--timeout", type=int, default=1200)
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    repo = git_root(Path(args.repo).expanduser())
+    prompt_file = Path(args.prompt_file).expanduser().resolve()
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    event_log = run_dir / "pi-events.jsonl"
+    artifact_path = run_dir / "pi-result.json"
+    for stale in [event_log, artifact_path, run_dir / "pi.stdout", run_dir / "pi.stderr"]:
+        if stale.exists():
+            stale.unlink()
+    prompt = build_prompt(prompt_file)
+    adapter_prompt_file = run_dir / "pi-adapter-prompt.md"
+    adapter_prompt_file.write_text(prompt)
+    scope = split_scope(args.scope_include)
+    denied_scope = split_scope(args.scope_exclude)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BD_REPO_ROOT": str(repo),
+            "PI_BD_MODE": "draft",
+            "PI_BD_ALLOWED_WRITES": "\n".join(scope),
+            "PI_BD_DENIED_WRITES": "\n".join(denied_scope),
+            "PI_BD_EVENT_LOG": str(event_log),
+            "PI_BD_ARTIFACT_PATH": str(artifact_path),
+            "HERMES_BASE_HEAD": git_value(repo, "rev-parse", "HEAD"),
+        }
+    )
+
+    cmd = [
+        args.pi_bin,
+        "--print",
+        "--no-session",
+        "--no-approve",
+        "--system-prompt",
+        "You are a constrained Pi Busdriver adapter worker. Use only the bd_* tools enabled by this wrapper; do not trust or load project-local system prompts.",
+        "--append-system-prompt",
+        "",
+        "--no-builtin-tools",
+        "--no-context-files",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-extensions",
+        "-e",
+        str(TOOLS),
+        "--tools",
+        "bd_status,bd_read,bd_write_draft,bd_bash,bd_artifact",
+        "--mode",
+        "json",
+    ]
+    if args.provider:
+        cmd += ["--provider", args.provider]
+    if args.model:
+        cmd += ["--model", args.model]
+    cmd.append(f"@{adapter_prompt_file}")
+    cmd.append("Follow the attached Pi Busdriver adapter prompt exactly.")
+
+    (run_dir / "pi-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
+    try:
+        cp = run(cmd, cwd=repo, env=env, timeout=args.timeout)
+    except subprocess.TimeoutExpired as exc:
+        cp = subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout=timeout_text(exc.stdout),
+            stderr=timeout_text(exc.stderr) + "\npi_timeout",
+        )
+    except OSError as exc:
+        cp = subprocess.CompletedProcess(
+            cmd,
+            127,
+            stdout="",
+            stderr=f"pi_launch_error:{type(exc).__name__}:{exc}",
+        )
+    (run_dir / "pi.stdout").write_text(cp.stdout)
+    (run_dir / "pi.stderr").write_text(cp.stderr)
+
+    artifact: dict[str, Any] | None = None
+    artifact_errors: list[str] = []
+    artifact_blocker_reasons: list[str] = []
+    if artifact_path.exists():
+        try:
+            artifact = json.loads(artifact_path.read_text())
+            artifact_errors = validate_artifact(artifact, scope, denied_scope)
+            artifact_blocker_reasons = artifact_blockers(artifact)
+        except Exception as exc:  # pragma: no cover - defensive fail closed
+            artifact_errors = [f"artifact_parse_error:{exc}"]
+    else:
+        artifact_errors = ["artifact_missing"]
+
+    ok = cp.returncode == 0 and not artifact_errors and not artifact_blocker_reasons
+    result: dict[str, Any] = {
+        "schema": SCHEMA,
+        "ok": ok,
+        "status": "needs_busdriver_review" if ok else "blocked",
+        "repo": str(repo),
+        "pi_bin": args.pi_bin,
+        "model": args.model,
+        "scope_include": scope,
+        "scope_exclude": denied_scope,
+        "command_file": str(run_dir / "pi-command.json"),
+        "adapter_prompt_file": str(adapter_prompt_file),
+        "event_log": str(event_log),
+        "artifact_path": str(artifact_path),
+        "artifact": artifact,
+        "artifact_blockers": artifact_blocker_reasons,
+        "artifact_errors": artifact_errors,
+        "pi_returncode": cp.returncode,
+        "stdout_tail": tail(cp.stdout),
+        "stderr_tail": tail(cp.stderr),
+        **authority_false_payload(),
+        "authority": authority_false_payload(),
+    }
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return 0 if ok else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

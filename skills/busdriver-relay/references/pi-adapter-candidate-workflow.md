@@ -88,13 +88,13 @@ Create a throwaway git repo and a Pi extension such as `busdriver-tools.ts` that
 bd_status        # read-only structured repo/status envelope
 bd_read          # guarded read inside cwd; blocks .git/.claude/.opencode paths
 bd_write_draft   # draft-only write; allowed only in PI_BD_MODE=draft and allowlisted path; records operation_id + before/after hash; refuses symlink escape
-bd_bash          # argv-only and allowlist-only wrapper; no shell expansion / bash -c; allow safe git status only with -c core.fsmonitor=false, git diff with --no-ext-diff and --no-textconv, log, test, and lint commands only
+bd_bash          # argv-only and allowlist-only wrapper; no shell expansion / bash -c; allow safe git status/diff only with -c core.fsmonitor=false, git diff also with --no-ext-diff and --no-textconv, log, test, and lint commands only
 bd_artifact      # structured worker artifact ending in needs_busdriver_review or blocked, never done/finalized
 ```
 
 Hardening requirements:
 
-- `bd_bash` must be argv-only and allowlist-only. Do not expose arbitrary shell strings. Any allowed `git status` form must inject `-c core.fsmonitor=false` so fsmonitor hook commands cannot execute. Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute. No inherited cwd outside repo root, no network by default, no finalization commands, no marker writes.
+- `bd_bash` must be argv-only and allowlist-only. Do not expose arbitrary shell strings. Any allowed `git status` form must inject `-c core.fsmonitor=false` so fsmonitor hook commands cannot execute. Any allowed `git diff` form must inject `-c core.fsmonitor=false` so fsmonitor hook commands cannot execute. Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute. No inherited cwd outside repo root, no network by default, no finalization commands, no marker writes.
 - `bd_write_draft` must enforce repo-root containment, declared scope/include policy, `.git/**` / `.claude/**` / `.opencode/**` / trusted-marker deny rules, symlink-escape refusal, normalized path recording, `operation_id`, and `before_hash` / `after_hash` audit fields.
 - Every non-authority worker result should fit a common `hermes-worker-result/v0` envelope and keep all commit/push/PR/merge/marker/deploy/finalization flags false. Treat claims like `done`, `complete`, `ready_to_merge`, or `merged` as worker self-report only.
 
@@ -105,7 +105,10 @@ PI_BD_EVENT_LOG="$BASE/logs/readonly.events.jsonl" \
 PI_BD_MODE=readonly \
 BUSDRIVER_STATE_DIR=.pi-busdriver-test \
 pi --provider openai-codex --model gpt-5.4-mini --thinking off \
-  --print --no-session --no-builtin-tools --no-context-files \
+  --print --no-session --no-approve \
+  --system-prompt 'Constrained Busdriver adapter; use only bd_* tools.' \
+  --append-system-prompt '' \
+  --no-builtin-tools --no-context-files \
   --no-skills --no-prompt-templates --no-themes --no-extensions \
   -e "$BASE/busdriver-tools.ts" \
   --tools bd_status,bd_read,bd_bash,bd_write_draft \
@@ -198,10 +201,10 @@ Use `pi --mode json` when verifying wrappers so Hermes can parse the actual tool
 3. **In-repo Pi adapter proof**
    - Since the user has confirmed Pi as the chosen tool-harness direction, do not require a fresh OpenCode parity contest before the Pi adapter proof.
    - Add a real in-repo Pi adapter schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation.
-   - Keep Pi target-state until those schema/wrapper/smoke/contract tests pass.
+   - Before that proof passes, keep Pi target-state; after the proof passes, allow Pi only as the constrained `bd_*` draft adapter lane.
    - Treat OpenCode comparison as optional future evidence: if requested, label it either generic OpenCode-under-Hermes-gate containment or rebuild a Busdriver-compatible OpenCode adapter first.
 
-Only after the in-repo schema/wrapper/smoke/contract tests pass should Pi be treated as an enabled mutating draft lane. Until then, Pi is the confirmed target-state adapter candidate, not a current production route.
+Only after the in-repo schema/wrapper/smoke/contract tests pass should Pi be treated as an enabled mutating draft lane. In that enabled lane, Pi remains constrained to the relay-owned `bd_*` adapter and still cannot commit, push, open PRs, merge, deploy, release, publish, or write trusted markers.
 
 ## Verdict from the initial smoke
 
@@ -213,12 +216,12 @@ Validated:
 - Draft mode can produce allowlisted dirty-tree changes only.
 - Finalization/destructive commands can be blocked inside the custom bash wrapper.
 - Tool results can carry fail-closed authority metadata and `needs_busdriver_review`.
-- A formal `hermes-busdriver-agent-draft → preflight → Pi custom command → postflight` gated draft launcher has now passed for a scoped file write plus blocked finalization attempt.
+- The formal `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` gated draft launcher has now passed for scoped fake-Pi contract runs and optional real Pi smoke.
 
 Still not validated:
 
 - Live Busdriver `hooks/hooks.json` discovery and parity.
-- Blueprint/litmus/PR-grind semantics.
+- Blueprint/litmus/PR-grind semantics remain Busdriver/Claude authority; Pi only produces draft evidence for Hermes/Busdriver review.
 - Trusted marker handling and marker freshness.
 - OpenCode comparison remains optional future evidence; the live Busdriver OpenCode plugin path is currently absent/degraded.
 - Multi-step reliability under longer tasks.

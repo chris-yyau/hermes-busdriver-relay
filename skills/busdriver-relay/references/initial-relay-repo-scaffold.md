@@ -15,7 +15,7 @@ Private repo created:
 
 ```text
 GitHub: https://github.com/chris-yyau/hermes-busdriver-relay
-Local:  /Volumes/work/projects/hermes-busdriver-relay
+Local:  <relay-repo>
 ```
 
 Repo is for Hermes-owned artifacts only:

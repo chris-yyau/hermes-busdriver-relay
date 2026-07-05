@@ -182,8 +182,6 @@ Hermes must not commit a dirty tree unless every dirty path is classified as:
 2. explicitly included in the delivery scope; or
 3. explicitly accepted by the user as preexisting work to include.
 
-When the relay repo itself already has WIP, start new implementation slices in a separate git worktree/branch instead of reusing the dirty primary worktree. Record the selected worktree in artifacts/briefs. Only work in the existing relay worktree if the user explicitly accepts that scope.
-
 This prevents Codex changing `A`, Cursor/manual edits changing `B`, and Hermes accidentally committing `A+B` just because tests are green.
 
 ## Reviewer data-egress gate

@@ -6,15 +6,15 @@ Last verified against the installed Busdriver marketplace plugin `1.79.2` used b
 
 | Component | Path / URL |
 |---|---|
-| Relay repo | `/Volumes/work/projects/hermes-busdriver-relay` |
+| Relay repo | `<relay-repo>` |
 | Relay GitHub | `https://github.com/chris-yyau/hermes-busdriver-relay` |
-| Busdriver source path read during Phase 0 | `/Volumes/work/projects/busdriver` |
+| Busdriver source path read during Phase 0 | `<busdriver-source>` |
 | Installed Busdriver marketplace plugin used for smoke | `~/.claude/plugins/marketplaces/busdriver` |
 | Hermes skill install path | `~/.hermes/skills/autonomous-ai-agents/busdriver-relay` |
 
 ## Completed scope
 
-Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex-only draft launcher**, a **read-only balanced agent work planning envelope**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, redacted verifier output artifacts, nested helper timeout budgeting, and state-dir-aware litmus evidence forwarding**, a **read-only litmus/pre-PR marker freshness status helper**, a **read-only finalization readiness / handoff envelope with machine-readable finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive fail-closed authority hardening**, a **read-only finalization contract status / capability matrix for ADR 0005 remaining-work unlock criteria**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, **optional relay-role resolution evidence inside delivery/finalization status envelopes**, and **delivery-status capability inventory entries for public relay helpers**. The non-mutating relay surface is complete for the current policy scope. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff/contract-status/balance-plan envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, normalized/redacted marker freshness evidence, explicit non-mutating guardrails, policy-blocked ADR 0005 unlock criteria, dual-review role-readiness evidence, advisory pre-PR dual-review freshness classification, recursive authority-positive fail-closed checks, and durable run identity/artifact handoff.
+Relay v1 is complete as a **read-only/status + lock + smoke** integration. Relay v2 has a **Hermes-side equivalent gate runner**, a **Codex normal draft launcher plus constrained Pi adapter lane**, a **read-only balanced agent work planning envelope**, a **read-only PR-grind readiness checker**, a **read-only bounded PR-grind polling loop**, a **fail-closed delivery dispatcher with verify-only local verifiers, read-only `pr-grind` loop execution, durable `hermes-busdriver-delivery-run/v0` envelopes, read-only `--mode status` run lookup, redacted verifier output artifacts, nested helper timeout budgeting, and state-dir-aware litmus evidence forwarding**, a **read-only litmus/pre-PR marker freshness status helper**, a **read-only finalization readiness / handoff envelope with machine-readable finalization guardrails, dual-review readiness evidence, advisory pre-PR dual-review evidence classification, and recursive fail-closed authority hardening**, a **read-only finalization contract status / capability matrix for ADR 0005 remaining-work unlock criteria**, **read-only Busdriver drift-baseline compatibility reporting**, **read-only finalization lock/status blocking**, **configurable read-only relay equivalents for reviewer/voice/arbiter/backstop status roles**, a **read-only dispatcher-facing relay role resolver**, **optional relay-role resolution evidence inside delivery/finalization status envelopes**, and **delivery-status capability inventory entries for public relay helpers**. The non-mutating relay surface is complete for the current policy scope. Draft implementation remains non-finalizing; Delivery Mode finalization is still operator-level, but it now has deterministic checker/status/loop/plan/verify/pr-grind/handoff/contract-status/balance-plan envelopes for latest-HEAD checks/comments/mergeability, configured relay-role selection, normalized/redacted marker freshness evidence, explicit non-mutating guardrails, policy-blocked ADR 0005 unlock criteria, dual-review role-readiness evidence, advisory pre-PR dual-review freshness classification, recursive authority-positive fail-closed checks, and durable run identity/artifact handoff.
 
 Implemented:
 
@@ -25,9 +25,9 @@ Implemented:
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-gate`
-- `scripts/hermes-busdriver-agent-draft`
+- `scripts/hermes-busdriver-agent-draft` including Codex as the current normal draft lane and Pi as a constrained Busdriver-shaped adapter lane with built-in Pi tools disabled, `bd_*` tools only, and fail-closed `pi-result.json` authority flags
 - `scripts/hermes-busdriver-agent-balance-plan` read-only planning envelope for one gated mutating draft lane plus parallel read-only review/status lanes
-- `scripts/hermes-busdriver-agent-smoke`
+- `scripts/hermes-busdriver-agent-smoke` including opt-in Codex and Pi adapter smokes that may consume provider quota/tokens
 - `scripts/hermes-busdriver-delivery-status` including a top-level `read_only: true` envelope marker, optional `--relay-role` / `--relay-config` resolver evidence, sanitized/normalized/redacted state-dir-aware read-only litmus/pre-PR freshness evidence, and metadata-only relay capability inventory entries for public helpers including agent-balance-plan, agent-smoke, deliver, smoke, finalization-readiness, and finalization-contract-status; litmus evidence fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver` including nested delivery-status timeout budgeting and `--busdriver-state-dir-name` forwarding to litmus evidence checks
 - `scripts/hermes-busdriver-litmus-status`
@@ -59,7 +59,7 @@ Implemented:
 ## Verification commands
 
 ```bash
-cd /Volumes/work/projects/hermes-busdriver-relay
+cd <relay-repo>
 uvx --from pytest pytest tests/contract -q -p no:cacheprovider
 scripts/hermes-busdriver-smoke \
   --plugin-root ~/.claude/plugins/marketplaces/busdriver \
@@ -68,21 +68,16 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR103 final-audit skill-source convergence on clean `main` with Busdriver marketplace plugin `1.79.2`:
+Most recent local verification for the Pi adapter proof on branch `chore/pi-busdriver-adapter-20260706-031225` with Busdriver source `1.79.3`:
 
 ```text
-base after PR103 merge: main...origin/main clean/synced at 06460d6e88270cc103c7afd497c4d7dd47167468
-open PRs at final audit: []
-relay locks at final audit: count 0
-installed Busdriver marketplace plugin used for smoke/status: 1.79.2
-repo skill source synced with installed Hermes skill: missing=[], extra=[], diffs=[], repo_files=82, installed_files=82
-scripts/hermes-busdriver-relay-brief --brief: contract policy_blocked; remaining=5; allowed=0; authority all false; skill-sync clean; next none_stop_cleanup_loop_until_busdriver_approves_new_surface
-python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py skill-compare: clean=true, missing=[], extra=[], diffs=[]
-python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py focused: 21 passed
-python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py contract: 421 passed
-python3 /Volumes/Work/.hermes-runtime/hermes-busdriver-relay/verify_pr102.py compileall: passed
-scripts/hermes-busdriver-smoke --repo . --pretty: ok=true; py_compile ok; contract tests pass (421 passed); finalization policy remains fail-closed
-scripts/hermes-busdriver-finalization-contract-status --pretty: ok true; read_only true; schema hermes-busdriver-finalization-contract-status/v0; decision status policy_blocked/reason adr_0005_unlock_contract_not_satisfied; capability_allowed_count=0; remaining_work_count=5; policy_blocked_count=5; commit/push/PR/merge/deploy/release/publish/marker/finalization authority flags false
+uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 444 passed
+uvx --from pytest pytest tests/contract/test_pi_adapter.py tests/contract/test_skill_references.py -q -p no:cacheprovider: 44 passed
+python3 -m py_compile scripts/pi/run-pi-busdriver-draft scripts/hermes-busdriver-agent-draft scripts/hermes-busdriver-agent-smoke tests/contract/test_pi_adapter.py: passed
+python3 -m compileall -q scripts tests: passed
+scripts/hermes-busdriver-smoke --repo . --plugin-root <busdriver> --pretty: ok=true, 6/6 checks passed
+python3 scripts/hermes-busdriver-agent-smoke --plugin-root <busdriver> --agent pi --pi-bin <pi> --timeout 420 --pretty: optional real-agent smoke pattern; consumes provider/runtime quota and must remain status=needs_busdriver_review with commit/push/PR/merge/deploy flags false
+git diff --check: clean
 ```
 
 ## Still intentionally deferred
@@ -106,7 +101,7 @@ Hermes may use this repo for:
 1. Busdriver-aware intake and route recognition;
 2. Phase 0 status discovery;
 3. read-only route/gate/marker/lock reporting;
-4. preflight/postflight gates around Hermes-launched draft agents such as Codex (others temporarily deferred);
+4. preflight/postflight gates around Hermes-launched draft agents: Codex as the current normal draft lane, and Pi only through the constrained adapter proof with all finalization authority false;
 5. generating read-only finalization readiness / handoff envelopes for Busdriver/Claude or explicit operator finalization;
 6. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
 7. maintaining the current read-only/non-mutating relay envelopes while leaving finalization expansion policy-blocked.

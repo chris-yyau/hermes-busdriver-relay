@@ -13,8 +13,8 @@ Session: relay PR #51 (`docs: add finalization unlock ADR`).
 ## Durable workflow lessons
 
 1. **Do not touch Claude installed plugin clones/caches during relay delivery.**
-   - Relay work belongs in `/Volumes/work/projects/hermes-busdriver-relay`.
-   - Busdriver source work belongs in `/Volumes/work/projects/busdriver`.
+   - Relay work belongs in `<relay-repo>`.
+   - Busdriver source work belongs in `<busdriver-source>`.
    - Do not modify `~/.claude/plugins/marketplaces/busdriver` or `~/.claude/plugins/cache/busdriver/...` unless the user explicitly asks for plugin repair/install work.
    - If a Claude session reports `Unknown skill` and `orchestrator SKILL.md not found` under the plugin cache, treat it as plugin cache/index mismatch and recommend `/reload-plugins`, `/reload-skills`, or a fresh Claude session; do not create `skip-litmus.local`.
 
@@ -49,7 +49,7 @@ Session: relay PR #51 (`docs: add finalization unlock ADR`).
 - focused docs/finalization tests (`76 passed`)
 - full `tests/contract` (`381 passed`)
 - `python3 -m py_compile scripts/hermes-busdriver-*`
-- `scripts/hermes-busdriver-smoke --plugin-root /Volumes/work/projects/busdriver --repo . --pretty`
+- `scripts/hermes-busdriver-smoke --plugin-root <busdriver-source> --repo . --pretty`
 - `scripts/hermes-busdriver-deliver --mode execute --operation verify ...`
 - latest-head PR-grind after every push
 

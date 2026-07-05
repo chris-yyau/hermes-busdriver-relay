@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -68,8 +69,10 @@ def summarize_report(data: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--agent", default="codex", choices=["codex", "custom"])
+    ap.add_argument("--agent", default="codex", choices=["codex", "custom", "pi"])
     ap.add_argument("--agent-cmd", help="Required when --agent custom")
+    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi")
+    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--keep-repo", action="store_true", help="Do not delete the throwaway repo")
     ap.add_argument("--pretty", action="store_true")
@@ -83,7 +86,13 @@ def main() -> int:
         init_repo(repo)
         expected = "codex adapter smoke ok" if args.agent == "codex" else f"{args.agent} adapter smoke ok"
         target = "src/codex_smoke.txt" if args.agent == "codex" else f"src/{args.agent}_smoke.txt"
-        prompt = f"Create or overwrite {target} with exactly this single line: {expected}. Do not commit. Do not modify any other file."
+        prompt = (
+            f"Create or overwrite {target} with exactly this content, including the trailing newline:\n"
+            "```text\n"
+            f"{expected}\n"
+            "```\n"
+            "Do not add punctuation. Do not commit. Do not modify any other file."
+        )
 
         cmd = [
             sys.executable,
@@ -105,6 +114,8 @@ def main() -> int:
         ]
         if args.agent_cmd:
             cmd += ["--agent-cmd", args.agent_cmd]
+        if args.agent == "pi":
+            cmd += ["--pi-bin", args.pi_bin, "--pi-model", args.pi_model]
         cp = run(cmd, timeout=args.timeout + 120)
         try:
             draft = json.loads(cp.stdout)
