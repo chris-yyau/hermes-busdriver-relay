@@ -114,7 +114,10 @@ def test_relay_brief_reports_installed_skill_drift_without_mutation(tmp_path):
     (installed_skill / "SKILL.md").write_text("# divergent installed skill\n")
     (reference_dir / "extra.md").write_text("installed-only\n")
 
-    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    subdir = repo / "subdir"
+    subdir.mkdir()
+
+    proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
 
     assert data["repo"]["dirty"] is False
@@ -362,11 +365,61 @@ def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_pa
         "cwd = str(Path.cwd())\n"
         "print(json.dumps({\n"
         "    'ok': True,\n"
-        "    'schema': 'fake-contract-status/v0',\n"
+        "    'schema': 'hermes-busdriver-finalization-contract-status/v0',\n"
         "    'read_only': True,\n"
         "    'current_policy': cwd,\n"
         "    'decision': {'status': 'policy_blocked'},\n"
         "    'remaining_work': [{'status': 'policy_blocked', 'capability_allowed': False}],\n"
+        "    'summary': {\n"
+        "        'remaining_work_count': 1,\n"
+        "        'policy_blocked_count': 1,\n"
+        "        'capability_allowed_count': 0,\n"
+        "    },\n"
+        "}))\n"
+    )
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    init_git_repo(repo)
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    (installed_skill / "SKILL.md").write_text("# repo skill\n")
+
+    proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["git_root"] == str(repo)
+    assert data["repo"]["dirty"] is False
+    assert data["skill_sync"]["clean"] is True
+    assert data["finalization_contract_status"] == {
+        "ok": True,
+        "schema": "hermes-busdriver-finalization-contract-status/v0",
+        "read_only": True,
+        "current_policy": str(repo),
+        "decision_status": "policy_blocked",
+        "remaining_work_count": 1,
+        "policy_blocked_count": 1,
+        "capability_allowed_count": 0,
+    }
+    assert data["ok"] is True
+    assert data["decision"]["status"] == "idle_clean_policy_blocked_finalization"
+
+
+def test_relay_brief_rejects_unknown_contract_status_schema(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    contract_helper = scripts / "hermes-busdriver-finalization-contract-status"
+    contract_helper.write_text(
+        "import json\n"
+        "print(json.dumps({\n"
+        "    'ok': True,\n"
+        "    'schema': 'fake-contract-status/v0',\n"
+        "    'read_only': True,\n"
+        "    'decision': {'status': 'policy_blocked'},\n"
         "    'summary': {\n"
         "        'remaining_work_count': 1,\n"
         "        'policy_blocked_count': 1,\n"
@@ -383,21 +436,12 @@ def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_pa
     proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
     data = json.loads(proc.stdout)
 
-    assert data["repo"]["git_root"] == str(repo)
-    assert data["repo"]["dirty"] is False
-    assert data["skill_sync"]["clean"] is True
-    assert data["finalization_contract_status"] == {
-        "ok": True,
-        "schema": "fake-contract-status/v0",
-        "read_only": True,
-        "current_policy": str(repo),
-        "decision_status": "policy_blocked",
-        "remaining_work_count": 1,
-        "policy_blocked_count": 1,
-        "capability_allowed_count": 0,
-    }
-    assert data["ok"] is True
-    assert data["decision"]["status"] == "idle_clean_policy_blocked_finalization"
+    assert data["finalization_contract_status"]["ok"] is False
+    assert data["finalization_contract_status"]["error"] == "contract_status_schema_invalid"
+    assert data["finalization_contract_status"]["schema"] == "fake-contract-status/v0"
+    assert data["finalization_contract_status"]["expected_schema"] == "hermes-busdriver-finalization-contract-status/v0"
+    assert data["ok"] is False
+    assert data["decision"]["status"] == "blocked_unknown_contract_state"
 
 
 def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):

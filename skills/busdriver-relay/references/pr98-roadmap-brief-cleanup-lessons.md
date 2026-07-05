@@ -12,6 +12,7 @@ Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-br
    - A non-Git, missing, or Git-status-failing `--repo` must not be reported as clean; expose repo Git/status availability and block the idle-clean decision with structured JSON instead of tracebacks.
    - If `--repo` points inside a worktree subdirectory, resolve the Git root before comparing repo skill source to the installed skill.
    - Contract-status evidence must come from the requested repo root; do not combine repo/skill state from `--repo` with contract evidence from the helper checkout.
+   - Validate contract-status schema and `read_only=true` before treating helper output as trusted evidence; unknown schemas must fail closed instead of becoming a positive status contract.
    - Top-level `ok` should reflect critical child evidence such as repo Git/status verification, contract-status success, and skill-sync checked status.
 
 2. **Read-only Git probes must be isolated and config-stable.**
