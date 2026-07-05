@@ -30,6 +30,7 @@ PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
 DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
 FINALIZATION_READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
 FINALIZATION_CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization-contract-status"
+RELAY_BRIEF = ROOT / "scripts" / "hermes-busdriver-relay-brief"
 AGENT_BALANCE_PLAN = ROOT / "scripts" / "hermes-busdriver-agent-balance-plan"
 SMOKE = ROOT / "scripts" / "hermes-busdriver-smoke"
 PY_COMPILE_SCRIPTS = [
@@ -44,6 +45,7 @@ PY_COMPILE_SCRIPTS = [
     DELIVERY_STATUS,
     FINALIZATION_READINESS,
     FINALIZATION_CONTRACT_STATUS,
+    RELAY_BRIEF,
     DELIVER,
     LITMUS_STATUS,
     PR_GRIND_CHECK,

@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Concise read-only relay briefing for Telegram/status surfaces.
+
+This helper intentionally does not contact GitHub, write Busdriver markers, run
+agents, or mutate the repo. It summarizes local repo state, skill-source drift,
+finalization contract status, and the next safe roadmap posture.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_INSTALLED_SKILL = Path.home() / ".hermes" / "skills" / "autonomous-ai-agents" / "busdriver-relay"
+
+AUTHORITY_FALSE: dict[str, bool] = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+    "marker_write_allowed": False,
+    "mutation_allowed": False,
+    "programmatic_execution_allowed": False,
+    "non_codex_agent_enablement_allowed": False,
+}
+
+ROADMAP_TASKS: list[dict[str, Any]] = [
+    {
+        "id": "adr0005-unlock-contract",
+        "label": "ADR0005 finalization authority unlock contract",
+        "status": "contract_complete_authority_policy_blocked",
+        "evidence": [
+            "ADRs/0005-finalization-authority-integration-contract.md",
+            "scripts/hermes-busdriver-finalization-contract-status",
+        ],
+        "safe_next": "no_mutating_executor_until_busdriver_approved_surface",
+    },
+    {
+        "id": "mutating-pr-grind-fix-loop",
+        "label": "Mutating PR-grind fix/push/re-poll loop",
+        "status": "read_only_design_complete_mutating_loop_policy_blocked",
+        "evidence": [
+            "ADRs/0005-finalization-authority-integration-contract.md#mutating-pr-grind-fixpushre-poll-loop",
+            "scripts/hermes-busdriver-pr-grind-loop",
+        ],
+        "safe_next": "keep_current_loop_read_only_until_gated_fix_executor_and_push_repoll_contract_exist",
+    },
+    {
+        "id": "marker-interop-contract",
+        "label": "Busdriver marker interop contract",
+        "status": "design_contract_complete_marker_write_policy_blocked",
+        "evidence": [
+            "ADRs/0006-programmatic-dual-review-marker-interop.md",
+            "scripts/hermes-busdriver-litmus-status",
+        ],
+        "safe_next": "report_marker_freshness_only_do_not_write_busdriver_markers",
+    },
+    {
+        "id": "opencode-adapter-proof",
+        "label": "OpenCode candidate proof",
+        "status": "candidate_only_requires_separate_smoke_contract",
+        "evidence": [
+            "skills/busdriver-relay/SKILL.md",
+            "tests/contract/test_status_probe.py",
+        ],
+        "safe_next": "do_not_enable_non_codex_mutating_adapter_without_separate_gate_smoke_and_user_intent",
+    },
+    {
+        "id": "status-ux-layer",
+        "label": "Status/UX compact relay briefing",
+        "status": "implemented_by_hermes_busdriver_relay_brief",
+        "evidence": ["scripts/hermes-busdriver-relay-brief"],
+        "safe_next": "use_this_read_only_helper_for_idle_blocked_next_slice_summaries",
+    },
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read-only Hermes Busdriver relay briefing")
+    default_installed_skill = os.environ.get("HERMES_BUSDRIVER_INSTALLED_SKILL_DIR") or str(DEFAULT_INSTALLED_SKILL)
+    parser.add_argument("--repo", default=str(ROOT), help="Relay repo path, default: this checkout")
+    parser.add_argument("--installed-skill", default=default_installed_skill)
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    parser.add_argument("--brief", action="store_true", help="Print Telegram-friendly text instead of JSON")
+    return parser.parse_args()
+
+
+def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        if not stderr:
+            stderr = f"timed out after {timeout}s"
+        return subprocess.CompletedProcess(argv, 124, stdout, stderr)
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
+
+
+def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | None:
+    proc = run(["git", "--no-optional-locks", *args], repo)
+    if proc.returncode != 0:
+        return None
+    if preserve_leading:
+        return proc.stdout.rstrip("\n")
+    return proc.stdout.strip()
+
+
+def repo_summary(repo: Path) -> dict[str, Any]:
+    git_root = git_value(repo, "rev-parse", "--show-toplevel")
+    git_ok = bool(git_root)
+    branch = git_value(repo, "branch", "--show-current") if git_ok else None
+    head = git_value(repo, "rev-parse", "HEAD") if git_ok else None
+    origin_main = git_value(repo, "rev-parse", "origin/main") if git_ok else None
+    porcelain = git_value(
+        repo,
+        "-c",
+        "status.showUntrackedFiles=all",
+        "-c",
+        "color.status=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        preserve_leading=True,
+    ) if git_ok else None
+    status_available = porcelain is not None
+    state = {
+        "path": str(repo),
+        "git_ok": git_ok,
+        "git_root": git_root,
+        "status_available": status_available,
+        "branch": branch,
+        "head": head,
+        "head_short": head[:12] if head else None,
+        "origin_main": origin_main,
+        "synced_with_origin_main": bool(head and origin_main and head == origin_main),
+        "dirty": bool(porcelain) if status_available else None,
+        "porcelain": porcelain.splitlines() if porcelain else [],
+    }
+    return state
+
+
+def file_list(root: Path) -> list[Path]:
+    if not root.exists() or not root.is_dir():
+        return []
+    return sorted(path.relative_to(root) for path in root.rglob("*") if path.is_file())
+
+
+def skill_compare(repo: Path, installed: Path) -> dict[str, Any]:
+    repo_skill = repo / "skills" / "busdriver-relay"
+    if not repo_skill.exists() or not repo_skill.is_dir():
+        return {"checked": False, "reason": "repo_skill_missing", "path": str(installed), "repo_skill_path": str(repo_skill)}
+    if not installed.exists():
+        return {"checked": False, "reason": "installed_skill_missing", "path": str(installed)}
+    if not installed.is_dir():
+        return {"checked": False, "reason": "installed_skill_not_directory", "path": str(installed)}
+    repo_files = file_list(repo_skill)
+    installed_files = file_list(installed)
+    missing = [str(path) for path in installed_files if path not in repo_files]
+    extra = [str(path) for path in repo_files if path not in installed_files]
+    diffs = []
+    for rel in sorted(set(repo_files) & set(installed_files)):
+        try:
+            if (repo_skill / rel).read_bytes() != (installed / rel).read_bytes():
+                diffs.append(str(rel))
+        except OSError:
+            diffs.append(str(rel))
+    return {
+        "checked": True,
+        "path": str(installed),
+        "repo_files": len(repo_files),
+        "installed_files": len(installed_files),
+        "missing": missing,
+        "extra": extra,
+        "diffs": diffs,
+        "clean": not missing and not extra and not diffs,
+    }
+
+
+def contract_status_summary(repo_root: Path) -> dict[str, Any]:
+    contract_status = repo_root / "scripts" / "hermes-busdriver-finalization-contract-status"
+    if not contract_status.exists() or not contract_status.is_file():
+        return {"ok": False, "error": "contract_status_missing", "path": str(contract_status)}
+    proc = run([sys.executable, str(contract_status)], repo_root)
+    if proc.returncode != 0:
+        return {"ok": False, "error": "contract_status_failed", "stderr_tail": proc.stderr[-500:]}
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"contract_status_json_invalid: {exc}"}
+    decision = payload.get("decision", {}) if isinstance(payload, dict) else {}
+    matrix = payload.get("remaining_work", []) if isinstance(payload, dict) else []
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    return {
+        "ok": payload.get("ok") is True,
+        "schema": payload.get("schema"),
+        "read_only": payload.get("read_only") is True,
+        "current_policy": payload.get("current_policy"),
+        "decision_status": decision.get("status"),
+        "remaining_work_count": summary.get("remaining_work_count", len(matrix)),
+        "policy_blocked_count": summary.get("policy_blocked_count", sum(1 for row in matrix if row.get("status") == "policy_blocked")),
+        "capability_allowed_count": summary.get("capability_allowed_count", sum(1 for row in matrix if row.get("capability_allowed") is True)),
+    }
+
+
+def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    if not repo_state.get("git_ok") or not repo_state.get("status_available"):
+        return {"status": "blocked_unverified_repo_state", "next_safe_slice": "inspect_repo_git_status"}
+    if repo_state.get("dirty"):
+        return {"status": "needs_local_reconciliation", "next_safe_slice": "inspect_and_reconcile_dirty_tree"}
+    if not skill_state.get("checked"):
+        if skill_state.get("reason") == "repo_skill_missing":
+            return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_repo_skill_source"}
+        return {"status": "blocked_unverified_skill_sync", "next_safe_slice": "inspect_installed_skill_path"}
+    if skill_state.get("checked") and not skill_state.get("clean"):
+        if skill_state.get("extra") and not skill_state.get("missing") and not skill_state.get("diffs"):
+            return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_repo_skill_reference_to_installed_skill"}
+        if skill_state.get("missing") and not skill_state.get("extra") and not skill_state.get("diffs"):
+            return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
+        return {"status": "needs_skill_source_sync", "next_safe_slice": "reconcile_skill_source_drift"}
+    if contract.get("ok") and contract.get("policy_blocked_count", 0) > 0:
+        return {"status": "idle_clean_policy_blocked_finalization", "next_safe_slice": "none_stop_cleanup_loop_until_busdriver_approves_new_surface"}
+    return {"status": "blocked_unknown_contract_state", "next_safe_slice": "inspect_contract_status_helper"}
+
+
+def build_payload(args: argparse.Namespace) -> dict[str, Any]:
+    repo = Path(args.repo).resolve()
+    installed = Path(args.installed_skill or str(DEFAULT_INSTALLED_SKILL)).expanduser().resolve()
+    repo_state = repo_summary(repo)
+    skill_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
+    skill_state = skill_compare(skill_root, installed)
+    contract_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
+    contract = contract_status_summary(contract_root)
+    decision = decide(repo_state, skill_state, contract)
+    ok = bool(repo_state.get("git_ok")) and bool(repo_state.get("status_available")) and bool(contract.get("ok")) and bool(skill_state.get("checked"))
+    return {
+        "schema": "hermes-busdriver-relay-brief/v0",
+        "version": 0,
+        "ok": ok,
+        "read_only": True,
+        "repo": repo_state,
+        "skill_sync": skill_state,
+        "finalization_contract_status": contract,
+        "roadmap_tasks": ROADMAP_TASKS,
+        "authority": dict(AUTHORITY_FALSE),
+        "decision": {**decision, **dict(AUTHORITY_FALSE)},
+    }
+
+
+def render_brief(payload: dict[str, Any]) -> str:
+    repo = payload["repo"]
+    skill = payload["skill_sync"]
+    contract = payload["finalization_contract_status"]
+    decision = payload["decision"]
+    skill_text = "unavailable"
+    if skill.get("checked"):
+        skill_text = (
+            "clean"
+            if skill.get("clean")
+            else "drift "
+            f"missing={len(skill.get('missing', []))} "
+            f"extra={len(skill.get('extra', []))} "
+            f"diffs={len(skill.get('diffs', []))}"
+        )
+    lines = [
+        "Hermes Busdriver Relay brief",
+        f"repo: {repo.get('branch')} {repo.get('head_short')} dirty={repo.get('dirty')} synced={repo.get('synced_with_origin_main')}",
+        f"skill-sync: {skill_text}",
+        f"contract: {contract.get('decision_status')} remaining={contract.get('remaining_work_count')} allowed={contract.get('capability_allowed_count')}",
+        "roadmap: " + ", ".join(task.get("label", task.get("id", "unknown")) for task in payload["roadmap_tasks"]) + " are represented as read-only/policy-blocked tasks",
+        "authority: all false",
+        f"next: {decision.get('next_safe_slice')}",
+    ]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    args = parse_args()
+    payload = build_payload(args)
+    if args.brief:
+        print(render_brief(payload))
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2 if args.pretty else None, sort_keys=args.pretty))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

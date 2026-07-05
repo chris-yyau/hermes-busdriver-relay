@@ -33,6 +33,7 @@ Implemented:
 - `scripts/hermes-busdriver-litmus-status`
 - `scripts/hermes-busdriver-finalization-readiness` including strict top-level delivery-status child envelope validation (`schema`, `read_only is True`, boolean `ok`) before readiness evidence can be trusted, advisory `hermes-busdriver-pre-pr-dual-review-evidence/v0` classification derived only from sanitized delivery-status litmus summaries, embedded read-only `finalization_contract_status` evidence for downstream consumers, and embedded validated read-only `agent_balance_plan` evidence that remains advisory and non-dispatching
 - `scripts/hermes-busdriver-finalization-contract-status` read-only ADR 0005 contract/capability matrix for policy-blocked remaining finalization work, with `contract_adrs` / `related_design_adrs` surfacing ADR 0006 design evidence for programmatic dual-review and Busdriver marker interop
+- `scripts/hermes-busdriver-relay-brief` compact read-only status/roadmap helper for Telegram-friendly local summaries, installed-skill drift detection, finalization contract status, and next-safe-slice guidance while keeping all authority flags false
 - `scripts/hermes-busdriver-pr-grind-check`
 - `scripts/hermes-busdriver-pr-grind-loop`
 - `scripts/hermes-busdriver-smoke` including finalization-readiness smoke summaries that expose compact embedded `finalization_contract_status` schema/policy/summary/authority evidence
@@ -47,6 +48,7 @@ Implemented:
 - `tests/contract/test_deliver.py`
 - `tests/contract/test_litmus_status.py`
 - `tests/contract/test_finalization_readiness.py`
+- `tests/contract/test_relay_brief.py`
 - `tests/contract/test_pr_grind_check.py`
 - `tests/contract/test_pr_grind_loop.py`
 - `docs/hermes-busdriver-integration-contract-v2.md`
@@ -66,21 +68,20 @@ scripts/hermes-busdriver-smoke \
 
 `hermes-busdriver-smoke` now falls back to `uvx --from pytest pytest` when the active Python lacks pytest, so it works from the Hermes venv as well as developer shells.
 
-Most recent local verification after PR #96 merge on `main` at clean/synced head `94dc861a431841a115a94989e884708613fddb57` with Busdriver marketplace plugin `1.79.0`:
+Most recent local verification for the roadmap-status/cleanup slice on `feat/roadmap-status-cleanup` with Busdriver marketplace plugin `1.79.0`:
 
 ```text
-repo status after PR96 merge: main...origin/main clean/synced at 94dc861a431841a115a94989e884708613fddb57
-open PRs: []
-relay locks: count 0
-topic ref for PR96 skill-library todo-boundary branch: none locally or on origin after fetch/prune cleanup
+base before branch: main...origin/main clean/synced at c0fa1fd4adbb0d63f030bc3b4a224bba1b4e4a90
+open PRs at Phase 0: []
+relay locks at Phase 0: count 0
 installed Busdriver marketplace plugin used for smoke/status: 1.79.0
-Busdriver source checkout package observed during Phase 0: 1.78.0
-repo skill source synced back to installed Hermes skill after PR96: missing=[], extra=[], diffs=[], repo_ref_count=75, installed_ref_count=75
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_finalization_readiness.py tests/contract/test_delivery_status.py tests/contract/test_skill_references.py -q -p no:cacheprovider: 150 passed
-PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 399 passed
+repo skill source synced back to installed Hermes skill during this slice: missing=[], extra=[], diffs=[], repo_files=79, installed_files=79
+Hermes safe disk cleanup cron: job f188db308f14, schedule 0 4 * * *, no_agent script hermes_safe_disk_cleanup.py; script dry-run after initial cleanup reported 0 removable candidates and stays silent below report thresholds
+scripts/hermes-busdriver-relay-brief --brief: contract policy_blocked; remaining=5; allowed=0; authority all false; skill-sync clean; dirty branch reports local reconciliation until committed
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract/test_skill_references.py tests/contract/test_relay_brief.py -q -p no:cacheprovider: 34 passed
+PYTHONDONTWRITEBYTECODE=1 uvx --from pytest pytest tests/contract -q -p no:cacheprovider: 415 passed
 python3 -m compileall -q scripts tests: passed
-scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty: ok true; py_compile ok; contract tests pass (399 passed); status summary package_version 1.79.0; repo_dirty false; runtime check mutating_launcher_allowed false; finalization readiness ready=false/status=no_finalization_candidate; commit/merge/finalization authority flags false
-scripts/hermes-busdriver-litmus-status --repo . --base-ref origin/main --pretty: ok true; read_only true; branch_diff_hash unavailable on clean main; PR-mode artifacts absent/fresh_for_branch_diff=false, so no fresh PR marker authorizes the clean-main state.
+scripts/hermes-busdriver-smoke --plugin-root ~/.claude/plugins/marketplaces/busdriver --repo . --pretty after the branch is committed: py_compile ok; contract tests pass; status summary package_version 1.79.0; runtime check mutating_launcher_allowed false; finalization readiness authority flags false
 scripts/hermes-busdriver-finalization-contract-status --pretty: ok true; read_only true; schema hermes-busdriver-finalization-contract-status/v0; decision status policy_blocked/reason adr_0005_unlock_contract_not_satisfied; capability_allowed_count=0; remaining_work_count=5; policy_blocked_count=5; commit/push/PR/merge/deploy/release/publish/marker/finalization authority flags false
 ```
 
