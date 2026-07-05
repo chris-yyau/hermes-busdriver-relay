@@ -123,7 +123,7 @@ def test_relay_brief_reports_installed_skill_drift_without_mutation(tmp_path):
     assert "SKILL.md" in data["skill_sync"]["diffs"]
     assert "references/extra.md" in data["skill_sync"]["missing"]
     assert data["decision"]["status"] == "needs_skill_source_sync"
-    assert data["decision"]["next_safe_slice"] == "sync_installed_skill_reference_back_to_repo"
+    assert data["decision"]["next_safe_slice"] == "reconcile_skill_source_drift"
     for flag in BLOCKED_AUTHORITY_FLAGS:
         assert data["decision"][flag] is False
 
@@ -168,6 +168,26 @@ def test_relay_brief_preserves_git_short_status_columns(tmp_path):
     assert data["repo"]["dirty"] is True
     assert data["repo"]["porcelain"] == [" M tracked.txt"]
     assert data["decision"]["status"] == "needs_local_reconciliation"
+
+
+def test_relay_brief_status_probe_uses_colorless_porcelain(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("before\n")
+    init_git_repo(repo, tracked)
+    subprocess.run(["git", "config", "color.status", "always"], cwd=repo, text=True, capture_output=True, check=True)
+    untracked = repo / "new.txt"
+    untracked.write_text("new\n")
+
+    installed_skill = tmp_path / "installed-skill"
+    installed_skill.mkdir()
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["repo"]["dirty"] is True
+    assert data["repo"]["porcelain"] == ["?? new.txt"]
+    assert "\x1b[" not in "".join(data["repo"]["porcelain"])
 
 
 def test_relay_brief_strips_inherited_git_identity_environment(tmp_path):
@@ -222,6 +242,47 @@ def test_relay_brief_blocks_when_installed_skill_unverified(tmp_path):
     assert data["decision"]["next_safe_slice"] == "inspect_installed_skill_path"
     for flag in BLOCKED_AUTHORITY_FLAGS:
         assert data["decision"][flag] is False
+
+
+def test_relay_brief_blocks_when_installed_skill_path_is_not_directory(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    init_git_repo(repo)
+
+    installed_skill_file = tmp_path / "installed-skill-file"
+    installed_skill_file.write_text("not a directory\n")
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill_file))
+    data = json.loads(proc.stdout)
+
+    assert data["ok"] is False
+    assert data["skill_sync"]["checked"] is False
+    assert data["skill_sync"]["reason"] == "installed_skill_not_directory"
+    assert data["decision"]["status"] == "blocked_unverified_skill_sync"
+    assert data["decision"]["next_safe_slice"] == "inspect_installed_skill_path"
+
+
+def test_relay_brief_mixed_missing_and_diff_skill_drift_requires_reconcile(tmp_path):
+    repo = tmp_path / "repo"
+    repo_skill = repo / "skills" / "busdriver-relay"
+    repo_skill.mkdir(parents=True)
+    (repo_skill / "SKILL.md").write_text("# repo skill\n")
+    init_git_repo(repo)
+
+    installed_skill = tmp_path / "installed-skill"
+    reference_dir = installed_skill / "references"
+    reference_dir.mkdir(parents=True)
+    (installed_skill / "SKILL.md").write_text("# divergent installed skill\n")
+    (reference_dir / "installed-only.md").write_text("installed-only\n")
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+    data = json.loads(proc.stdout)
+
+    assert data["skill_sync"]["missing"] == ["references/installed-only.md"]
+    assert data["skill_sync"]["diffs"] == ["SKILL.md"]
+    assert data["decision"]["status"] == "needs_skill_source_sync"
+    assert data["decision"]["next_safe_slice"] == "reconcile_skill_source_drift"
 
 
 def test_relay_brief_blocks_when_repo_skill_source_missing(tmp_path):

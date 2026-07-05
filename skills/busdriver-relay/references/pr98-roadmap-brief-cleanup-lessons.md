@@ -16,8 +16,8 @@ Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-br
 2. **Read-only Git probes must be isolated and config-stable.**
    - Strip inherited `GIT_*` identity/path variables before subprocess Git probes; `GIT_DIR` / `GIT_WORK_TREE` inherited from hooks or wrapper processes can otherwise make a status helper inspect the wrong repository despite a correct `cwd`.
    - Use `git --no-optional-locks` for status probes that claim `read_only=true`; plain `git status` can refresh the index.
-   - Override config-sensitive dirty checks: use `-c status.showUntrackedFiles=all status --short --untracked-files=all` so local repo config such as `status.showUntrackedFiles=no` cannot hide untracked WIP.
-   - Preserve the two-column porcelain status format: do not `.strip()` `git status --short` output, because the leading index/worktree columns distinguish unstaged-only changes from staged changes.
+   - Override config-sensitive dirty checks: use colorless `-c status.showUntrackedFiles=all -c color.status=false status --porcelain=v1 --untracked-files=all` so local repo config such as `status.showUntrackedFiles=no` or `color.status=always` cannot hide or colorize WIP.
+   - Preserve the two-column porcelain status format: do not `.strip()` porcelain output, because the leading index/worktree columns distinguish unstaged-only changes from staged changes.
 
 3. **Brief text should reveal all drift classes and choose the right reconciliation direction.**
    - A one-line status like `drift diffs=N` hides missing/extra file drift; include `missing=N extra=N diffs=N`.

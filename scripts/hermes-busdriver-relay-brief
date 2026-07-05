@@ -124,7 +124,17 @@ def repo_summary(repo: Path) -> dict[str, Any]:
     branch = git_value(repo, "branch", "--show-current") if git_ok else None
     head = git_value(repo, "rev-parse", "HEAD") if git_ok else None
     origin_main = git_value(repo, "rev-parse", "origin/main") if git_ok else None
-    porcelain = git_value(repo, "-c", "status.showUntrackedFiles=all", "status", "--short", "--untracked-files=all", preserve_leading=True) if git_ok else None
+    porcelain = git_value(
+        repo,
+        "-c",
+        "status.showUntrackedFiles=all",
+        "-c",
+        "color.status=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        preserve_leading=True,
+    ) if git_ok else None
     status_available = porcelain is not None
     state = {
         "path": str(repo),
@@ -214,7 +224,7 @@ def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: di
     if skill_state.get("checked") and not skill_state.get("clean"):
         if skill_state.get("extra") and not skill_state.get("missing") and not skill_state.get("diffs"):
             return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_repo_skill_reference_to_installed_skill"}
-        if skill_state.get("missing") and not skill_state.get("extra"):
+        if skill_state.get("missing") and not skill_state.get("extra") and not skill_state.get("diffs"):
             return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
         return {"status": "needs_skill_source_sync", "next_safe_slice": "reconcile_skill_source_drift"}
     if contract.get("ok") and contract.get("policy_blocked_count", 0) > 0:
