@@ -273,7 +273,7 @@ The next safe implementation slice is no longer the first Pi gate smoke; that ha
 
 Before implementing that slice in `hermes-busdriver-relay`, create/select a separate git worktree and branch when the relay repo has existing WIP. Do not start Pi adapter implementation in the dirty primary relay worktree unless the user explicitly accepts that scope. Record the selected worktree path in the run artifact/brief so later verification knows which worktree owns the draft.
 
-OpenCode comparison is now optional future evidence, not a prerequisite for choosing Pi. If the user explicitly asks for it, first state whether the comparison is generic OpenCode-under-Hermes-gate containment or true Busdriver-compatible OpenCode parity. True parity requires the intended OpenCode Busdriver plugin lane to be present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved.
+OpenCode comparison remains optional future evidence, not a prerequisite for choosing Pi. If the user explicitly asks for it, first state whether the comparison is generic OpenCode-under-Hermes-gate containment or true Busdriver-compatible OpenCode parity. True parity requires the intended OpenCode Busdriver plugin lane to be present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved.
 
 Until then, Pi is the confirmed target-state tool-harness direction, while OpenCode should be described as currently blocked/degraded for Busdriver-plugin comparison in this environment.
 

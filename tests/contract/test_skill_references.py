@@ -36,6 +36,7 @@ PR78_SKILL_SYNC_PRE_PR_REFERENCE = REFERENCE_DIR / "pr78-skill-sync-pre-pr-lesso
 POST_MERGE_SKILL_DRIFT_BEFORE_STATUS_REFERENCE = REFERENCE_DIR / "post-merge-skill-drift-before-status-refresh.md"
 FINAL_AUDIT_SKILL_MAINTENANCE_RECURSION_REFERENCE = REFERENCE_DIR / "final-audit-skill-maintenance-recursion.md"
 PI_ADAPTER_CANDIDATE_WORKFLOW_REFERENCE = REFERENCE_DIR / "pi-adapter-candidate-workflow.md"
+PI_ADAPTER_IMPLEMENTATION_LESSONS_REFERENCE = REFERENCE_DIR / "pi-adapter-implementation-lessons.md"
 CODING_WORKFLOW_AUTHORITY_MAP_REFERENCE = REFERENCE_DIR / "coding-workflow-authority-map-v0.1.md"
 PR106_EXPANDED_SKILL_SYNC_PR_GRIND_REFERENCE = (
     REFERENCE_DIR / "pr106-expanded-skill-sync-pr-grind-lessons.md"
@@ -129,7 +130,7 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             "relay.litmus.reviewer = codex",
             "relay.pr.lead     = fresh-codex",
             "tool_harness.primary_candidate            = pi",
-            "OpenCode** is a generic/opencode-go experiment or future comparison lane",
+            "**OpenCode** is a generic/opencode-go experiment or future comparison lane",
             "Keep all finalization/commit/push/PR/merge/marker-write flags false",
         ],
     }
@@ -309,11 +310,30 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "hermes-busdriver-agent-draft --agent custom" in reference_text
     assert "generic OpenCode-under-Hermes-gate" in reference_text
     assert "currently blocked/degraded for Busdriver-plugin comparison" in reference_text
-    assert "OpenCode comparison is now optional future evidence" in reference_text
+    assert "OpenCode comparison remains optional future evidence" in reference_text
     assert "by explicitly selecting `--agent summary`" not in reference_text
     assert "A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher." not in reference_text
     assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime/pi-busdriver-smoke/" in reference_text
     assert "/Volumes/" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_pi_adapter_implementation_lessons_are_durable_skill_reference():
+    assert PI_ADAPTER_IMPLEMENTATION_LESSONS_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PI_ADAPTER_IMPLEMENTATION_LESSONS_REFERENCE.read_text()
+
+    assert "references/pi-adapter-implementation-lessons.md" in skill_text
+    assert "Pi adapter implementation-specific workflow lessons" in skill_text
+    assert "separate git worktree for the Pi adapter slice" in reference_text
+    assert "Implementation belongs in the Hermes relay repo, not Pi upstream/source" in reference_text
+    assert "A successful Pi draft result should be `needs_busdriver_review`" in reference_text
+    assert "`bd_bash` should be argv-only and allowlist-only" in reference_text
+    assert "`bd_write_draft` should enforce repo-root containment" in reference_text
+    assert "Add fake-Pi tests before real Pi smoke" in reference_text
+    assert "hermes-busdriver-agent-draft --agent pi" in reference_text
+    assert "hermes-busdriver-agent-smoke --agent pi" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
