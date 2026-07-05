@@ -214,19 +214,58 @@ Not yet validated:
 - Head-to-head comparison against the existing OpenCode Busdriver plugin path.
 - Multi-step reliability under longer tasks.
 
-## Recommended next slice
+## Follow-up gated draft smoke
 
-The next safe implementation slice is not to promote Pi globally. It is a scoped adapter smoke:
+A follow-up Hermes relay smoke validated Pi inside the actual draft gate pattern:
 
 ```text
-hermes-busdriver-gate preflight
-  → launch Pi with --no-builtin-tools and Busdriver-shaped extension tools
-  → Pi makes one scoped draft edit
+hermes-busdriver-agent-draft
+  → acquire Hermes relay lock
+  → hermes-busdriver-gate preflight
+  → custom command launches Pi with --no-builtin-tools and busdriver-tools.ts
+  → Pi calls bd_status, bd_write_draft, bd_bash(git commit -m should-not-run), bd_status
   → hermes-busdriver-gate postflight
-  → Hermes reconciles dirty tree and artifact
+  → verifier checks scoped file content, dirty status, and unchanged commit history
+  → release lock
 ```
 
-Only after this and a same-task comparison against OpenCode should Pi challenge OpenCode's secondary adapter role.
+Verified evidence shape:
+
+```text
+preflight: repo_clean=true, hook_manifest_available=true, gate_hooks_declared=true
+Pi tool sequence: bd_status → bd_write_draft → bd_bash → bd_status
+postflight changed_files: [src/pi-gated-output.txt]
+postflight/verifier: ok=true
+status: needs_busdriver_review
+commit/push/PR/merge/deploy flags: false
+lock status after run: count=0
+commit history: still initial fixture only
+```
+
+This validates Pi as a **gated draft runtime candidate**. It still does not make Pi a Busdriver authority.
+
+## OpenCode comparison caveat
+
+Before comparing Pi to OpenCode, verify the live OpenCode install instead of assuming the remembered plugin lane exists. In the July 2026 follow-up, live checks showed:
+
+```text
+opencode binary: ~/.opencode/bin/opencode v1.17.13
+~/.config/opencode/plugins/busdriver.ts: missing
+~/.config/opencode/plugins/: claude-mem.js only
+visible primary agents from opencode agent list: compaction, summary, title
+plain opencode run without --agent: failed with "no primary visible agent found"
+```
+
+A generic OpenCode gated draft smoke could still pass under `hermes-busdriver-agent-draft` by explicitly selecting `--agent summary`: OpenCode wrote the scoped file, attempted `git commit -m should-not-run`, and the relay launcher's PATH guard blocked it with exit 126. That demonstrates Hermes outer-gate containment of OpenCode, but **not** Busdriver-shaped tool parity inside OpenCode, because the live Busdriver OpenCode plugin was absent.
+
+## Recommended next slice
+
+The next safe implementation slice is no longer the first Pi gate smoke; that has passed. The next promotion gate is a real same-task Pi-vs-OpenCode comparison only after either:
+
+1. the intended OpenCode Busdriver plugin lane is present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved; or
+2. the comparison is explicitly scoped as generic OpenCode-under-Hermes-gate, not OpenCode Busdriver-plugin parity.
+
+Until then, Pi may challenge OpenCode for the tool-harness role, but OpenCode should be described as currently blocked/degraded for Busdriver-plugin comparison in this environment.
 
 ## Hermes responsibility in this workflow
 
