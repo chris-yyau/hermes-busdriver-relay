@@ -65,8 +65,8 @@ If a doc contains `hermes-busdriver-agent-draft --agent pi`, label it as target 
 Trusted evidence is live/verifiable state:
 
 ```text
-git status
-git diff
+git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all
+git diff --no-ext-diff --no-textconv
 git log
 test output
 postflight report
@@ -128,12 +128,14 @@ Use argv-only, allowlist-only command execution:
 
 Any `git diff` form exposed through `bd_bash` must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute.
 
+Any `git status` form exposed through `bd_bash` must inject `-c core.fsmonitor=false` before `status` so repo/user-configured fsmonitor hook commands cannot execute.
+
 Do not expose free-form shell strings, `bash -c`, shell expansion, inherited cwd outside repo root, network commands by default, finalization commands, or marker writes.
 
 Allowlist examples:
 
 ```text
-git status / diff --no-ext-diff --no-textconv / diff --no-ext-diff --no-textconv --name-only / rev-parse / log --oneline
+git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all / diff --no-ext-diff --no-textconv / diff --no-ext-diff --no-textconv --name-only / rev-parse / log --oneline
 test runners
 linters
 typecheckers

@@ -88,13 +88,13 @@ Create a throwaway git repo and a Pi extension such as `busdriver-tools.ts` that
 bd_status        # read-only structured repo/status envelope
 bd_read          # guarded read inside cwd; blocks .git/.claude/.opencode paths
 bd_write_draft   # draft-only write; allowed only in PI_BD_MODE=draft and allowlisted path; records operation_id + before/after hash; refuses symlink escape
-bd_bash          # argv-only and allowlist-only wrapper; no shell expansion / bash -c; allow safe git status, git diff with --no-ext-diff and --no-textconv, log, test, and lint commands only
+bd_bash          # argv-only and allowlist-only wrapper; no shell expansion / bash -c; allow safe git status only with -c core.fsmonitor=false, git diff with --no-ext-diff and --no-textconv, log, test, and lint commands only
 bd_artifact      # structured worker artifact ending in needs_busdriver_review or blocked, never done/finalized
 ```
 
 Hardening requirements:
 
-- `bd_bash` must be argv-only and allowlist-only. Do not expose arbitrary shell strings. Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute. No inherited cwd outside repo root, no network by default, no finalization commands, no marker writes.
+- `bd_bash` must be argv-only and allowlist-only. Do not expose arbitrary shell strings. Any allowed `git status` form must inject `-c core.fsmonitor=false` so fsmonitor hook commands cannot execute. Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv` so external diff drivers/textconv filters cannot execute. No inherited cwd outside repo root, no network by default, no finalization commands, no marker writes.
 - `bd_write_draft` must enforce repo-root containment, declared scope/include policy, `.git/**` / `.claude/**` / `.opencode/**` / trusted-marker deny rules, symlink-escape refusal, normalized path recording, `operation_id`, and `before_hash` / `after_hash` audit fields.
 - Every non-authority worker result should fit a common `hermes-worker-result/v0` envelope and keep all commit/push/PR/merge/marker/deploy/finalization flags false. Treat claims like `done`, `complete`, `ready_to_merge`, or `merged` as worker self-report only.
 
@@ -152,7 +152,7 @@ Actual repo evidence:
 
 ```text
 draft-output.txt = PI_DRAFT_OK via bd_write_draft
-git status --short = ?? draft-output.txt
+git -c core.fsmonitor=false status --short = ?? draft-output.txt
 git log --oneline -3 = 98f25ee initial smoke fixture
 ```
 

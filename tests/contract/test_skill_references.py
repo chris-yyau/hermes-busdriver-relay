@@ -301,6 +301,7 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "Only after the in-repo schema/wrapper/smoke/contract tests pass" in reference_text
     assert "Since the user has confirmed Pi as the chosen tool-harness direction" in reference_text
     assert "bd_bash` must be argv-only and allowlist-only" in reference_text
+    assert "Any allowed `git status` form must inject `-c core.fsmonitor=false`" in reference_text
     assert "Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv`" in reference_text
     assert "hermes-worker-result/v0" in reference_text
     assert "avoid double Busdriver workflow" in reference_text
@@ -349,6 +350,8 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     assert "OpenCode   = generic/opencode-go lane unless" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
+    assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in reference_text
+    assert "fsmonitor hook commands cannot execute" in reference_text
     assert "diff --no-ext-diff --no-textconv --name-only" in reference_text
     assert "external diff drivers/textconv filters cannot execute" in reference_text
     assert "Reviewer data-egress gate" in reference_text
