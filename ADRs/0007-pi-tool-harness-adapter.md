@@ -14,8 +14,8 @@ The authority boundary remains unchanged:
 ClaudeCode / Busdriver = canonical authority
 Hermes                 = router / operator / verifier
 Pi                     = default constrained draft worker
-Codex                  = explicit fallback draft worker when Pi is blocked or unsuited
-OpenCode               = generic lane unless a Busdriver-compatible adapter/plugin is rebuilt
+OpenCode               = configured fallback/comparison route, non-programmatic until adapter proof
+Codex                  = PR lead / review / backstop-focused by default; implementation only by explicit exception
 ```
 
 This ADR records the minimum proof required before `hermes-busdriver-agent-draft --agent pi` is treated as an enabled mutating draft lane.
@@ -27,7 +27,7 @@ Add a relay-owned Pi adapter with:
 1. `adapters/pi/busdriver-tools.ts` exposing only Busdriver-shaped `bd_*` tools;
 2. `adapters/pi/pi-result.schema.json` defining the fail-closed result artifact;
 3. `scripts/pi/run-pi-busdriver-draft` launching Pi with built-ins/extensions disabled;
-4. `hermes-busdriver-agent-draft --agent pi` integration through the existing lock/preflight/postflight pattern, with Codex as an explicit fallback only when Pi is blocked or unsuited;
+4. `hermes-busdriver-agent-draft --agent pi` integration through the existing lock/preflight/postflight pattern, while OpenCode fallback/comparison roles remain non-programmatic until their adapter proof exists;
 5. `hermes-busdriver-agent-smoke --agent pi` opt-in real-agent smoke;
 6. contract tests and docs proving all authority flags remain false.
 
@@ -47,8 +47,8 @@ It does not authorize commits, pushes, PR creation, merges, marker writes, deplo
 - Pi is not a trusted marker writer.
 - Pi does not run litmus/pre-PR/PR-grind finalization.
 - Pi does not replace ClaudeCode/Busdriver authority.
-- Codex remains the explicit fallback draft lane when Pi is blocked or unsuited.
-- OpenCode parity is not a prerequisite for this adapter proof; OpenCode remains generic unless rebuilt and verified separately.
+- Codex is not the normal implementation fallback; it remains PR lead / review / backstop-focused by default and implements only by explicit exception.
+- OpenCode parity is not a prerequisite for this Pi adapter proof; OpenCode fallback/comparison routes remain non-programmatic unless rebuilt and verified separately.
 
 ## Authority invariants
 
@@ -96,4 +96,4 @@ Pi becomes an enabled draft adapter only after all pass:
 3. `hermes-busdriver-agent-draft --agent pi` fake adapter gate test;
 4. `hermes-busdriver-agent-smoke --agent pi` fake adapter test;
 5. optional real Pi smoke when quota/runtime is available;
-6. docs and skill references describing Pi as the default constrained draft lane, with Codex only as explicit fallback when Pi is blocked or unsuited.
+6. docs and skill references describing Pi as the default constrained draft lane, OpenCode as fallback/comparison only after adapter proof, and Codex as review/backstop-focused by default.

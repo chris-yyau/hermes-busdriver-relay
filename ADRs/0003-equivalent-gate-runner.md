@@ -6,7 +6,7 @@ Accepted for the Hermes Busdriver Relay v2 direction.
 
 ## Context
 
-The user wants Hermes to continue implementation work when Claude Code quota is unavailable. The active relay surface is Pi-default for draft implementation, with Codex as an explicit fallback only when Pi is blocked or unsuited.
+The user wants Hermes to continue implementation work when Claude Code quota is unavailable. The active relay surface is Pi-default for draft implementation, with OpenCode configured as fallback/comparison route metadata that remains non-programmatic until adapter proof exists and Codex kept review/backstop-focused by default.
 
 However, Hermes terminal commands do not automatically run inside Claude Code's Busdriver hook runtime. If Hermes launches agents directly and then commits/pushes/opens PRs, it can bypass Busdriver's strongest gates.
 
@@ -78,7 +78,7 @@ It avoids the false claim that a Hermes-launched agent has passed Claude Code ho
 
 ## Future Work
 
-1. `hermes-busdriver-agent-draft`: Pi-default launcher wrapper using this gate runner; Codex remains an explicit fallback only when Pi is blocked or unsuited.
+1. `hermes-busdriver-agent-draft`: Pi-default launcher wrapper using this gate runner; OpenCode requires separate adapter proof before fallback use, and Codex remains review/backstop-focused by default.
 2. Additional adapters only if the deferred scope is explicitly reopened.
 3. Commit-capable gate:
    - litmus-equivalent review;

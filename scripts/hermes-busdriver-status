@@ -44,62 +44,102 @@ DEFAULT_ROLE_ROUTES = {
 }
 
 DEFAULT_RELAY_CODING_AGENT = "pi"
-# Current relay policy dogfoods Pi as the default constrained draft/role lane.
-# Codex remains an explicit fallback only when Pi is blocked or unsuited. The
-# same Pi adapter family may satisfy relay-equivalent review/status roles for now
-# because the user explicitly requested Pi to replace Codex; status output reports
-# this via review_independence_policy so the posture is visible instead of silent.
-# If a config opts into avoid_coding_agent_for_review without non-Pi routes,
-# roles degrade fail-closed rather than silently claiming independent review.
-DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = False
+# Current relay policy uses Pi as the constrained implementation primary,
+# OpenCode as the explicit fallback/comparison candidate, Codex for PR lead /
+# review, Claude Code for backstop/Busdriver-authority review, Grok/Gemini as
+# read-only reviewer lanes, Zed as the manual IDE sidecar, and UltraOracle as an
+# optional expert witness. Review/decision/backstop roles are protected from
+# silently selecting the coding agent when avoid_coding_agent_for_review=true;
+# implementation/manual roles may intentionally match the coding agent.
+DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = True
 DEFAULT_RELAY_EQUIVALENT_ROUTES = {
+    "relay.impl.primary": {
+        "native_busdriver_role": "implementation primary draft worker",
+        "route": ["pi"],
+        "review_independence_sensitive": False,
+    },
+    "relay.impl.secondary": {
+        "native_busdriver_role": "implementation secondary draft worker",
+        "route": ["opencode"],
+        "review_independence_sensitive": False,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "opencode_adapter_not_verified",
+    },
+    "relay.impl.fallback": {
+        "native_busdriver_role": "implementation fallback draft worker",
+        "route": ["opencode"],
+        "review_independence_sensitive": False,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "opencode_adapter_not_verified",
+    },
+    "relay.review.fast": {
+        "native_busdriver_role": "fast read-only reviewer",
+        "route": ["grok"],
+    },
+    "relay.review.long_context": {
+        "native_busdriver_role": "long-context read-only reviewer",
+        "route": ["gemini"],
+    },
+    "relay.ide.manual": {
+        "native_busdriver_role": "manual IDE sidecar",
+        "route": ["zed"],
+        "review_independence_sensitive": False,
+        "programmatic_dispatch_allowed": False,
+        "dispatch_blocker": "manual_ide_sidecar_not_programmatic",
+    },
+    "relay.expert_witness.ultraoracle": {
+        "native_busdriver_role": "expert witness escalation",
+        "route": ["ultraoracle"],
+    },
     "relay.litmus.reviewer": {
         "native_busdriver_role": "litmus reviewer",
-        "route": ["pi"],
+        "route": ["codex"],
     },
     "relay.blueprint.reviewer_1": {
         "native_busdriver_role": "blueprint reviewer 1",
-        "route": ["pi"],
+        "route": ["agy"],
     },
     "relay.blueprint.reviewer_2": {
         "native_busdriver_role": "blueprint reviewer 2",
-        "route": ["pi"],
+        "route": ["claude-code"],
     },
     "relay.blueprint.reviewer_3": {
         "native_busdriver_role": "blueprint reviewer 3",
-        "route": ["pi"],
+        "route": ["grok"],
     },
     "relay.blueprint.arbiter": {
         "native_busdriver_role": "blueprint arbiter",
-        "route": ["pi"],
+        "route": ["codex"],
     },
     "relay.pr.lead": {
         "native_busdriver_role": "PR lead reviewer",
-        "route": ["pi"],
+        "route": ["codex"],
     },
     "relay.pr.backstop": {
         "native_busdriver_role": "PR security/bugs backstop",
-        "route": ["pi"],
+        "route": ["claude-code"],
     },
     "relay.council.architect": {
         "native_busdriver_role": "council architect",
-        "route": ["pi"],
+        "route": ["inline"],
     },
     "relay.council.pragmatist": {
         "native_busdriver_role": "council pragmatist",
-        "route": ["pi"],
+        "route": ["agy"],
     },
     "relay.council.critic": {
         "native_busdriver_role": "council critic",
-        "route": ["pi"],
+        "route": ["codex"],
     },
     "relay.council.researcher": {
         "native_busdriver_role": "council researcher",
-        "route": ["pi"],
+        "route": ["grok"],
     },
     "relay.council.skeptic": {
         "native_busdriver_role": "council skeptic",
-        "route": ["pi"],
+        "route": ["claude-code"],
     },
 }
 
@@ -454,6 +494,10 @@ def relay_equivalent_roles(
     roles: dict[str, Any] = {}
     for role, defaults in DEFAULT_RELAY_EQUIVALENT_ROUTES.items():
         default_route = defaults["route"]
+        review_sensitive = defaults.get("review_independence_sensitive", True)
+        programmatic_dispatch_allowed = defaults.get("programmatic_dispatch_allowed", True)
+        adapter_verified = defaults.get("adapter_verified", True)
+        dispatch_blocker = defaults.get("dispatch_blocker")
         configured = routes.get(role, default_route)
         config_error = None
         if routes_config_error is not None:
@@ -475,7 +519,7 @@ def relay_equivalent_roles(
                 route = list(default_route)
         if not route and config_error is None:
             config_error = "empty_route"
-        selected = next((agent for agent in route if not avoid or agent != coding_agent), route[0] if route else None)
+        selected = next((agent for agent in route if not (avoid and review_sensitive) or agent != coding_agent), route[0] if route else None)
         same_as_coding_agent = selected == coding_agent
         roles[role] = {
             "native_busdriver_role": defaults["native_busdriver_role"],
@@ -484,7 +528,11 @@ def relay_equivalent_roles(
             "source": "relay_config" if role in routes or routes_config_error is not None else "default",
             "selected_agent": selected,
             "same_as_coding_agent": same_as_coding_agent,
-            "degraded": bool(config_error) or (avoid and same_as_coding_agent),
+            "review_independence_sensitive": review_sensitive,
+            "programmatic_dispatch_allowed": programmatic_dispatch_allowed,
+            "adapter_verified": adapter_verified,
+            "dispatch_blocker": dispatch_blocker,
+            "degraded": bool(config_error) or (avoid and review_sensitive and same_as_coding_agent),
             "config_error": config_error,
             "configurable": True,
             "not_busdriver_native_claude_runtime": True,
@@ -495,8 +543,8 @@ def relay_equivalent_roles(
         "coding_agent": coding_agent,
         "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
         "coding_agent_config_error": coding_agent_config_error,
-        "role_policy": "pi_default_relay_equivalents",
-        "review_independence_policy": "same_pi_adapter_allowed_by_current_user_directive",
+        "role_policy": "pi_primary_opencode_fallback_codex_review",
+        "review_independence_policy": "avoid_coding_agent_for_review_roles",
         "avoid_coding_agent_for_review": avoid,
         "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",
         "avoid_coding_agent_for_review_config_error": avoid_config_error,

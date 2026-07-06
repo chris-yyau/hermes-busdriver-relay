@@ -1,14 +1,14 @@
 # Relay router role policy — July 2026
 
-Session outcome: the user refined Hermes/Busdriver relay role assignment after comparing Pi, OpenCode+Go, Codex, Claude Code, Grok, Gemini, Cursor, and UltraOracle. This is a durable policy note for future relay-router/status/config work.
+Session outcome: the user refined Hermes/Busdriver relay role assignment after comparing Pi, OpenCode+Go, Codex, Claude Code, Grok, Gemini, Zed, and UltraOracle. This is a durable policy note for current relay-router/status/config work.
 
 ## Core split
 
 - **Busdriver + Claude Code** remain canonical authority for workflow, gates, reviews, litmus/pre-PR/PR-grind semantics, commits, PRs, merges, and finalization.
 - **Hermes** remains GPT-based relay/router/status/finalization-support. It should expose route/status/handoff envelopes and coordinate draft/review lanes, not become a second Busdriver.
 - **Pi** is the default Busdriver-compatible constrained implementation draft worker after schema, wrapper, smoke, and contract tests passed; it is not Busdriver authority.
-- **Codex** is explicit fallback only when Pi is blocked or unsuited.
-- **OpenCode** is a generic/opencode-go experiment or future comparison lane unless a Busdriver-compatible adapter/plugin is rebuilt and verified. It is not the selected tool-harness direction now that Pi is confirmed.
+- **Codex** is the PR lead / review / backstop analysis lane by default, not the normal implementation fallback.
+- **OpenCode** is the intended Pi fallback / China-model comparison candidate, but repo-changing fallback still requires Busdriver-compatible adapter/plugin proof before use.
 
 ## Relay role map
 
@@ -52,21 +52,23 @@ relay.litmus.reviewer = codex
 PR mode:
 
 ```text
-relay.pr.lead     = fresh-codex
+relay.pr.lead     = codex
 relay.pr.backstop = claude-code
 ```
 
-PR lead should be a fresh Codex session, not the same implementation context.
+PR lead should be a Codex review session, not the same implementation context.
 
 ### Implementation
 
 ```text
-implementation.primary.current            = pi
-implementation.fallback.explicit          = codex when Pi is blocked or unsuited
-implementation.secondary.future_candidate = opencode only after adapter/smoke/tests; otherwise generic lane only
+relay.impl.primary   = pi
+relay.impl.secondary = opencode
+relay.impl.fallback  = opencode
+
+OpenCode is fallback/comparison metadata until adapter/smoke/tests prove gate-safe repo mutation; Codex stays review/backstop-focused by default.
 ```
 
-The user has confirmed Pi for the tool-harness direction. Do not promote Grok/Cursor Composer into the formal implementation lane unless the user changes this policy later, and do not present OpenCode as Busdriver-compatible unless its adapter/plugin is restored and verified.
+The user has confirmed Pi for the tool-harness direction. Do not promote Grok/Zed into the formal implementation lane unless the user changes this policy later, and do not present OpenCode as Busdriver-compatible unless its adapter/plugin is restored and verified.
 
 ## UltraOracle placement
 

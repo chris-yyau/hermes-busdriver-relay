@@ -196,7 +196,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["pi", "codex", "noop", "custom"], default=None, help="Pi is the default constrained draft lane when no --agent-cmd is supplied; --agent-cmd without --agent selects custom. Codex remains an explicit fallback only when Pi is blocked or unsuited. noop/custom for tests.")
+    ap.add_argument("--agent", choices=["pi", "codex", "noop", "custom"], default=None, help="Pi is the default constrained draft lane when no --agent-cmd is supplied; --agent-cmd without --agent selects custom. Codex is a legacy/explicit implementation exception; OpenCode requires separate adapter proof. noop/custom for tests.")
     ap.add_argument("--agent-cmd", help="Custom shell command for tests/advanced use. Prompt is available via HERMES_AGENT_PROMPT_FILE.")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")

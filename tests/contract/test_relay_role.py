@@ -3,8 +3,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from relay_role_constants import FULL_RELAY_ROLE_MAP, NON_PROGRAMMATIC_RELAY_ROLES
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "hermes-busdriver-relay-role"
+
 
 
 def run_role(*args: str, check: bool = True) -> tuple[int, dict]:
@@ -63,7 +66,11 @@ def test_relay_role_lists_known_roles_without_config(tmp_path):
     assert data["ok"] is True
     assert data["dispatch_allowed"] is False
     assert data["not_busdriver_native_claude_runtime"] is True
+    assert len(data["roles"]) == len(FULL_RELAY_ROLE_MAP)
+    assert set(data["roles"]) == set(FULL_RELAY_ROLE_MAP)
     assert "relay.pr.backstop" in data["roles"]
+    assert "relay.impl.primary" in data["roles"]
+    assert "relay.ide.manual" in data["roles"]
     assert "relay.blueprint.arbiter" in data["roles"]
     assert data["mutation_allowed"] is False
     assert data["finalization_allowed"] is False
@@ -107,11 +114,42 @@ def test_relay_role_resolves_configured_non_coding_reviewer(tmp_path):
     }
 
 
+def test_relay_role_resolves_complete_live_role_map(tmp_path):
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "pi",
+        "avoid_coding_agent_for_review": True,
+        "routes": {role: [agent] for role, agent in FULL_RELAY_ROLE_MAP.items()},
+    }))
+
+    for role, expected_agent in FULL_RELAY_ROLE_MAP.items():
+        code, data = run_role("--role", role, "--relay-config", str(relay_config))
+        selected = data["selected"]
+        assert code == 0
+        assert data["status"] == "resolved"
+        assert data["ok"] is True
+        assert data["dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
+        assert data["mutation_allowed"] is False
+        assert data["finalization_allowed"] is False
+        assert selected["selected_agent"] == expected_agent
+        assert selected["configured_route"] == [expected_agent]
+        assert selected["degraded"] is False
+        assert selected["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
+        if role in {"relay.impl.secondary", "relay.impl.fallback"}:
+            assert data["reason"] == "opencode_adapter_not_verified"
+            assert selected["adapter_verified"] is False
+        elif role == "relay.ide.manual":
+            assert data["reason"] == "manual_ide_sidecar_not_programmatic"
+        else:
+            assert data["reason"] == "selected_agent_available"
+
+
 def test_relay_role_fails_closed_for_malformed_status_role_entry(tmp_path):
     for idx, (entry, reason) in enumerate([
         ([], "status_probe_invalid_role_shape"),
         ({"degraded": False, "selected_agent": True}, "status_probe_invalid_selected_agent_shape"),
         ({"degraded": "false", "selected_agent": "codex"}, "status_probe_invalid_role_degraded_shape"),
+        ({"degraded": False, "selected_agent": "codex", "programmatic_dispatch_allowed": "yes"}, "status_probe_invalid_dispatch_allowed_shape"),
     ]):
         code, data = run_role_with_fake_status(
             tmp_path / f"case-{idx}",
