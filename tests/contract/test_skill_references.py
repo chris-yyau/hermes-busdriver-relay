@@ -68,6 +68,9 @@ RELAY_LIVE_CONFIG_RESTORATION_REFERENCE = (
 ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE = (
     REFERENCE_DIR / "adr0005-authority-source-status-lessons.md"
 )
+PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
+    REFERENCE_DIR / "pr118-skill-sync-delivery-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -512,6 +515,25 @@ def test_adr0005_authority_source_status_lessons_are_durable_skill_reference():
     assert "Preserve `required_authority_sources` exactly" in reference_text
     assert "Recursive false-authority tests should include new rows" in reference_text
     assert "PR-grind feedback can be schema consistency" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+    assert "/Volumes/" not in reference_text
+
+
+def test_pr118_skill_sync_delivery_lessons_are_durable_skill_reference():
+    assert PR118_SKILL_SYNC_DELIVERY_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = PR118_SKILL_SYNC_DELIVERY_REFERENCE.read_text()
+
+    assert "PR118-style skill-source sync slices" in skill_text
+    assert "references/pr118-skill-sync-delivery-lessons.md" in skill_text
+    assert "Durability tests must pin the intended SKILL entry" in reference_text
+    assert "Whole-skill compare comes before and after repo sync" in reference_text
+    assert "Dirty-branch smoke can be phase-inappropriate" in reference_text
+    assert "Use normal follow-up commits for PR-grind reviewer fixes" in reference_text
+    assert "Branch-keyed locks may need temporary branch recreation after squash merge" in reference_text
+    assert "Phase-0 clean synced PR base" in reference_text
+    assert "Phase-0 clean main" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
     assert "/Volumes/" not in reference_text
