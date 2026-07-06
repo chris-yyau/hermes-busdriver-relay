@@ -449,7 +449,7 @@ def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
             "Do not stop at resolver-known subset restoration",
             "relay.impl.primary = pi",
             "relay.ide.manual = zed",
-            "Create a fresh follow-up worktree/branch from current `main`",
+            "Create a fresh follow-up worktree/branch from the saved/live PR base branch",
         ],
         PR112_PI_DEFAULT_DOGFOOD_REFERENCE: [
             "Pi-default is a policy migration",

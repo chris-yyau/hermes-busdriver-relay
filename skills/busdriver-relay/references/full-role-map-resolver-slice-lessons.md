@@ -27,7 +27,7 @@ Use when a live `~/.hermes/busdriver-relay/config.json` role map has drifted ahe
    - Update docs, repo skill source, installed skill source, and reference tests together; stale tests are often the first signal that docs still encode old Codex/Cursor/future-only policy.
 
 5. **Worktree/PR continuation pitfall.**
-   - If a planned continuation says to reuse an old PR worktree but that PR has already merged, do not resurrect stale worktree state. Create a fresh follow-up worktree/branch from current `main`, then port the still-relevant diff.
+   - If a planned continuation says to reuse an old PR worktree but that PR has already merged, do not resurrect stale worktree state. Create a fresh follow-up worktree/branch from the saved/live PR base branch, then port the still-relevant diff.
 
 6. **Verification discipline.**
    - Run focused resolver/status/skill-reference tests, then the full contract suite.
