@@ -535,6 +535,8 @@ def test_pr118_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "Re-read live PR state before mutating around reviewer-bot rate limits" in reference_text
     assert "CodeRabbit rate-limit comment" in reference_text
     assert "Reusable checklist wording must not hard-code `main`" in reference_text
+    assert "A nonzero `gh pr merge` exit can still leave the PR merged and the base synced" in reference_text
+    assert "Re-read live PR state (`gh pr view` merge commit/state)" in reference_text
     assert "Phase-0 clean synced PR base" in reference_text
     assert "Phase-0 clean main" not in reference_text
     assert "main...origin/main" not in reference_text
