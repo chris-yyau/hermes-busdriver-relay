@@ -75,6 +75,152 @@ ADR_AUTHORITY_SOURCES = [
     "schema_authority",
 ]
 
+AUTHORITY_SOURCE_MATRIX = [
+    {
+        "id": "explicit_user_intent_for_exact_side_effect",
+        "label": "Explicit user intent for exact side effect",
+        "adr_sections": ["Authority Sources", "Fail-Closed Conditions"],
+        "required_before": [
+            "commit_surface",
+            "push_surface",
+            "pr_creation_surface",
+            "merge_surface",
+            "github_comment_mutation_surface",
+            "github_issue_mutation_surface",
+            "deploy_surface",
+            "release_surface",
+            "publish_surface",
+        ],
+        "evidence_required": [
+            "explicit_request_for_exact_side_effect_class",
+            "operation_scope_confirmation",
+            "side_effect_specific_confirmation",
+        ],
+    },
+    {
+        "id": "busdriver_source_of_truth_approval",
+        "label": "Busdriver source-of-truth approval",
+        "adr_sections": ["Authority Sources", "Required Unlock Criteria by Surface", "Fail-Closed Conditions"],
+        "required_before": [
+            "mutating_commit_push_pr_merge_executor_surface",
+            "mutating_pr_grind_fix_push_loop_surface",
+            "programmatic_dual_review_execution_surface",
+            "busdriver_marker_interop_surface",
+        ],
+        "evidence_required": [
+            "live_busdriver_source_or_config_evidence",
+            "approved_integration_seam_mapping",
+            "approved_surface_scope",
+        ],
+    },
+    {
+        "id": "hook_runtime_or_equivalent_proof",
+        "label": "Hook runtime or equivalent proof",
+        "adr_sections": ["Authority Sources", "Required Unlock Criteria by Surface", "Fail-Closed Conditions"],
+        "required_before": [
+            "mutating_execution_surface",
+            "hook_gated_mutation_surface",
+            "equivalent_gate_execution_surface",
+        ],
+        "evidence_required": [
+            "hook_runtime_trace",
+            "equivalent_gate_semantics_proof",
+            "refusal_when_not_in_hook_runtime",
+        ],
+    },
+    {
+        "id": "fresh_repo_pr_evidence",
+        "label": "Fresh repo/PR evidence",
+        "adr_sections": ["Authority Sources", "Required Unlock Criteria by Surface", "Fail-Closed Conditions"],
+        "required_before": ["commit_surface", "push_surface", "pr_creation_surface", "merge_surface"],
+        "evidence_required": [
+            "repo_root_identity",
+            "branch_or_worktree_identity",
+            "head_sha_binding",
+            "diff_hash_binding",
+            "dirty_state_policy",
+            "pr_number_binding",
+            "pr_head_sha_binding",
+            "mergeability_and_checks_binding",
+            "reviews_comments_binding",
+            "base_branch_binding",
+        ],
+    },
+    {
+        "id": "fresh_gate_review_evidence",
+        "label": "Fresh gate/review evidence",
+        "adr_sections": ["Authority Sources", "Required Unlock Criteria by Surface", "Fail-Closed Conditions"],
+        "required_before": [
+            "commit_surface",
+            "pr_creation_surface",
+            "merge_surface",
+            "pre_commit_gate_surface",
+            "pre_pr_dual_review_surface",
+            "pr_grind_surface",
+        ],
+        "evidence_required": [
+            "litmus_freshness_for_current_head",
+            "pre_pr_dual_review_freshness_for_current_head",
+            "pr_grind_freshness_for_current_pr_head",
+        ],
+    },
+    {
+        "id": "concurrency_authority",
+        "label": "Concurrency authority",
+        "adr_sections": ["Authority Sources", "Fail-Closed Conditions"],
+        "required_before": [
+            "single_flight_lock_surface",
+            "repo_worktree_operation_serialization_surface",
+            "finalization_lock_surface",
+        ],
+        "evidence_required": [
+            "lock_acquire_record",
+            "lock_ownership_record",
+            "lock_release_or_stale_record",
+        ],
+    },
+    {
+        "id": "data_boundary_authority",
+        "label": "Data boundary authority",
+        "adr_sections": [
+            "Authority Sources",
+            "Data Egress, Reviewer Ownership, and Marker Ownership",
+            "Fail-Closed Conditions",
+        ],
+        "required_before": [
+            "verifier_data_egress_surface",
+            "reviewer_data_egress_surface",
+            "external_agent_execution_surface",
+            "summary_and_log_persistence_surface",
+        ],
+        "evidence_required": [
+            "egress_classification",
+            "user_intent_scope",
+            "busdriver_relay_policy_allowance",
+            "redaction_rules",
+            "artifact_retention_rules",
+        ],
+    },
+    {
+        "id": "schema_authority",
+        "label": "Versioned schema authority",
+        "adr_sections": ["Authority Sources", "Schemas and Evidence Required", "Fail-Closed Conditions"],
+        "required_before": [
+            "finalization_contract_status_surface",
+            "mutating_delivery_run_surface",
+            "pr_grind_mutation_loop_surface",
+            "dual_review_execution_surface",
+            "marker_interop_surface",
+        ],
+        "evidence_required": [
+            "versioned_schema_definitions",
+            "contract_tests_for_schemas",
+            "malformed_evidence_rejection",
+            "authority_positive_evidence_rejection",
+        ],
+    },
+]
+
 FUTURE_SCHEMAS_REQUIRED = [
     "hermes-busdriver-finalization-authority/v0",
     "hermes-busdriver-mutating-delivery-run/v0",
@@ -245,8 +391,23 @@ def matrix_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def authority_source_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in AUTHORITY_SOURCE_MATRIX:
+        rows.append({
+            **item,
+            "status": "policy_blocked",
+            "current_evidence": [],
+            "capability_allowed": False,
+            "safe_to_execute_by_this_helper": False,
+            "authority": dict(NON_MUTATING_CAPABILITY_FLAGS),
+        })
+    return rows
+
+
 def build_status() -> dict[str, Any]:
     rows = matrix_rows()
+    authority_rows = authority_source_rows()
     retired_ids = [row["id"] for row in rows if row["retired"]]
     return {
         "schema": SCHEMA,
@@ -263,6 +424,7 @@ def build_status() -> dict[str, Any]:
         "unsupported_mutating_operations": list(UNSUPPORTED_MUTATING_OPERATIONS),
         "authority": dict(NON_MUTATING_CAPABILITY_FLAGS),
         "required_authority_sources": list(ADR_AUTHORITY_SOURCES),
+        "authority_sources": authority_rows,
         "future_schemas_required": list(FUTURE_SCHEMAS_REQUIRED),
         "remaining_work": rows,
         "retired_remaining_work": retired_ids,
