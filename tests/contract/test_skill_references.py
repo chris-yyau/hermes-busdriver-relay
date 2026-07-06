@@ -532,6 +532,8 @@ def test_pr118_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "Dirty-branch smoke can be phase-inappropriate" in reference_text
     assert "Use normal follow-up commits for PR-grind reviewer fixes" in reference_text
     assert "Branch-keyed locks may need temporary branch recreation after squash merge" in reference_text
+    assert "Phase-0 clean synced PR base" in reference_text
+    assert "Phase-0 clean main" not in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
     assert "/Volumes/" not in reference_text

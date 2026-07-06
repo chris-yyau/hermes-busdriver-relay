@@ -17,7 +17,7 @@ Use when `hermes-busdriver-relay-brief` reports `next_safe_slice=reconcile_skill
 ## Minimal verification pattern
 
 ```text
-Phase-0 clean main/open PR=0/locks=0 + relay-brief skill drift
+Phase-0 clean synced PR base/open PR=0/locks=0 + relay-brief skill drift
 → branch + lock + gate preflight
 → copy installed skill source/reference into repo
 → add/strengthen durability test that pins the intended SKILL entry wording
