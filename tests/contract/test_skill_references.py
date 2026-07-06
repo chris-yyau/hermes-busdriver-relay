@@ -71,6 +71,7 @@ ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE = (
 PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
     REFERENCE_DIR / "pr118-skill-sync-delivery-lessons.md"
 )
+LOCK_CLI_USAGE_PITFALLS_REFERENCE = REFERENCE_DIR / "lock-cli-usage-pitfalls.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -541,6 +542,23 @@ def test_pr118_skill_sync_delivery_lessons_are_durable_skill_reference():
     assert "Phase-0 clean main" not in reference_text
     assert "main...origin/main" not in reference_text
     assert "switch back to `main`" not in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+    assert "/Volumes/" not in reference_text
+
+
+def test_lock_cli_usage_pitfalls_lessons_are_durable_skill_reference():
+    assert LOCK_CLI_USAGE_PITFALLS_REFERENCE.exists()
+    skill_text = SKILL.read_text(encoding="utf-8")
+    reference_text = LOCK_CLI_USAGE_PITFALLS_REFERENCE.read_text(encoding="utf-8")
+
+    assert "references/lock-cli-usage-pitfalls.md" in skill_text
+    assert "relay lock helper pitfalls" in skill_text
+    assert "Release is branch-keyed through the live repo identity" in reference_text
+    assert "Do not assume all lock subcommands accept the same flags" in reference_text
+    assert "Acquire output stores the token at the top level and inside `lock`" in reference_text
+    assert "Verify lock cleanup from the actual status payload" in reference_text
+    assert "require lock status count=0" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
     assert "/Volumes/" not in reference_text
