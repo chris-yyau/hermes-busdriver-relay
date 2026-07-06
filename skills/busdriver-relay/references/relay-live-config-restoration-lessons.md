@@ -48,7 +48,7 @@ Use these notes when the user asks about the previously assigned Busdriver Relay
      - `source = relay_config`
      - `same_as_coding_agent = false`
      - `degraded = false`
-   - Also verify all 12 resolver-known roles exit 0 with `ok=true` and `degraded=false`, and verify future route keys are present but currently non-resolver (`unknown_role`).
+   - Also verify the full 19-role resolver inventory exits 0 with `ok=true` and `degraded=false`; reserve `unknown_role` only for keys outside that inventory.
 
 ## Pitfall
 

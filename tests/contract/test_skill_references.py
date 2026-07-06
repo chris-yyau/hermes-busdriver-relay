@@ -437,7 +437,7 @@ def test_pi_adapter_delivery_lessons_are_durable_skill_references():
 
 
 def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
-    skill_text = SKILL.read_text()
+    skill_text = SKILL.read_text(encoding="utf-8")
     references = {
         FULL_ROLE_MAP_DISPATCHABILITY_REFERENCE: [
             "Resolver-ready is not the same as dispatchable",
@@ -462,13 +462,14 @@ def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
             "Check the live config before answering model/agent questions",
             "Full role-map resolver state after PR #113",
             "Dispatchability is still separate from resolver readiness",
+            "full 19-role resolver inventory",
         ],
     }
 
     for reference, expected_phrases in references.items():
         assert reference.exists()
         assert f"references/{reference.name}" in skill_text
-        reference_text = reference.read_text()
+        reference_text = reference.read_text(encoding="utf-8")
         for phrase in expected_phrases:
             assert phrase in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
