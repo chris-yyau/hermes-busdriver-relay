@@ -65,6 +65,9 @@ PR112_PI_DEFAULT_DOGFOOD_REFERENCE = (
 RELAY_LIVE_CONFIG_RESTORATION_REFERENCE = (
     REFERENCE_DIR / "relay-live-config-restoration-lessons.md"
 )
+ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE = (
+    REFERENCE_DIR / "adr0005-authority-source-status-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -494,6 +497,24 @@ def test_pr67_skill_sync_review_fix_lessons_are_durable_skill_reference():
     assert "saved base branch against its upstream" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
+
+
+def test_adr0005_authority_source_status_lessons_are_durable_skill_reference():
+    assert ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE.read_text()
+
+    assert "ADR0005 authority-source status rows" in skill_text
+    assert "references/adr0005-authority-source-status-lessons.md" in skill_text
+    assert "Authority-source rows are status rows too" in reference_text
+    assert "retired: false" in reference_text
+    assert "implemented: false" in reference_text
+    assert "Preserve `required_authority_sources` exactly" in reference_text
+    assert "Recursive false-authority tests should include new rows" in reference_text
+    assert "PR-grind feedback can be schema consistency" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+    assert "/Volumes/" not in reference_text
 
 
 def test_pr68_late_async_test_followup_lessons_are_durable_skill_reference():
