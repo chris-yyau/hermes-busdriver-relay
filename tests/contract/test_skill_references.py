@@ -129,21 +129,21 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
         RELAY_ROUTER_AGENT_ROLE_SPLIT_REFERENCE: [
             "Busdriver + Claude Code = canonical authority",
             "Hard rule: **Only Claude/Busdriver may claim done",
-            "future-only design target",
-            "non-copyable design-target roles",
-            '"avoid_coding_agent_for_review": false',
+            "Resolver-ready role inventory",
+            "Copyable config example",
+            '"avoid_coding_agent_for_review": true',
             '"relay.litmus.reviewer": ["codex"]',
             '"relay.pr.backstop": ["claude-code"]',
             "Authority constraints remain false for all router/status roles",
-            "Pi as the default constrained implementation worker",
+            "Use Pi as the primary implementation draft worker",
             "primary-controller agent",
         ],
         RELAY_ROUTER_ROLE_POLICY_REFERENCE: [
             "relay.blueprint.reviewer_2 = claude-code",
             "relay.litmus.reviewer = codex",
-            "relay.pr.lead     = fresh-codex",
-            "implementation.primary.current            = pi",
-            "**OpenCode** is a generic/opencode-go experiment or future comparison lane",
+            "relay.pr.lead     = codex",
+            "relay.impl.primary   = pi",
+            "**OpenCode** is the intended Pi fallback / China-model comparison candidate",
             "Keep all finalization/commit/push/PR/merge/marker-write flags false",
         ],
     }
@@ -168,8 +168,8 @@ def test_skill_sync_pr75_router_role_lessons_are_durable_skill_reference():
 
     assert "references/skill-sync-pr75-router-role-lessons.md" in skill_text
     assert "Make copyable config snippets executable against today's helper contracts" in reference_text
-    assert "label them as non-copyable/future-only until resolver/status inventory supports them" in reference_text
-    assert "avoid_coding_agent_for_review=false" in reference_text
+    assert "current first-class role inventory" in reference_text
+    assert "avoid_coding_agent_for_review=true" in reference_text
     assert "After every fix push, restart latest-head PR-grind" in reference_text
     assert "docs/status convergence slice" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
@@ -324,7 +324,7 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "Still not validated:" in reference_text
     assert "hermes-busdriver-agent-draft --agent custom" in reference_text
     assert "generic OpenCode-under-Hermes-gate" in reference_text
-    assert "currently blocked/degraded for Busdriver-plugin comparison" in reference_text
+    assert "configured-but-non-programmatic for Busdriver-plugin fallback/comparison" in reference_text
     assert "OpenCode comparison remains optional future evidence" in reference_text
     assert "by explicitly selecting `--agent summary`" not in reference_text
     assert "A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher." not in reference_text
@@ -360,7 +360,7 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
 
     assert "references/coding-workflow-authority-map-v0.1.md" in skill_text
     assert "implementation.primary.current            = Pi" in reference_text
-    assert "OpenCode   = generic/opencode-go lane unless" in reference_text
+    assert "OpenCode lane = configured fallback/comparison route" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
     assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in reference_text

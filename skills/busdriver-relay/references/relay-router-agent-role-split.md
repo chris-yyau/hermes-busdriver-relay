@@ -2,17 +2,19 @@
 
 ## Durable decision
 
-For Busdriver/Hermes relay work, do **not** add Pi or Cursor/OpenCode/Grok/Gemini as competing workflow authorities. The stable split is:
+For Busdriver/Hermes relay work, do **not** add Pi, OpenCode, Grok, Gemini, Zed, or UltraOracle as competing workflow authorities. The stable split is:
 
 ```text
 Busdriver + Claude Code = canonical authority, hooks, gates, litmus, PR-grind, finalization
 Hermes = relay/router/status/Phase 0/locks/handoff/Delivery Mode support
 Pi = default constrained implementation draft worker
-Codex = explicit fallback only when Pi is blocked or unsuited
-OpenCode + Go = secondary draft-adapter/sidecar candidate, initially read-only/candidate
+OpenCode + Go = Pi fallback / China-model comparison candidate; repo-changing fallback requires adapter/plugin proof
+Codex = PR lead / review analysis; not the normal implementation fallback
+Claude Code = authority / backstop path
 Grok = Hermes-side relay.review.fast read-only reviewer / PR-comment triage
 Gemini = Hermes-side relay.review.long_context read-only architecture/spec reviewer
-Cursor = manual IDE sidecar; edits are treated as human/manual dirty tree
+Zed = manual IDE sidecar; edits are treated as human/manual dirty tree
+UltraOracle = optional expert-witness escalation
 ```
 
 Hard rule: **Only Claude/Busdriver may claim done. All non-Claude agents produce draft/review evidence only.**
@@ -26,43 +28,64 @@ Hermes-side roles such as `relay.review.fast=grok` and `relay.review.long_contex
 - Busdriver invokes Grok/Codex/Agy/Droid inside blueprint/council/litmus/PR-grind: Busdriver interprets the result under Busdriver workflow semantics.
 - Hermes invokes Grok/Gemini as `relay.*` roles: advisory evidence only, read-only, no finalization authority.
 
-## Router work items
+## Resolver-ready role inventory
 
-The next safe relay build is a Pi-default Hermes router/status expansion that keeps finalization authority in Busdriver/Claude:
+The relay-owned config lives under `~/.hermes/busdriver-relay/config.json` (never `~/.claude/busdriver.json`). The current `hermes-busdriver-status` / `hermes-busdriver-relay-role` inventory recognizes the full 19-role map:
 
-1. ADR for relay router agent roles.
-2. Relay-owned sample config under `~/.hermes/busdriver-relay/config.json` (never `~/.claude/busdriver.json`).
-3. Extend role inventory/resolver/status for:
-   - `relay.impl.primary = pi`
-   - `relay.impl.fallback = codex`
-   - `relay.impl.secondary = opencode`
-   - `relay.review.fast = grok`
-   - `relay.review.long_context = gemini`
-   - `relay.ide.manual = cursor`
-4. Add a read-only `hermes-busdriver-router` helper that recommends routes from task kind/quota state without dispatching agents or granting authority.
-5. Dogfood the Pi draft path through default `hermes-busdriver-agent-draft` / `--agent pi`; use `--agent codex` only for explicit fallback tests.
-6. Treat OpenCode+Go as a candidate only after read-only smoke and isolated draft smoke.
-7. Keep Grok/Gemini read-only until data-egress and invocation contracts exist.
+```text
+relay.impl.primary              = pi
+relay.impl.secondary            = opencode
+relay.impl.fallback             = opencode
+relay.review.fast               = grok
+relay.review.long_context       = gemini
+relay.ide.manual                = zed
+relay.expert_witness.ultraoracle = ultraoracle
+relay.litmus.reviewer           = codex
+relay.blueprint.reviewer_1      = agy
+relay.blueprint.reviewer_2      = claude-code
+relay.blueprint.reviewer_3      = grok
+relay.blueprint.arbiter         = codex
+relay.pr.lead                   = codex
+relay.pr.backstop               = claude-code
+relay.council.architect         = inline
+relay.council.pragmatist        = agy
+relay.council.critic            = codex
+relay.council.researcher        = grok
+relay.council.skeptic           = claude-code
+```
 
-## Future router config shape
-
-This is a future-only design target that stays compatible with the relay-owned config JSON contract. Do not copy it as a current resolver-ready config until the matching router role inventory exists; today's resolver may reject roles such as `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, or `relay.ide.manual` as `unknown_role`.
+Copyable config example:
 
 ```json
 {
   "coding_agent": "pi",
-  "avoid_coding_agent_for_review": false,
+  "avoid_coding_agent_for_review": true,
   "routes": {
+    "relay.impl.primary": ["pi"],
+    "relay.impl.secondary": ["opencode"],
+    "relay.impl.fallback": ["opencode"],
+    "relay.review.fast": ["grok"],
+    "relay.review.long_context": ["gemini"],
+    "relay.ide.manual": ["zed"],
+    "relay.expert_witness.ultraoracle": ["ultraoracle"],
     "relay.litmus.reviewer": ["codex"],
-    "relay.pr.backstop": ["claude-code"]
+    "relay.blueprint.reviewer_1": ["agy"],
+    "relay.blueprint.reviewer_2": ["claude-code"],
+    "relay.blueprint.reviewer_3": ["grok"],
+    "relay.blueprint.arbiter": ["codex"],
+    "relay.pr.lead": ["codex"],
+    "relay.pr.backstop": ["claude-code"],
+    "relay.council.architect": ["inline"],
+    "relay.council.pragmatist": ["agy"],
+    "relay.council.critic": ["codex"],
+    "relay.council.researcher": ["grok"],
+    "relay.council.skeptic": ["claude-code"]
   }
 }
 ```
 
-Future router inventory work can then add the non-copyable design-target roles `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, and `relay.ide.manual` once the resolver/status helpers know those role names.
-
-Authority constraints remain false for all router/status roles. Only the separately gated Pi adapter draft launcher may mutate the draft working tree by default, Codex may run only as explicit fallback, and either path still returns `needs_busdriver_review`.
+Authority constraints remain false for all router/status roles. Only the separately gated Pi adapter draft launcher may mutate the draft working tree by default; OpenCode requires separate adapter/plugin proof before fallback mutation; Codex remains a review/backstop lane by default. All paths still return draft/review evidence and require Busdriver/Claude finalization.
 
 ## Purchasing / tool-selection implication
 
-Do not solve Claude quota pressure by adding another primary-controller agent. Use Pi as the default constrained implementation worker, keep Codex as explicit fallback when Pi is blocked or unsuited, and consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor can remain a manual IDE sidecar.
+Do not solve Claude quota pressure by adding another primary-controller agent. Use Pi as the primary implementation draft worker; if Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Zed as a pipeline dependency. Zed can remain a manual IDE sidecar.

@@ -12,7 +12,7 @@ Context: a read-only audit of relay roadmap tasks (ADR0005 finalization contract
 2. **Use live helper output to ground the audit, but keep it read-only.**
    - `scripts/hermes-busdriver-finalization-contract-status` should show `remaining_work_count=5`, `policy_blocked_count=5`, and `capability_allowed_count=0` for the current policy surface.
    - `scripts/hermes-busdriver-agent-balance-plan` should show planning metadata only: no subprocess dispatch, no Codex/GitHub calls, no marker writes, no repo mutations.
-   - `scripts/hermes-busdriver-relay-role --list-roles` is useful to verify whether future router roles such as `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, or `relay.ide.manual` are actually resolver-ready. If absent, keep those roles future-only/candidate metadata.
+   - `scripts/hermes-busdriver-relay-role --list-roles` is useful to verify the current first-class 19-role inventory, including `relay.impl.*`, `relay.review.*`, `relay.ide.manual`, and `relay.expert_witness.ultraoracle`. If a newly proposed role is absent, keep that new role as candidate metadata until inventory/tests support it.
 
 3. **If a Status/UX helper exists, audit it for count/schema drift and dirty-tree precedence.**
    - A compact brief helper should read `remaining_work`, not a stale/nonexistent `capability_matrix`, from `finalization-contract-status`; otherwise it may falsely report `remaining_work_count=0` and `policy_blocked_count=0`.

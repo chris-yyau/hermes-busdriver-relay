@@ -27,11 +27,12 @@ authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
 implementation.primary.current            = Pi
-implementation.fallback.explicit           = Codex when Pi is blocked or unsuited
-implementation.secondary.future_candidate = OpenCode only after adapter/smoke/tests; otherwise generic lane only
+implementation.fallback.candidate          = OpenCode route metadata; non-programmatic until adapter/smoke/tests pass
+implementation.exception.explicit           = Codex only by explicit exception when Pi/OpenCode are blocked or unsuited
+review.pr_lead_and_backstop                 = Codex / Claude Code per relay role config
 read_only.fast_review                     = Grok
 read_only.long_context_review             = Gemini
-manual.sidecar                            = Cursor
+manual.sidecar                            = Zed
 finalization.operator_path                = Hermes Delivery Mode, only on explicit user request
 finalization.authority_path               = ClaudeCode / Busdriver
 ```
@@ -40,10 +41,10 @@ Short form:
 
 ```text
 Pi writes constrained default drafts through the proven `bd_*` adapter.
-Codex writes fallback drafts only when Pi is blocked or unsuited.
-OpenCode experiments or compares, but is not Busdriver-compatible now.
+OpenCode is the configured fallback / China-model comparison route, but resolver output must keep it non-programmatic until adapter/plugin proof exists.
+Codex is PR lead / review / backstop-focused by default, with implementation only by explicit exception.
 Grok/Gemini critique.
-Cursor is human/manual editing surface.
+Zed is human/manual editing surface.
 Hermes routes/verifies/delivers.
 ClaudeCode/Busdriver authorizes.
 ```
@@ -53,9 +54,9 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Pi lane    = current implemented constrained default draft lane; still not Busdriver/Claude authority and still cannot finalize.
-Codex lane = explicit fallback draft lane when Pi is blocked or unsuited.
-OpenCode   = generic/opencode-go lane unless a Busdriver-compatible adapter/plugin is rebuilt and verified.
+Pi lane      = current implemented constrained default draft lane; still not Busdriver/Claude authority and still cannot finalize.
+OpenCode lane = configured fallback/comparison route, but non-programmatic until a Busdriver-compatible adapter/plugin is rebuilt and verified.
+Codex lane    = PR lead / review / backstop-focused by default; implementation only by explicit exception.
 ```
 
 If a doc contains `hermes-busdriver-agent-draft --agent pi`, require the same proof bundle: in-repo schema, wrapper, contract tests, fake-Pi smoke, optional real Pi smoke, and final authority flags false.
@@ -184,7 +185,7 @@ Hermes must not commit a dirty tree unless every dirty path is classified as:
 
 When the relay repo itself already has WIP, start new implementation slices in a separate git worktree/branch instead of reusing the dirty primary worktree. Record the selected worktree in artifacts/briefs. Only work in the existing relay worktree if the user explicitly accepts that scope.
 
-This prevents Codex changing `A`, Cursor/manual edits changing `B`, and Hermes accidentally committing `A+B` just because tests are green.
+This prevents Codex changing `A`, Zed/manual edits changing `B`, and Hermes accidentally committing `A+B` just because tests are green.
 
 ## Reviewer data-egress gate
 

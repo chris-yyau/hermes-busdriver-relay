@@ -121,7 +121,7 @@ scripts/hermes-busdriver-gate preflight \
   --baseline-file "$BASELINE" \
   --scope-include 'src/**'
 
-# Run Codex in draft mode here. Other agents are intentionally deferred.
+# Run Pi in constrained draft mode here. Other implementation agents require separate adapter proof.
 
 scripts/hermes-busdriver-gate postflight \
   --repo /path/to/repo \
@@ -137,14 +137,14 @@ The gate runner is the first Hermes-side equivalent gate layer. Passing v1 gates
 scripts/hermes-busdriver-agent-draft \
   --plugin-root /path/to/busdriver \
   --repo /path/to/repo \
-  --agent codex \
+  --agent pi \
   --prompt-file /path/to/task.md \
   --scope-include 'src/**' \
   --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
 ```
 
-Currently `--agent codex` is the normal implemented draft lane. `--agent pi` is available only through the constrained Pi adapter proof: built-in Pi tools are disabled, only `bd_*` tools are exposed, and the run must emit `pi-result.json` with all authority flags false. `noop` and `custom` are for tests.
+Currently `--agent pi` is the normal constrained draft lane: built-in Pi tools are disabled, only `bd_*` tools are exposed, and the run must emit `pi-result.json` with all authority flags false. `noop` and `custom` are for tests. Codex remains available only as a legacy/exception override, not the default implementation fallback.
 
 A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
 

@@ -68,15 +68,15 @@ def load_status_payload(args: argparse.Namespace) -> tuple[dict[str, Any] | None
     return data, None
 
 
-def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, dict[str, Any] | None, str]:
+def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, bool, dict[str, Any] | None, str]:
     roles = relay_roles.get("roles", {}) if isinstance(relay_roles, dict) else {}
     if not isinstance(roles, dict):
-        return "degraded", False, None, "status_probe_invalid_roles_shape"
+        return "degraded", False, False, None, "status_probe_invalid_roles_shape"
     if role not in roles:
-        return "unknown_role", False, None, "unknown_role"
+        return "unknown_role", False, False, None, "unknown_role"
     selected = roles[role]
     if not isinstance(selected, dict):
-        return "degraded", False, None, "status_probe_invalid_role_shape"
+        return "degraded", False, False, None, "status_probe_invalid_role_shape"
     top_level_config_error = (
         relay_roles.get("relay_config_parse_error")
         or relay_roles.get("relay_config_shape_error")
@@ -85,18 +85,25 @@ def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, dict
         or relay_roles.get("avoid_coding_agent_for_review_config_error")
     )
     if top_level_config_error:
-        return "degraded", False, selected, top_level_config_error
+        return "degraded", False, False, selected, top_level_config_error
     degraded = selected.get("degraded")
     if not isinstance(degraded, bool):
-        return "degraded", False, selected, "status_probe_invalid_role_degraded_shape"
+        return "degraded", False, False, selected, "status_probe_invalid_role_degraded_shape"
     selected_agent = selected.get("selected_agent")
     if selected_agent is not None and not (isinstance(selected_agent, str) and selected_agent.strip()):
-        return "degraded", False, selected, "status_probe_invalid_selected_agent_shape"
+        return "degraded", False, False, selected, "status_probe_invalid_selected_agent_shape"
     if degraded or not selected_agent:
         config_error = selected.get("config_error")
         reason = config_error if isinstance(config_error, str) and config_error else "selected_agent_unavailable"
-        return "degraded", False, selected, reason
-    return "resolved", True, selected, "selected_agent_available"
+        return "degraded", False, False, selected, reason
+    programmatic_dispatch_allowed = selected.get("programmatic_dispatch_allowed", True)
+    if not isinstance(programmatic_dispatch_allowed, bool):
+        return "degraded", False, False, selected, "status_probe_invalid_dispatch_allowed_shape"
+    if not programmatic_dispatch_allowed:
+        dispatch_blocker = selected.get("dispatch_blocker")
+        reason = dispatch_blocker if isinstance(dispatch_blocker, str) and dispatch_blocker else "selected_agent_not_programmatically_dispatchable"
+        return "resolved", True, False, selected, reason
+    return "resolved", True, True, selected, "selected_agent_available"
 
 
 def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -130,7 +137,7 @@ def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "finalization_allowed": False,
         }, 0
 
-    state, ok, selected, reason = role_status(relay_roles, args.role)
+    state, ok, dispatch_allowed, selected, reason = role_status(relay_roles, args.role)
     payload = {
         "schema": "hermes-busdriver-relay-role/v0",
         "version": 1,
@@ -139,7 +146,7 @@ def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "status": state,
         "ok": ok,
         "reason": reason,
-        "dispatch_allowed": ok,
+        "dispatch_allowed": dispatch_allowed,
         "mutation_allowed": False,
         "finalization_allowed": False,
         "not_busdriver_native_claude_runtime": True,
@@ -156,7 +163,7 @@ def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "known_roles": known_roles,
         "selected": selected,
         "decision": {
-            "dispatch_allowed": ok,
+            "dispatch_allowed": dispatch_allowed,
             "mutation_allowed": False,
             "finalization_allowed": False,
             "not_busdriver_native_claude_runtime": True,

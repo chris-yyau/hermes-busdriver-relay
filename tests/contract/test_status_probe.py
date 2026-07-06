@@ -4,6 +4,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from relay_role_constants import (
+    FULL_RELAY_ROLE_MAP,
+    NON_PROGRAMMATIC_RELAY_ROLES,
+    REVIEW_SENSITIVE_RELAY_ROLES,
+    UNVERIFIED_ADAPTER_RELAY_ROLES,
+)
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "hermes-busdriver-status"
 
@@ -86,6 +93,36 @@ def assert_no_finalization_flags(drift: dict) -> None:
     }
 
 
+FULL_RELAY_ROLE_MAP = {
+    "relay.impl.primary": "pi",
+    "relay.impl.secondary": "opencode",
+    "relay.impl.fallback": "opencode",
+    "relay.review.fast": "grok",
+    "relay.review.long_context": "gemini",
+    "relay.ide.manual": "zed",
+    "relay.expert_witness.ultraoracle": "ultraoracle",
+    "relay.litmus.reviewer": "codex",
+    "relay.blueprint.reviewer_1": "agy",
+    "relay.blueprint.reviewer_2": "claude-code",
+    "relay.blueprint.reviewer_3": "grok",
+    "relay.blueprint.arbiter": "codex",
+    "relay.pr.lead": "codex",
+    "relay.pr.backstop": "claude-code",
+    "relay.council.architect": "inline",
+    "relay.council.pragmatist": "agy",
+    "relay.council.critic": "codex",
+    "relay.council.researcher": "grok",
+    "relay.council.skeptic": "claude-code",
+}
+
+
+REVIEW_SENSITIVE_RELAY_ROLES = {
+    role
+    for role in FULL_RELAY_ROLE_MAP
+    if not role.startswith("relay.impl.") and role != "relay.ide.manual"
+}
+
+
 def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
@@ -107,32 +144,24 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["relay_config"]["route_keys"] == []
     relay = data["relay_equivalent_roles"]
     assert relay["coding_agent"] == "pi"
-    assert relay["role_policy"] == "pi_default_relay_equivalents"
-    assert relay["review_independence_policy"] == "same_pi_adapter_allowed_by_current_user_directive"
-    assert relay["avoid_coding_agent_for_review"] is False
-    assert set(relay["roles"]) == {
-        "relay.litmus.reviewer",
-        "relay.blueprint.reviewer_1",
-        "relay.blueprint.reviewer_2",
-        "relay.blueprint.reviewer_3",
-        "relay.blueprint.arbiter",
-        "relay.pr.lead",
-        "relay.pr.backstop",
-        "relay.council.architect",
-        "relay.council.pragmatist",
-        "relay.council.critic",
-        "relay.council.researcher",
-        "relay.council.skeptic",
-    }
+    assert relay["role_policy"] == "pi_primary_opencode_fallback_codex_review"
+    assert relay["review_independence_policy"] == "avoid_coding_agent_for_review_roles"
+    assert relay["avoid_coding_agent_for_review"] is True
+    assert set(relay["roles"]) == set(FULL_RELAY_ROLE_MAP)
     arbiter = relay["roles"]["relay.blueprint.arbiter"]
     assert arbiter["native_busdriver_role"] == "blueprint arbiter"
-    for entry in relay["roles"].values():
-        assert entry["configured_route"] == ["pi"]
-        assert entry["default_route"] == ["pi"]
+    for role, entry in relay["roles"].items():
+        assert entry["configured_route"] == [FULL_RELAY_ROLE_MAP[role]]
+        assert entry["default_route"] == [FULL_RELAY_ROLE_MAP[role]]
         assert entry["source"] == "default"
-        assert entry["selected_agent"] == "pi"
-        assert entry["same_as_coding_agent"] is True
+        assert entry["selected_agent"] == FULL_RELAY_ROLE_MAP[role]
+        assert entry["same_as_coding_agent"] is (FULL_RELAY_ROLE_MAP[role] == "pi")
         assert entry["degraded"] is False
+        assert entry["review_independence_sensitive"] is (role in REVIEW_SENSITIVE_RELAY_ROLES)
+        assert entry["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
+        assert entry["adapter_verified"] is (role not in UNVERIFIED_ADAPTER_RELAY_ROLES)
+        if role in UNVERIFIED_ADAPTER_RELAY_ROLES:
+            assert entry["dispatch_blocker"] == "opencode_adapter_not_verified"
         assert entry["configurable"] is True
         assert entry["not_busdriver_native_claude_runtime"] is True
         assert entry["finalization_allowed"] is False
@@ -194,27 +223,62 @@ def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
         assert entry["mutation_allowed"] is False
 
 
-def test_status_probe_marks_pi_default_relay_equivalents_degraded_when_independence_is_explicitly_requested(tmp_path):
+def test_status_probe_review_independence_does_not_block_implementation_primary(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
     relay_config = tmp_path / "relay-config.json"
     relay_config.write_text(json.dumps({
         "coding_agent": "pi",
         "avoid_coding_agent_for_review": True,
+        "routes": {
+            "relay.impl.primary": ["pi"],
+            "relay.pr.backstop": ["pi"],
+        },
     }))
 
     data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
 
     relay = data["relay_equivalent_roles"]
-    assert relay["role_policy"] == "pi_default_relay_equivalents"
-    assert relay["review_independence_policy"] == "same_pi_adapter_allowed_by_current_user_directive"
+    assert relay["role_policy"] == "pi_primary_opencode_fallback_codex_review"
+    assert relay["review_independence_policy"] == "avoid_coding_agent_for_review_roles"
     assert relay["avoid_coding_agent_for_review"] is True
-    for entry in relay["roles"].values():
-        assert entry["configured_route"] == ["pi"]
-        assert entry["selected_agent"] == "pi"
-        assert entry["same_as_coding_agent"] is True
-        assert entry["degraded"] is True
-        assert entry["config_error"] is None
+    primary = relay["roles"]["relay.impl.primary"]
+    assert primary["selected_agent"] == "pi"
+    assert primary["same_as_coding_agent"] is True
+    assert primary["review_independence_sensitive"] is False
+    assert primary["degraded"] is False
+    backstop = relay["roles"]["relay.pr.backstop"]
+    assert backstop["selected_agent"] == "pi"
+    assert backstop["same_as_coding_agent"] is True
+    assert backstop["review_independence_sensitive"] is True
+    assert backstop["degraded"] is True
+    assert backstop["finalization_allowed"] is False
+    assert backstop["mutation_allowed"] is False
+
+
+def test_status_probe_resolves_full_live_relay_role_map_without_degradation(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "pi",
+        "avoid_coding_agent_for_review": True,
+        "routes": {role: [agent] for role, agent in FULL_RELAY_ROLE_MAP.items()},
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    assert data["relay_config"]["route_keys"] == sorted(FULL_RELAY_ROLE_MAP)
+    relay = data["relay_equivalent_roles"]
+    assert set(relay["roles"]) == set(FULL_RELAY_ROLE_MAP)
+    for role, expected_agent in FULL_RELAY_ROLE_MAP.items():
+        entry = relay["roles"][role]
+        assert entry["configured_route"] == [expected_agent]
+        assert entry["selected_agent"] == expected_agent
+        assert entry["source"] == "relay_config"
+        assert entry["degraded"] is False
+        assert entry["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
+        assert entry["adapter_verified"] is (role not in UNVERIFIED_ADAPTER_RELAY_ROLES)
         assert entry["finalization_allowed"] is False
         assert entry["mutation_allowed"] is False
 
@@ -253,7 +317,7 @@ def test_status_probe_marks_invalid_relay_equivalent_route_entries_degraded(tmp_
 
     relay = data["relay_equivalent_roles"]
     assert relay["coding_agent"] == "pi"
-    assert relay["avoid_coding_agent_for_review"] is False
+    assert relay["avoid_coding_agent_for_review"] is True
     assert relay["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"
     assert relay["coding_agent_source"] == "default"

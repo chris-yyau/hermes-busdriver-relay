@@ -54,7 +54,7 @@ Do not frame Pi as an immediate Busdriver authority or direct replacement for Co
 Pi = Busdriver-compatible tool-harness / adapter candidate
 ```
 
-Treat the current Pi lane wording as **target state** until the in-repo adapter, schema, wrapper, smoke, and contract tests pass. Codex remains the current implemented normal draft lane. OpenCode is currently a generic/opencode-go lane because the user deleted the OpenCode Busdriver plugin; do not describe it as a Busdriver-compatible plugin lane unless a new adapter/plugin is installed and verified.
+Treat Pi as the current constrained default draft lane only through the proven `bd_*` adapter. OpenCode is configured as fallback/comparison route metadata but remains non-programmatic because the user deleted the OpenCode Busdriver plugin; do not describe it as Busdriver-compatible or dispatchable unless a new adapter/plugin is installed and verified. Codex is PR lead / review / backstop-focused by default and implements only by explicit exception.
 
 Recommended authority map:
 
@@ -63,11 +63,12 @@ authority.canonical                    = ClaudeCode / Busdriver
 operator.router                        = Hermes
 operator.verifier                      = Hermes
 implementation.primary.current         = Pi
-implementation.fallback.explicit       = Codex when Pi is blocked or unsuited
-implementation.secondary.future_candidate = OpenCode only after adapter/smoke/tests; otherwise generic lane only
+implementation.fallback.candidate       = OpenCode route metadata; non-programmatic until adapter/smoke/tests pass
+implementation.exception.explicit       = Codex only by explicit exception when Pi/OpenCode are blocked or unsuited
+review.pr_lead_and_backstop             = Codex / Claude Code per relay role config
 read_only.fast_review                  = Grok
 read_only.long_context_review          = Gemini
-manual.sidecar                         = Cursor
+manual.sidecar                         = Zed
 finalization.operator_path             = Hermes Delivery Mode, only on explicit user request
 finalization.authority_path            = ClaudeCode / Busdriver
 ```
@@ -278,7 +279,7 @@ Before implementing that slice in `hermes-busdriver-relay`, create/select a sepa
 
 OpenCode comparison remains optional future evidence, not a prerequisite for choosing Pi. If the user explicitly asks for it, first state whether the comparison is generic OpenCode-under-Hermes-gate containment or true Busdriver-compatible OpenCode parity. True parity requires the intended OpenCode Busdriver plugin lane to be present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved.
 
-Until then, Pi is the confirmed target-state tool-harness direction, while OpenCode should be described as currently blocked/degraded for Busdriver-plugin comparison in this environment.
+Until then, Pi is the confirmed tool-harness direction, while OpenCode should be described as configured-but-non-programmatic for Busdriver-plugin fallback/comparison in this environment.
 
 ## Continuation discipline during comparison work
 

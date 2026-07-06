@@ -25,9 +25,9 @@ Implemented:
 - `scripts/hermes-busdriver-lock`
 - `scripts/hermes-busdriver-runtime-check`
 - `scripts/hermes-busdriver-gate`
-- `scripts/hermes-busdriver-agent-draft` including Pi as the default constrained Busdriver-shaped draft lane with built-in Pi tools disabled, `bd_*` tools only, fail-closed `pi-result.json` authority flags, and Codex only as explicit fallback when Pi is blocked or unsuited
+- `scripts/hermes-busdriver-agent-draft` including Pi as the default constrained Busdriver-shaped draft lane with built-in Pi tools disabled, `bd_*` tools only, fail-closed `pi-result.json` authority flags, OpenCode listed as fallback/comparison candidate only after adapter proof, and Codex focused on review/backstop by default
 - `scripts/hermes-busdriver-agent-balance-plan` read-only planning envelope for one gated mutating draft lane plus parallel read-only review/status lanes
-- `scripts/hermes-busdriver-agent-smoke` including opt-in Pi-default and explicit Codex fallback adapter smokes that may consume provider quota/tokens
+- `scripts/hermes-busdriver-agent-smoke` including opt-in Pi-default smoke; Codex smoke remains legacy/exception evidence and OpenCode requires separate adapter proof before fallback use
 - `scripts/hermes-busdriver-delivery-status` including a top-level `read_only: true` envelope marker, optional `--relay-role` / `--relay-config` resolver evidence, sanitized/normalized/redacted state-dir-aware read-only litmus/pre-PR freshness evidence, and metadata-only relay capability inventory entries for public helpers including agent-balance-plan, agent-smoke, deliver, smoke, finalization-readiness, and finalization-contract-status; litmus evidence fails closed on unavailable/malformed/schema-invalid/repo-mismatched/authority-positive/subprocess-failed helper output
 - `scripts/hermes-busdriver-deliver` including nested delivery-status timeout budgeting and `--busdriver-state-dir-name` forwarding to litmus evidence checks
 - `scripts/hermes-busdriver-litmus-status`
@@ -101,7 +101,7 @@ Hermes may use this repo for:
 1. Busdriver-aware intake and route recognition;
 2. Phase 0 status discovery;
 3. read-only route/gate/marker/lock reporting;
-4. preflight/postflight gates around Hermes-launched draft agents: Pi as the default constrained adapter lane, with Codex only as explicit fallback when Pi is blocked or unsuited and all finalization authority false;
+4. preflight/postflight gates around Hermes-launched draft agents: Pi as the default constrained adapter lane, OpenCode only after fallback/comparison adapter proof, Codex focused on review/backstop by default, and all finalization authority false;
 5. generating read-only finalization readiness / handoff envelopes for Busdriver/Claude or explicit operator finalization;
 6. warning the user when the next step still needs Busdriver/Claude or a stronger finalization gate;
 7. maintaining the current read-only/non-mutating relay envelopes while leaving finalization expansion policy-blocked.
