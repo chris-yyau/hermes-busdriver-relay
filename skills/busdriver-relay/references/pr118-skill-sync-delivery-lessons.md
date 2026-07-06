@@ -14,6 +14,10 @@ Use when `hermes-busdriver-relay-brief` reports `next_safe_slice=reconcile_skill
 
 5. **Branch-keyed locks may need temporary branch recreation after squash merge.** If squash merge switches the worktree to the base branch and `hermes-busdriver-lock release` misses a topic-branch-keyed lock, recreate/switch to the topic branch at the saved PR head SHA only long enough to release the lock with the original branch identity, then return to the base branch, delete the local branch, fetch/prune, and verify remote branch absence.
 
+6. **Re-read live PR state before mutating around reviewer-bot rate limits.** A CodeRabbit rate-limit comment may later be edited into a completed “no actionable comments” review after checks/reviewers catch up. Do not post `@coderabbitai review` or push a no-op commit without explicit user approval; first rerun live `gh pr view` / PR-grind evidence and inspect whether another reviewer (for example Codex) has the real actionable blocker.
+
+7. **Reusable checklist wording must not hard-code `main`.** Skill-sync delivery references and verification checklists should say “clean synced PR base” / saved live PR base branch rather than `main`, because the same pattern can apply to repositories whose PR base is not `main`. Add a durability assertion that rejects the old hard-coded wording when this pitfall is fixed.
+
 ## Minimal verification pattern
 
 ```text
