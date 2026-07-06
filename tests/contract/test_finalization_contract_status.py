@@ -37,6 +37,16 @@ EXPECTED_REMAINING_WORK_IDS = {
     "mutating-pr-grind-fix-push-loop",
     "busdriver-marker-interop",
 }
+EXPECTED_AUTHORITY_SOURCE_IDS = [
+    "explicit_user_intent_for_exact_side_effect",
+    "busdriver_source_of_truth_approval",
+    "hook_runtime_or_equivalent_proof",
+    "fresh_repo_pr_evidence",
+    "fresh_gate_review_evidence",
+    "concurrency_authority",
+    "data_boundary_authority",
+    "schema_authority",
+]
 
 
 def run_contract_status(*extra: str, cwd: Path | None = None) -> tuple[subprocess.CompletedProcess[str], dict]:
@@ -94,6 +104,8 @@ def test_contract_status_emits_read_only_policy_blocked_matrix():
         "finalization_flags_policy": "non_mutating_relay_only",
     }
     assert {item["id"] for item in data["remaining_work"]} == EXPECTED_REMAINING_WORK_IDS
+    assert data["required_authority_sources"] == EXPECTED_AUTHORITY_SOURCE_IDS
+    assert [item["id"] for item in data["authority_sources"]] == EXPECTED_AUTHORITY_SOURCE_IDS
     assert set(data["unsupported_mutating_operations"]) == {
         "commit",
         "push",
@@ -175,6 +187,36 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
     ]
     assert "hermes-busdriver-mutating-delivery-run/v0" in by_id["mutating-final-result-envelope"]["missing_future_schemas"]
     assert "hermes-busdriver-marker-interop/v0" in by_id["busdriver-marker-interop"]["missing_future_schemas"]
+
+
+def test_contract_status_authority_sources_are_policy_blocked_and_non_authoritative():
+    _, data = run_contract_status()
+    authority_sources = data["authority_sources"]
+    by_id = {item["id"]: item for item in authority_sources}
+
+    assert [item["id"] for item in authority_sources] == data["required_authority_sources"]
+    assert data["authority_sources"]
+
+    for item in authority_sources:
+        assert item["status"] == "policy_blocked"
+        assert item["evidence_required"]
+        assert item["current_evidence"] == []
+        assert item["retired"] is False
+        assert item["implemented"] is False
+        assert item["capability_allowed"] is False
+        assert item["safe_to_execute_by_this_helper"] is False
+        assert item["authority"] == data["authority"]
+        assert item["adr_sections"]
+        assert_no_positive_finalization_authority(item)
+
+    assert by_id["schema_authority"]["label"] == "Versioned schema authority"
+    assert any("versioned_schema" in entry for entry in by_id["schema_authority"]["evidence_required"])
+    assert any("contract_tests" in entry for entry in by_id["schema_authority"]["evidence_required"])
+    assert by_id["fresh_gate_review_evidence"]["label"] == "Fresh gate/review evidence"
+    assert any("litmus" in entry for entry in by_id["fresh_gate_review_evidence"]["evidence_required"])
+    assert any("pre_pr" in entry or "pr_grind" in entry for entry in by_id["fresh_gate_review_evidence"]["evidence_required"])
+
+    assert_no_positive_finalization_authority(authority_sources)
 
 
 def test_contract_status_is_read_only_and_does_not_create_repo_state(tmp_path: Path):
