@@ -12,7 +12,7 @@ Safe first shape:
 - multiple read-only lanes for review/status/scanning (`max_parallel>1`, `parallelizable=true`);
 - main Hermes remains operator/verifier/finalizer;
 - commit/push/PR/merge/marker-write remain Delivery Mode only;
-- the helper must not launch agents, call Codex/GitHub, mutate repos, or write markers.
+- the helper must not launch agents, call Pi/Codex/GitHub, mutate repos, or write markers; when Pi is the default draft lane, its planning metadata should name Pi while keeping all execution flags false.
 
 ## Schema / authority pitfalls
 
@@ -27,7 +27,7 @@ Safe first shape:
 - recursive authority-safety test fails if any `*_allowed` or execution side-effect flag is non-false;
 - draft lane is single-flight and gated;
 - read-only lanes are parallelizable and non-mutating;
-- no-dispatch execution flags stay false (`external_agents_called`, `subprocess_dispatch_called`, `codex_called`, `github_called`, `marker_writes_performed`, `repo_mutations_performed`);
+- no-dispatch execution flags stay false (`external_agents_called`, `subprocess_dispatch_called`, `pi_called`, `codex_called`, `github_called`, `marker_writes_performed`, `repo_mutations_performed`);
 - delivery-status capability inventory includes the helper and other public helpers as metadata-only entries.
 
 ## Implementation language rationale
