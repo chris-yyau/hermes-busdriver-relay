@@ -62,8 +62,8 @@ Recommended authority map:
 authority.canonical                    = ClaudeCode / Busdriver
 operator.router                        = Hermes
 operator.verifier                      = Hermes
-implementation.primary.current         = Codex
-tool_harness.primary_candidate         = Pi
+implementation.primary.current         = Pi
+implementation.fallback.explicit       = Codex when Pi is blocked or unsuited
 implementation.secondary.future_candidate = OpenCode only after adapter/smoke/tests; otherwise generic lane only
 read_only.fast_review                  = Grok
 read_only.long_context_review          = Gemini

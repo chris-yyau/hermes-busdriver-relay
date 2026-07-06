@@ -2,8 +2,8 @@
 """Hermes-side Busdriver-equivalent gate runner.
 
 This is the generic guard layer for Hermes-launched draft agents. The active
-relay surface is Codex-only for now; custom/noop commands are reserved for
-tests. It does not pretend to be Claude Code's hook runtime; instead it performs
+relay surface is Pi-default; Codex is an explicit fallback only when Pi is
+blocked or unsuited, and custom/noop commands are reserved for tests. It does not pretend to be Claude Code's hook runtime; instead it performs
 explicit preflight/postflight checks and reports what kind
 of agent work is allowed.
 

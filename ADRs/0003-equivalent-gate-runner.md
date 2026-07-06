@@ -6,7 +6,7 @@ Accepted for the Hermes Busdriver Relay v2 direction.
 
 ## Context
 
-The user wants Hermes to continue implementation work when Claude Code quota is unavailable. The active relay surface is Codex-only for now; other agents are intentionally deferred until the user explicitly reopens that scope.
+The user wants Hermes to continue implementation work when Claude Code quota is unavailable. The active relay surface is Pi-default for draft implementation, with Codex as an explicit fallback only when Pi is blocked or unsuited.
 
 However, Hermes terminal commands do not automatically run inside Claude Code's Busdriver hook runtime. If Hermes launches agents directly and then commits/pushes/opens PRs, it can bypass Busdriver's strongest gates.
 
@@ -16,7 +16,7 @@ Introduce a Hermes-side equivalent gate runner:
 
 ```text
 hermes-busdriver-gate preflight
-  → Codex implementation draft
+  → Pi implementation draft
   → hermes-busdriver-gate postflight
   → report / review / later finalization gate
 ```
@@ -68,7 +68,7 @@ Draft mode is enough to satisfy the near-term quota-fallback goal:
 ```text
 Claude quota exhausted
   → Hermes follows Busdriver routing
-  → Hermes calls Codex to implement a draft
+  → Hermes calls Pi to implement a draft (Codex only if Pi is blocked or unsuited)
   → Hermes runs postflight/verifiers
   → Hermes reports diff + evidence
   → Busdriver/Claude or a later equivalent finalization gate reviews/commits
@@ -78,8 +78,8 @@ It avoids the false claim that a Hermes-launched agent has passed Claude Code ho
 
 ## Future Work
 
-1. `hermes-busdriver-agent-draft`: Codex launcher wrapper using this gate runner.
-2. Non-Codex adapters only if the deferred scope is explicitly reopened.
+1. `hermes-busdriver-agent-draft`: Pi-default launcher wrapper using this gate runner; Codex remains an explicit fallback only when Pi is blocked or unsuited.
+2. Additional adapters only if the deferred scope is explicitly reopened.
 3. Commit-capable gate:
    - litmus-equivalent review;
    - blueprint/design marker freshness;

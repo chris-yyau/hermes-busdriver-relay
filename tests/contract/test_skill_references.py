@@ -135,13 +135,14 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             '"relay.litmus.reviewer": ["codex"]',
             '"relay.pr.backstop": ["claude-code"]',
             "Authority constraints remain false for all router/status roles",
+            "Pi as the default constrained implementation worker",
             "primary-controller agent",
         ],
         RELAY_ROUTER_ROLE_POLICY_REFERENCE: [
             "relay.blueprint.reviewer_2 = claude-code",
             "relay.litmus.reviewer = codex",
             "relay.pr.lead     = fresh-codex",
-            "tool_harness.primary_candidate            = pi",
+            "implementation.primary.current            = pi",
             "**OpenCode** is a generic/opencode-go experiment or future comparison lane",
             "Keep all finalization/commit/push/PR/merge/marker-write flags false",
         ],
@@ -358,7 +359,7 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     reference_text = CODING_WORKFLOW_AUTHORITY_MAP_REFERENCE.read_text()
 
     assert "references/coding-workflow-authority-map-v0.1.md" in skill_text
-    assert "tool_harness.primary_candidate            = Pi" in reference_text
+    assert "implementation.primary.current            = Pi" in reference_text
     assert "OpenCode   = generic/opencode-go lane unless" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text

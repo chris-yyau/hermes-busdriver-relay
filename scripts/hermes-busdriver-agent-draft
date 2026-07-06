@@ -7,6 +7,11 @@ Pattern:
 This is not a finalizing launcher. It may allow an agent to modify the working
  tree, but commit/push/PR/merge/deploy remain blocked by policy and by a best-
 effort PATH guard.
+
+Compatibility note: omitting --agent intentionally selects the Pi default lane;
+legacy/fallback callers that need Codex must pass --agent codex explicitly.
+Omitting --agent with --agent-cmd selects custom so test/advanced shell-command
+callers do not accidentally require a Pi artifact.
 """
 
 from __future__ import annotations
@@ -191,7 +196,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["codex", "pi", "noop", "custom"], default="codex", help="Codex is the current normal draft lane; pi is a constrained adapter lane when its schema/wrapper/smoke proof is present. noop/custom for tests.")
+    ap.add_argument("--agent", choices=["pi", "codex", "noop", "custom"], default=None, help="Pi is the default constrained draft lane when no --agent-cmd is supplied; --agent-cmd without --agent selects custom. Codex remains an explicit fallback only when Pi is blocked or unsuited. noop/custom for tests.")
     ap.add_argument("--agent-cmd", help="Custom shell command for tests/advanced use. Prompt is available via HERMES_AGENT_PROMPT_FILE.")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")
@@ -209,6 +214,10 @@ def main() -> int:
     ap.add_argument("--lock-ttl-seconds", type=int, default=6 * 60 * 60)
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
+    if args.agent is None:
+        args.agent = "custom" if args.agent_cmd else "pi"
+    if args.agent_cmd and args.agent != "custom":
+        ap.error("--agent-cmd can only be used with --agent custom or with --agent omitted")
     if args.agent == "custom" and not args.agent_cmd:
         ap.error("--agent-cmd is required when --agent custom")
 

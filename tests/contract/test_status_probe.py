@@ -106,9 +106,9 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["relay_config"]["exists"] is False
     assert data["relay_config"]["route_keys"] == []
     relay = data["relay_equivalent_roles"]
-    assert relay["coding_agent"] == "codex"
-    assert relay["role_policy"] == "codex_only_relay_equivalents"
-    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
+    assert relay["coding_agent"] == "pi"
+    assert relay["role_policy"] == "pi_default_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_pi_adapter_allowed_by_current_user_directive"
     assert relay["avoid_coding_agent_for_review"] is False
     assert set(relay["roles"]) == {
         "relay.litmus.reviewer",
@@ -127,10 +127,10 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     arbiter = relay["roles"]["relay.blueprint.arbiter"]
     assert arbiter["native_busdriver_role"] == "blueprint arbiter"
     for entry in relay["roles"].values():
-        assert entry["configured_route"] == ["codex"]
-        assert entry["default_route"] == ["codex"]
+        assert entry["configured_route"] == ["pi"]
+        assert entry["default_route"] == ["pi"]
         assert entry["source"] == "default"
-        assert entry["selected_agent"] == "codex"
+        assert entry["selected_agent"] == "pi"
         assert entry["same_as_coding_agent"] is True
         assert entry["degraded"] is False
         assert entry["configurable"] is True
@@ -194,24 +194,24 @@ def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
         assert entry["mutation_allowed"] is False
 
 
-def test_status_probe_marks_codex_only_defaults_degraded_when_independence_is_explicitly_requested(tmp_path):
+def test_status_probe_marks_pi_default_relay_equivalents_degraded_when_independence_is_explicitly_requested(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
     relay_config = tmp_path / "relay-config.json"
     relay_config.write_text(json.dumps({
-        "coding_agent": "codex",
+        "coding_agent": "pi",
         "avoid_coding_agent_for_review": True,
     }))
 
     data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
 
     relay = data["relay_equivalent_roles"]
-    assert relay["role_policy"] == "codex_only_relay_equivalents"
-    assert relay["review_independence_policy"] == "same_codex_agent_allowed_by_current_user_directive"
+    assert relay["role_policy"] == "pi_default_relay_equivalents"
+    assert relay["review_independence_policy"] == "same_pi_adapter_allowed_by_current_user_directive"
     assert relay["avoid_coding_agent_for_review"] is True
     for entry in relay["roles"].values():
-        assert entry["configured_route"] == ["codex"]
-        assert entry["selected_agent"] == "codex"
+        assert entry["configured_route"] == ["pi"]
+        assert entry["selected_agent"] == "pi"
         assert entry["same_as_coding_agent"] is True
         assert entry["degraded"] is True
         assert entry["config_error"] is None
@@ -252,7 +252,7 @@ def test_status_probe_marks_invalid_relay_equivalent_route_entries_degraded(tmp_
     data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
 
     relay = data["relay_equivalent_roles"]
-    assert relay["coding_agent"] == "codex"
+    assert relay["coding_agent"] == "pi"
     assert relay["avoid_coding_agent_for_review"] is False
     assert relay["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"

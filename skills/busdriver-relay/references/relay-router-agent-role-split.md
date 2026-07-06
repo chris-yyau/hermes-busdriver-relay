@@ -7,12 +7,12 @@ For Busdriver/Hermes relay work, do **not** add Pi or Cursor/OpenCode/Grok/Gemin
 ```text
 Busdriver + Claude Code = canonical authority, hooks, gates, litmus, PR-grind, finalization
 Hermes = relay/router/status/Phase 0/locks/handoff/Delivery Mode support
-Codex = primary fallback implementation draft worker
+Pi = default constrained implementation draft worker
+Codex = explicit fallback only when Pi is blocked or unsuited
 OpenCode + Go = secondary draft-adapter/sidecar candidate, initially read-only/candidate
 Grok = Hermes-side relay.review.fast read-only reviewer / PR-comment triage
 Gemini = Hermes-side relay.review.long_context read-only architecture/spec reviewer
 Cursor = manual IDE sidecar; edits are treated as human/manual dirty tree
-Pi = deferred; not part of the current pipeline unless a future capability gap appears
 ```
 
 Hard rule: **Only Claude/Busdriver may claim done. All non-Claude agents produce draft/review evidence only.**
@@ -28,18 +28,19 @@ Hermes-side roles such as `relay.review.fast=grok` and `relay.review.long_contex
 
 ## Router work items
 
-The next safe relay build is a read-only Hermes router/status expansion, not Pi:
+The next safe relay build is a Pi-default Hermes router/status expansion that keeps finalization authority in Busdriver/Claude:
 
 1. ADR for relay router agent roles.
 2. Relay-owned sample config under `~/.hermes/busdriver-relay/config.json` (never `~/.claude/busdriver.json`).
 3. Extend role inventory/resolver/status for:
-   - `relay.impl.primary = codex`
+   - `relay.impl.primary = pi`
+   - `relay.impl.fallback = codex`
    - `relay.impl.secondary = opencode`
    - `relay.review.fast = grok`
    - `relay.review.long_context = gemini`
    - `relay.ide.manual = cursor`
 4. Add a read-only `hermes-busdriver-router` helper that recommends routes from task kind/quota state without dispatching agents or granting authority.
-5. Dogfood Codex draft path through existing `hermes-busdriver-agent-draft --agent codex`.
+5. Dogfood the Pi draft path through default `hermes-busdriver-agent-draft` / `--agent pi`; use `--agent codex` only for explicit fallback tests.
 6. Treat OpenCode+Go as a candidate only after read-only smoke and isolated draft smoke.
 7. Keep Grok/Gemini read-only until data-egress and invocation contracts exist.
 
@@ -49,7 +50,7 @@ This is a future-only design target that stays compatible with the relay-owned c
 
 ```json
 {
-  "coding_agent": "codex",
+  "coding_agent": "pi",
   "avoid_coding_agent_for_review": false,
   "routes": {
     "relay.litmus.reviewer": ["codex"],
@@ -60,8 +61,8 @@ This is a future-only design target that stays compatible with the relay-owned c
 
 Future router inventory work can then add the non-copyable design-target roles `relay.impl.secondary`, `relay.review.fast`, `relay.review.long_context`, and `relay.ide.manual` once the resolver/status helpers know those role names.
 
-Authority constraints remain false for all router/status roles. Only the separately gated Codex draft launcher may mutate the draft working tree, and it still returns `needs_busdriver_review`.
+Authority constraints remain false for all router/status roles. Only the separately gated Pi adapter draft launcher may mutate the draft working tree by default, Codex may run only as explicit fallback, and either path still returns `needs_busdriver_review`.
 
 ## Purchasing / tool-selection implication
 
-Do not solve Claude quota pressure by adding another primary-controller agent. Use Codex as the primary fallback implementation worker; if Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor can remain a manual IDE sidecar.
+Do not solve Claude quota pressure by adding another primary-controller agent. Use Pi as the default constrained implementation worker, keep Codex as explicit fallback when Pi is blocked or unsuited, and consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor can remain a manual IDE sidecar.
