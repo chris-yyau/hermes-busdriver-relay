@@ -504,6 +504,7 @@ def test_adr0005_authority_source_status_lessons_are_durable_skill_reference():
     skill_text = SKILL.read_text()
     reference_text = ADR0005_AUTHORITY_SOURCE_STATUS_REFERENCE.read_text()
 
+    assert "ADR0005 authority-source status rows" in skill_text
     assert "references/adr0005-authority-source-status-lessons.md" in skill_text
     assert "Authority-source rows are status rows too" in reference_text
     assert "retired: false" in reference_text
