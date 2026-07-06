@@ -24,8 +24,8 @@ Do not patch Pi itself unless a later task explicitly scopes an upstream Pi SDK/
 Avoid writing docs that make `--agent pi` look production-trusted before the in-repo proof passes. Use wording like:
 
 ```text
-Codex lane = current implemented normal draft lane.
-Pi lane    = constrained tool-harness adapter candidate / enabled only after schema + wrapper + smoke + contract proof.
+Pi lane    = current implemented constrained default draft lane after schema + wrapper + smoke + contract proof.
+Codex lane = explicit fallback draft lane when Pi is blocked or unsuited.
 OpenCode   = generic/opencode-go lane unless a Busdriver-compatible plugin/adapter is rebuilt and verified.
 ```
 

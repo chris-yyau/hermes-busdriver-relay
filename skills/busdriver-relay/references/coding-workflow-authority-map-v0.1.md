@@ -26,8 +26,8 @@ Workers produce draft evidence; Hermes verifies evidence; ClaudeCode/Busdriver o
 authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
-implementation.primary.current            = Codex
-tool_harness.primary_candidate            = Pi
+implementation.primary.current            = Pi
+implementation.fallback.explicit           = Codex when Pi is blocked or unsuited
 implementation.secondary.future_candidate = OpenCode only after adapter/smoke/tests; otherwise generic lane only
 read_only.fast_review                     = Grok
 read_only.long_context_review             = Gemini
@@ -39,8 +39,8 @@ finalization.authority_path               = ClaudeCode / Busdriver
 Short form:
 
 ```text
-Codex writes normal drafts.
-Pi constrains tool access, once adapter exists.
+Pi writes constrained default drafts through the proven `bd_*` adapter.
+Codex writes fallback drafts only when Pi is blocked or unsuited.
 OpenCode experiments or compares, but is not Busdriver-compatible now.
 Grok/Gemini critique.
 Cursor is human/manual editing surface.
@@ -53,8 +53,8 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Codex lane = current implemented normal draft lane.
-Pi lane    = constrained adapter lane once schema + wrapper + smoke + contract tests pass; still not Busdriver/Claude authority and still cannot finalize.
+Pi lane    = current implemented constrained default draft lane; still not Busdriver/Claude authority and still cannot finalize.
+Codex lane = explicit fallback draft lane when Pi is blocked or unsuited.
 OpenCode   = generic/opencode-go lane unless a Busdriver-compatible adapter/plugin is rebuilt and verified.
 ```
 

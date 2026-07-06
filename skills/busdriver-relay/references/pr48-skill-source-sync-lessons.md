@@ -6,7 +6,7 @@ Use when continuing `hermes-busdriver-relay` and the repo copy of `skills/busdri
 
 - The repo skill source lagged the installed Hermes skill, so the safe next slice after a clean main was a docs/skill-source sync.
 - A direct mirror from installed skill to repo carried accumulated session notes, but reviewer bots found that some older reference lessons encoded unsafe or stale delivery guidance.
-- The fix round preserved the useful session references while aligning them with current policy: Codex-only active relay scope, no Hermes-written Busdriver markers, no force-push default, and current helper field names.
+- The fix round preserved the useful session references while aligning them with then-current policy: Codex-only active relay scope, no Hermes-written Busdriver markers, no force-push default, and current helper field names.
 - After PR merge, the installed skill was refreshed back from the reviewed repo copy so future Hermes sessions load the corrected skill library.
 
 ## Durable workflow
@@ -14,7 +14,7 @@ Use when continuing `hermes-busdriver-relay` and the repo copy of `skills/busdri
 1. Treat repo-vs-installed skill sync as a docs/reference slice, not runtime code.
 2. Use agent-draft only with scope `skills/busdriver-relay/**`; main Hermes remains verifier/finalizer.
 3. Do **not** blindly trust the installed skill copy as authoritative when copying into the repo. Review/sanitize reference lessons for current policy before merge:
-   - active draft implementation remains Codex-only unless explicitly validated/approved;
+   - active draft implementation at that time remained Codex-only unless explicitly validated/approved; current policy is Pi-default after proof;
    - Hermes Delivery Mode must not write Busdriver markers directly;
    - prefer normal follow-up commits for PR feedback; do not teach force-push as the default fix path;
    - stale helper field names and verifier examples should be updated to current contract output.

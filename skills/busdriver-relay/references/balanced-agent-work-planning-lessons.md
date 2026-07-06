@@ -8,7 +8,7 @@ When the user asks for Hermes to “balance” or “parallelize” agent work i
 
 Safe first shape:
 
-- one gated mutating draft lane (`max_parallel=1`, `parallelizable=false`, `requires_gate=true`, Codex-only under current policy);
+- one gated mutating draft lane (`max_parallel=1`, `parallelizable=false`, `requires_gate=true`, Pi-default under current policy);
 - multiple read-only lanes for review/status/scanning (`max_parallel>1`, `parallelizable=true`);
 - main Hermes remains operator/verifier/finalizer;
 - commit/push/PR/merge/marker-write remain Delivery Mode only;

@@ -6,8 +6,8 @@ Session outcome: the user refined Hermes/Busdriver relay role assignment after c
 
 - **Busdriver + Claude Code** remain canonical authority for workflow, gates, reviews, litmus/pre-PR/PR-grind semantics, commits, PRs, merges, and finalization.
 - **Hermes** remains GPT-based relay/router/status/finalization-support. It should expose route/status/handoff envelopes and coordinate draft/review lanes, not become a second Busdriver.
-- **Pi** is the confirmed primary Busdriver-compatible tool-harness / adapter candidate. Keep it as target-state until schema, wrapper, smoke, and contract tests pass; it is not Busdriver authority.
-- **Codex** is the current primary implementation draft worker.
+- **Pi** is the default Busdriver-compatible constrained implementation draft worker after schema, wrapper, smoke, and contract tests passed; it is not Busdriver authority.
+- **Codex** is explicit fallback only when Pi is blocked or unsuited.
 - **OpenCode** is a generic/opencode-go experiment or future comparison lane unless a Busdriver-compatible adapter/plugin is rebuilt and verified. It is not the selected tool-harness direction now that Pi is confirmed.
 
 ## Relay role map
@@ -61,8 +61,8 @@ PR lead should be a fresh Codex session, not the same implementation context.
 ### Implementation
 
 ```text
-implementation.primary.current            = codex
-tool_harness.primary_candidate            = pi
+implementation.primary.current            = pi
+implementation.fallback.explicit          = codex when Pi is blocked or unsuited
 implementation.secondary.future_candidate = opencode only after adapter/smoke/tests; otherwise generic lane only
 ```
 

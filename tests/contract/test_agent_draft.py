@@ -69,6 +69,31 @@ def test_custom_agent_draft_modifies_scoped_file_and_needs_review(tmp_path: Path
     assert sh(["git", "status", "--short"], cwd=repo).stdout.strip() == "M src/app.txt"
 
 
+def test_agent_cmd_without_agent_selects_custom_and_skips_pi_artifact(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    plugin = fake_busdriver(tmp_path)
+    state = tmp_path / "state"
+
+    cp, data = run_draft(
+        "--plugin-root", str(plugin),
+        "--repo", str(repo),
+        "--state-dir", str(state),
+        "--agent-cmd", "python3 - <<'PY'\nfrom pathlib import Path\nPath('src/app.txt').write_text('implicit-custom\\n')\nPY",
+        "--prompt", "change src/app.txt",
+        "--scope-include", "src/**",
+    )
+
+    assert cp.returncode == 0
+    assert data["agent"] == "custom"
+    assert data["ok"] is True
+    assert data["status"] == "needs_busdriver_review"
+    assert "pi_artifact_error" not in data
+    assert (repo / "src" / "app.txt").read_text() == "implicit-custom\n"
+
+
+
 def test_agent_draft_blocks_git_commit_via_path_guard(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()

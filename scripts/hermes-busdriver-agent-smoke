@@ -69,7 +69,7 @@ def summarize_report(data: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--agent", default="codex", choices=["codex", "custom", "pi"])
+    ap.add_argument("--agent", default="pi", choices=["pi", "codex", "custom"])
     ap.add_argument("--agent-cmd", help="Required when --agent custom")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi")

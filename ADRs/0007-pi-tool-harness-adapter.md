@@ -13,8 +13,8 @@ The authority boundary remains unchanged:
 ```text
 ClaudeCode / Busdriver = canonical authority
 Hermes                 = router / operator / verifier
-Codex                  = current normal draft worker
-Pi                     = constrained draft-only tool harness after adapter proof passes
+Pi                     = default constrained draft worker
+Codex                  = explicit fallback draft worker when Pi is blocked or unsuited
 OpenCode               = generic lane unless a Busdriver-compatible adapter/plugin is rebuilt
 ```
 
@@ -27,7 +27,7 @@ Add a relay-owned Pi adapter with:
 1. `adapters/pi/busdriver-tools.ts` exposing only Busdriver-shaped `bd_*` tools;
 2. `adapters/pi/pi-result.schema.json` defining the fail-closed result artifact;
 3. `scripts/pi/run-pi-busdriver-draft` launching Pi with built-ins/extensions disabled;
-4. `hermes-busdriver-agent-draft --agent pi` integration through the existing lock/preflight/postflight pattern;
+4. `hermes-busdriver-agent-draft --agent pi` integration through the existing lock/preflight/postflight pattern, with Codex as an explicit fallback only when Pi is blocked or unsuited;
 5. `hermes-busdriver-agent-smoke --agent pi` opt-in real-agent smoke;
 6. contract tests and docs proving all authority flags remain false.
 
@@ -47,7 +47,7 @@ It does not authorize commits, pushes, PR creation, merges, marker writes, deplo
 - Pi is not a trusted marker writer.
 - Pi does not run litmus/pre-PR/PR-grind finalization.
 - Pi does not replace ClaudeCode/Busdriver authority.
-- Pi does not replace Codex as the current normal draft lane in this ADR.
+- Codex remains the explicit fallback draft lane when Pi is blocked or unsuited.
 - OpenCode parity is not a prerequisite for this adapter proof; OpenCode remains generic unless rebuilt and verified separately.
 
 ## Authority invariants
@@ -96,4 +96,4 @@ Pi becomes an enabled draft adapter only after all pass:
 3. `hermes-busdriver-agent-draft --agent pi` fake adapter gate test;
 4. `hermes-busdriver-agent-smoke --agent pi` fake adapter test;
 5. optional real Pi smoke when quota/runtime is available;
-6. docs and skill references describing Pi as constrained draft-only, not authority.
+6. docs and skill references describing Pi as the default constrained draft lane, with Codex only as explicit fallback when Pi is blocked or unsuited.

@@ -5,7 +5,7 @@
 User clarified the durable architecture split:
 
 - Busdriver is Claude-side and should keep Claude-native workflow/control-plane semantics.
-- `hermes-busdriver-relay` is Hermes/Codex-side and should provide equivalent status/gate/reporting paths without pretending to be Busdriver's native Claude runtime.
+- `hermes-busdriver-relay` is Hermes/Pi-side by default and should provide equivalent status/gate/reporting paths without pretending to be Busdriver's native Claude runtime; Codex remains explicit fallback.
 - Relay role routing should not live in `~/.claude/busdriver.json`; that file belongs to Claude-side Busdriver.
 
 ## Config Location
@@ -36,7 +36,7 @@ Root-level object:
 
 ```json
 {
-  "coding_agent": "codex",
+  "coding_agent": "pi",
   "avoid_coding_agent_for_review": true,
   "routes": {
     "relay.pr.backstop": ["gpt-5.5", "codex"]

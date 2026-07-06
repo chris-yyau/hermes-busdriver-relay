@@ -7,8 +7,8 @@
 - Only consider a dedicated profile later if the user wants complete isolation (separate config, memory, plugins, model defaults) for the relay layer.
 - Keep answers short and direct; the relay remains a capability on the main profile.
 
-## Codex-only Active Scope (temporary)
-- Limit active agents to **Codex only**.
+## Pi-default Active Scope
+- Use **Pi** as the default constrained implementation draft lane; keep **Codex** only as explicit fallback when Pi is blocked or unsuited.
 - Defer OpenCode, Droid, Agy, Grok.
 - Do not expand surface (CLI, smoke, docs, examples) for other agents without fresh confirmation.
 - Reason: avoid duplicating agent-side Busdriver plugins (e.g. OpenCode) and keep the relay thin.
