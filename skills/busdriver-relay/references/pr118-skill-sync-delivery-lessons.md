@@ -18,6 +18,8 @@ Use when `hermes-busdriver-relay-brief` reports `next_safe_slice=reconcile_skill
 
 7. **Reusable checklist wording must not hard-code `main`.** Skill-sync delivery references and verification checklists should say “clean synced PR base” / saved live PR base branch rather than `main`, because the same pattern can apply to repositories whose PR base is not `main`. Add a durability assertion that rejects the old hard-coded wording when this pitfall is fixed.
 
+8. **A nonzero `gh pr merge` exit can still leave the PR merged and the base synced.** If `gh pr merge --squash --delete-branch` returns nonzero after printing a fast-forward/merge-looking update, do not assume failure and do not rerun the merge. Re-read live PR state (`gh pr view` merge commit/state), local branch/upstream status, remote branch existence, and locks. If the PR is already merged and GitHub deleted the branch, proceed with cleanup; for branch-keyed locks, recreate the topic branch at the saved PR head only long enough to release the lock, then return to the live PR base and delete the temporary local branch.
+
 ## Minimal verification pattern
 
 ```text
