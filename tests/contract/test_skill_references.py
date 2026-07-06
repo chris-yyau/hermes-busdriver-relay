@@ -53,6 +53,18 @@ PR109_PI_ADAPTER_FINAL_PR_GRIND_REFERENCE = (
 PR109_PI_ADAPTER_REVIEW_REBASE_REFERENCE = (
     REFERENCE_DIR / "pr109-pi-adapter-review-rebase-lessons.md"
 )
+FULL_ROLE_MAP_DISPATCHABILITY_REFERENCE = (
+    REFERENCE_DIR / "full-role-map-dispatchability-lessons.md"
+)
+FULL_ROLE_MAP_RESOLVER_SLICE_REFERENCE = (
+    REFERENCE_DIR / "full-role-map-resolver-slice-lessons.md"
+)
+PR112_PI_DEFAULT_DOGFOOD_REFERENCE = (
+    REFERENCE_DIR / "pr112-pi-default-dogfood-lessons.md"
+)
+RELAY_LIVE_CONFIG_RESTORATION_REFERENCE = (
+    REFERENCE_DIR / "relay-live-config-restoration-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -417,6 +429,47 @@ def test_pi_adapter_delivery_lessons_are_durable_skill_references():
         assert reference.exists()
         assert f"references/{reference.name}" in skill_text
         reference_text = reference.read_text()
+        for phrase in expected_phrases:
+            assert phrase in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
+        assert "/Volumes/" not in reference_text
+
+
+def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
+    skill_text = SKILL.read_text(encoding="utf-8")
+    references = {
+        FULL_ROLE_MAP_DISPATCHABILITY_REFERENCE: [
+            "Resolver-ready is not the same as dispatchable",
+            "OpenCode fallback/comparison roles need non-dispatchable metadata",
+            "opencode_adapter_not_verified",
+            "After repo skill-source merges, check installed skill drift",
+        ],
+        FULL_ROLE_MAP_RESOLVER_SLICE_REFERENCE: [
+            "Do not stop at resolver-known subset restoration",
+            "relay.impl.primary = pi",
+            "relay.ide.manual = zed",
+            "Create a fresh follow-up worktree/branch from the saved/live PR base branch",
+        ],
+        PR112_PI_DEFAULT_DOGFOOD_REFERENCE: [
+            "Pi-default is a policy migration",
+            "Preserve custom test/advanced command behavior",
+            "Balanced planning must track default implementation policy",
+            "Latest-head PR-grind still wins",
+        ],
+        RELAY_LIVE_CONFIG_RESTORATION_REFERENCE: [
+            "Separate target policy from live resolver state",
+            "Check the live config before answering model/agent questions",
+            "Full role-map resolver state after PR #113",
+            "Dispatchability is still separate from resolver readiness",
+            "full 19-role resolver inventory",
+        ],
+    }
+
+    for reference, expected_phrases in references.items():
+        assert reference.exists()
+        assert f"references/{reference.name}" in skill_text
+        reference_text = reference.read_text(encoding="utf-8")
         for phrase in expected_phrases:
             assert phrase in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
