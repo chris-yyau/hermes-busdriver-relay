@@ -397,6 +397,8 @@ def authority_source_rows() -> list[dict[str, Any]]:
         rows.append({
             **item,
             "status": "policy_blocked",
+            "retired": False,
+            "implemented": False,
             "current_evidence": [],
             "capability_allowed": False,
             "safe_to_execute_by_this_helper": False,

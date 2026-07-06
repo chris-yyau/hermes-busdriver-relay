@@ -201,6 +201,8 @@ def test_contract_status_authority_sources_are_policy_blocked_and_non_authoritat
         assert item["status"] == "policy_blocked"
         assert item["evidence_required"]
         assert item["current_evidence"] == []
+        assert item["retired"] is False
+        assert item["implemented"] is False
         assert item["capability_allowed"] is False
         assert item["safe_to_execute_by_this_helper"] is False
         assert item["authority"] == data["authority"]
