@@ -12,7 +12,7 @@ Use this when finishing Pi adapter / constrained tool-harness PRs through the re
 ## Pi adapter hardening lessons
 
 - Forward `--scope-exclude` from `hermes-busdriver-agent-draft` into `scripts/pi/run-pi-busdriver-draft`, then into the TypeScript tool layer as `PI_BD_DENIED_WRITES`. Enforce excludes before any draft write (`pathDenied` / `path_excluded`) so postflight is not the first line of defense.
-- Match `hermes-busdriver-gate` glob semantics in the adapter. The gate uses `fnmatch.fnmatchcase`, where `*` can match `/`; if the adapter uses segment-only `*`, excluded scopes like `*.txt` can be bypassed for nested paths before postflight blocks.
+- Keep scope glob semantics explicit and covered by tests. The current Pi adapter contracts use segment-oriented globs (`*` → `[^/]*`, `?` → `[^/]`); do not document Python `fnmatch.fnmatchcase` slash-matching parity unless the adapter, gate, and contract tests are updated together. Enforce excludes in the adapter and re-check artifact `files_changed` against declared scope in the wrapper.
 - Missing `--pi-bin` / unavailable Pi should return a structured blocked JSON envelope, not a Python traceback. Catch `OSError` around Pi launch, use a synthetic returncode such as `127`, keep authority false, and let missing artifact remain an artifact error.
 - Startup failure helpers that always exit should be typed as `NoReturn` to make timeout/error control flow clear and avoid future refactors leaving unbound subprocess variables.
 - Treat a valid Pi artifact with `status="blocked"` as schema-valid but wrapper-blocked. Keep schema validation errors separate from `artifact_blockers` so a legitimate blocked artifact is not conflated with malformed output.
