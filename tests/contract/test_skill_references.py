@@ -41,6 +41,18 @@ CODING_WORKFLOW_AUTHORITY_MAP_REFERENCE = REFERENCE_DIR / "coding-workflow-autho
 PR106_EXPANDED_SKILL_SYNC_PR_GRIND_REFERENCE = (
     REFERENCE_DIR / "pr106-expanded-skill-sync-pr-grind-lessons.md"
 )
+PI_ADAPTER_ASYNC_REVIEW_FIX_REFERENCE = (
+    REFERENCE_DIR / "pi-adapter-async-review-fix-lessons.md"
+)
+PR108_PI_AUTHORITY_SYNC_REFERENCE = (
+    REFERENCE_DIR / "pr108-pi-authority-sync-delivery-lessons.md"
+)
+PR109_PI_ADAPTER_FINAL_PR_GRIND_REFERENCE = (
+    REFERENCE_DIR / "pr109-pi-adapter-final-pr-grind-lessons.md"
+)
+PR109_PI_ADAPTER_REVIEW_REBASE_REFERENCE = (
+    REFERENCE_DIR / "pr109-pi-adapter-review-rebase-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -373,6 +385,42 @@ def test_pr106_expanded_skill_sync_pr_grind_lessons_are_durable_skill_reference(
     assert "Use scoped git identity/signing env for final full-suite verification" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
+
+
+def test_pi_adapter_delivery_lessons_are_durable_skill_references():
+    skill_text = SKILL.read_text()
+    references = {
+        PI_ADAPTER_ASYNC_REVIEW_FIX_REFERENCE: [
+            "Wrapper artifact validation must enforce the checked-in schema",
+            "`bd_read` must deny common secret paths",
+            "After any reviewer-fix amend",
+        ],
+        PR108_PI_AUTHORITY_SYNC_REFERENCE: [
+            "If the user confirms Pi as the chosen Busdriver-compatible tool-harness direction",
+            "`bd_bash` being argv-only and no-shell is not enough",
+            "`gh pr merge --squash --delete-branch` can perform the remote squash merge successfully",
+        ],
+        PR109_PI_ADAPTER_REVIEW_REBASE_REFERENCE: [
+            "Blocked artifacts must propagate as blocked",
+            "`ours` / `HEAD` = the branch being rebased onto",
+            "stale pseudo-ref such as `REBASE_HEAD`",
+        ],
+        PR109_PI_ADAPTER_FINAL_PR_GRIND_REFERENCE: [
+            "Forward `--scope-exclude`",
+            "Suppress project-local Pi system prompts explicitly",
+            "If `gh pr merge --squash --delete-branch` prints a local git/worktree error",
+        ],
+    }
+
+    for reference, expected_phrases in references.items():
+        assert reference.exists()
+        assert f"references/{reference.name}" in skill_text
+        reference_text = reference.read_text()
+        for phrase in expected_phrases:
+            assert phrase in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
+        assert "/Volumes/" not in reference_text
 
 
 def test_pr67_skill_sync_review_fix_lessons_are_durable_skill_reference():
