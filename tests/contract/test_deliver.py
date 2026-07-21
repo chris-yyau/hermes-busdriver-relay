@@ -111,6 +111,94 @@ def invoke(
     return cp, json.loads(cp.stdout)
 
 
+
+def patch_bounded_run(monkeypatch, ns, fake):
+    """Bind a subprocess.run-shaped test double to the bounded production seam.
+
+    The double replaces the primitive, so it also replaces the primitive's CONTRACT — and the two
+    halves it used to drop are the two this repo cares about.
+
+    `limit` was a named sink: declared so the call would not TypeError, then never read. Production
+    spells it `limit: int = MAX_CAPTURED_BYTES`, and a default is frozen at def time, so a double
+    that lets it default to `None` is not a lenient double — it is a different contract, one under
+    which a production caller that dropped the bound still passes. Defaulting to the module's own
+    constant means a site omitting `limit` is exercised against exactly the number production would
+    have used, and a site that WEAKENS it is exercised against the weakened one, where the overflow
+    assertion below can see it.
+
+    And `overflowed` was hardcoded `False`, so no test reaching this seam could ever observe the
+    refusal — `_bounded_run`'s `RuntimeError("child_output_too_large")` and `git_raw`'s
+    `git_output_too_large` were unreachable through the fake, and a double could hand back oversized
+    bytes as though they had arrived, which is the one shape production cannot produce. Production
+    bounds at the pipe and REFUSES over it rather than slicing (a slice cuts the `token:` prefix off
+    a secret and emits the remainder as ordinary text), so the double refuses the same way.
+    """
+    globals_ = ns["run_safe"].__globals__
+
+    def run_shape(cmd, *, limit=None, **kwargs):
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("check", False)
+        # `limit` is CONSUMED here, exactly as production's `_bounded_run` consumes it: it belongs to
+        # the bounded pipe, not to subprocess.run, and forwarding it would hand `Popen` a kwarg it
+        # has never accepted. (The old adapter passed it straight through and got away with it only
+        # because every double happened to be **kwargs-tolerant and every site that set it happened
+        # not to reach a real launch.) The bound is applied instead of relayed:
+        effective_limit = globals_["MAX_CAPTURED_BYTES"] if limit is None else limit
+        cp = fake(cmd, **kwargs)
+        measured = max(len(cp.stdout or ""), len(cp.stderr or ""))
+        if measured > effective_limit:
+            # `_bounded_run` turns an overflowing child into exactly this, and every call site in
+            # deliver already has a handler that renders it as a structured refusal.
+            raise RuntimeError("child_output_too_large")
+        return cp
+
+    monkeypatch.setitem(globals_, "_bounded_run", run_shape)
+    BoundedOutput = globals_["BoundedOutput"]
+
+    def bounded(cmd, *, cwd=None, env=None, timeout=None, stdin_bytes=None, limit=None, text=True):
+        # Production's default, not None: a caller that omits the bound must still be bound.
+        effective_limit = globals_["MAX_CAPTURED_BYTES"] if limit is None else limit
+        kwargs = {
+            "cwd": str(cwd) if cwd else None,
+            "env": env,
+            "timeout": timeout,
+            "text": text,
+            "capture_output": True,
+            "check": False,
+        }
+        if stdin_bytes is not None:
+            kwargs["input"] = stdin_bytes.decode() if text else stdin_bytes
+        try:
+            cp = fake(cmd, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            empty = "" if text else b""
+            stdout = exc.output if exc.output is not None else empty
+            stderr = exc.stderr if exc.stderr is not None else empty
+            return BoundedOutput(124, stdout, stderr, False, True)
+        # Production counts what the child SAID and refuses BOTH streams if either exceeded the
+        # bound. `>` not `>=`: exactly `limit` bytes is not an overflow.
+        measured = max(
+            len(cp.stdout) if cp.stdout is not None else 0,
+            len(cp.stderr) if cp.stderr is not None else 0,
+        )
+        if measured > effective_limit:
+            return BoundedOutput(cp.returncode, "" if text else b"", "" if text else b"", True, False)
+        stdout, stderr = cp.stdout, cp.stderr
+        if text:
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+        else:
+            if isinstance(stdout, str):
+                stdout = stdout.encode()
+            if isinstance(stderr, str):
+                stderr = stderr.encode()
+        return BoundedOutput(cp.returncode, stdout, stderr, False, False)
+
+    monkeypatch.setitem(globals_, "run_bounded", bounded)
+
+
 def test_production_help_discloses_process_scoped_status_authentication_boundary():
     cp = run([sys.executable, str(PRODUCTION_DELIVER), "--help"])
     assert cp.returncode == 0
@@ -529,11 +617,23 @@ def test_execute_verify_policy_blocker_precedes_delivery_status(monkeypatch, cap
     assert data["delivery_status"] is None
     assert data["run_artifact_path"] is None
     assert data["verifiers"] == []
-    assert data["steps"][0] == {
-        "name": "verify",
-        "status": "blocked",
-        "reason": "verifier_containment_unavailable",
-    }
+    assert data["steps"] == [
+        {
+            "name": "finalization_lock",
+            "status": "skipped",
+            "reason": "early_policy_blocker_before_lock",
+        },
+        {
+            "name": "verify",
+            "status": "blocked",
+            "reason": "verifier_containment_unavailable",
+        },
+        {
+            "name": "postflight_reconciliation",
+            "status": "skipped",
+            "reason": "verifier_containment_unavailable",
+        },
+    ]
     assert not {"delivery_status", "pr_grind"} & {step["name"] for step in data["steps"]}
 
 
@@ -673,7 +773,7 @@ def test_delivery_status_non_object_json_fails_closed(monkeypatch):
         stderr = ""
         returncode = 0
 
-    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    patch_bounded_run(monkeypatch, ns, lambda *args, **kwargs: CP())
     data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
 
     assert rc == 0
@@ -690,7 +790,7 @@ def test_delivery_status_invalid_json_stderr_is_bounded(monkeypatch):
         stderr = "e" * 5005
         returncode = 0
 
-    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    patch_bounded_run(monkeypatch, ns, lambda *args, **kwargs: CP())
     data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
 
     assert rc == 0
@@ -759,7 +859,7 @@ def test_delivery_status_error_tails_are_redacted(monkeypatch):
         stderr = f"Authorization: Bearer {secret}"
         returncode = 0
 
-    monkeypatch.setattr(ns["subprocess"], "run", lambda *args, **kwargs: CP())
+    patch_bounded_run(monkeypatch, ns, lambda *args, **kwargs: CP())
     data, _rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 180})())
 
     serialized = json.dumps(data)
@@ -773,7 +873,7 @@ def test_delivery_status_timeout_fails_closed(monkeypatch):
     def raise_timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["helper"], timeout=180, output="partial", stderr="slow")
 
-    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    patch_bounded_run(monkeypatch, ns, raise_timeout)
     data, rc = ns["run_delivery_status"](type("Args", (), {"repo": None, "plugin_root": None, "pr": None, "pr_grind_result_file": None, "delivery_status_timeout": 5})())
 
     assert rc == 124
@@ -783,6 +883,76 @@ def test_delivery_status_timeout_fails_closed(monkeypatch):
     assert data["timeout_seconds"] == 5
     assert data["stdout_tail"] == "partial"
     assert data["stderr"] == "slow"
+
+
+def test_delivery_status_runtime_executes_retained_bytes_not_swappable_path(monkeypatch, tmp_path: Path):
+    """A same-UID actor must not swap the authenticated delivery-status entrypoint.
+
+    The runtime bundle is private but still owned by this UID. A 0700 directory and a 0500 file do
+    not stop its owner replacing `scripts/hermes-busdriver-delivery-status` in the window after the
+    parent authenticates/materializes it and before Python re-opens the pathname at exec. This test
+    performs exactly that replacement at the `_bounded_run` seam and proves the forged clean status
+    cannot become commit authority.
+    """
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["run_delivery_status"].__globals__
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = tmp_path / "trusted-src" / "scripts" / "hermes-busdriver-delivery-status"
+    source.parent.mkdir(parents=True)
+    trusted_payload = {"schema": ns["DELIVERY_STATUS_SCHEMA"], "read_only": True, "ok": False, "reason": "trusted_source_executed"}
+    source.write_text("import json\nprint(json.dumps(%r))\n" % trusted_payload)
+    source.chmod(0o500)
+    relative = "scripts/hermes-busdriver-delivery-status"
+    monkeypatch.setitem(globals_, "DELIVERY_STATUS_RUNTIME_SOURCES", {relative: source})
+    monkeypatch.setitem(globals_, "TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS", {relative: hashlib.sha256(source.read_bytes()).hexdigest()})
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: Path(sys.executable) if name == "python3" else pytest.fail(f"unexpected trusted executable {name}"))
+
+    attacker_ran = tmp_path / "attacker-ran"
+    forged = delivery_status_for_mutation(repo, "draft_changes_need_busdriver_finalization", "commit_litmus_fresh")
+    forged["repo"]["unstaged_entries"] = []
+    forged["repo"]["untracked_entries"] = []
+    forged_script = (
+        "import json, pathlib\n"
+        f"pathlib.Path({str(attacker_ran)!r}).write_text('pwned')\n"
+        f"print(json.dumps({forged!r}))\n"
+    )
+    original_bounded_run = globals_["_bounded_run"]
+
+    def swap_entrypoint_then_exec(cmd, **kwargs):
+        swapped = False
+        for value in cmd:
+            entry = Path(str(value))
+            if entry.name == "hermes-busdriver-delivery-status" and entry.exists():
+                entry.unlink()
+                entry.write_text(forged_script)
+                entry.chmod(0o500)
+                swapped = True
+                break
+        assert swapped, "test did not reach the virtual delivery-status path"
+        return original_bounded_run(cmd, **kwargs)
+
+    monkeypatch.setitem(globals_, "_bounded_run", swap_entrypoint_then_exec)
+    args = argparse.Namespace(
+        repo=str(repo),
+        plugin_root=None,
+        relay_role=None,
+        relay_config=None,
+        relay_role_timeout=None,
+        pr=None,
+        pr_grind_timeout=1,
+        litmus_status_timeout=1,
+        drift_baseline=None,
+        phase0_status_timeout=1,
+        busdriver_state_dir_name=None,
+        pr_grind_result_file=None,
+        delivery_status_timeout=5,
+    )
+
+    data, rc = ns["run_delivery_status"](args)
+
+    assert not attacker_ran.exists(), "delivery-status executed attacker-replaced runtime path"
+    assert ns["delivery_status_mutation_blocker"]((data if rc == 0 else {"ok": False}), "commit") is not None
 
 
 def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monkeypatch):
@@ -805,7 +975,7 @@ def test_default_delivery_status_timeout_covers_pr_grind_and_litmus_budget(monke
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -841,7 +1011,7 @@ def test_delivery_status_forwards_requested_litmus_base_ref(monkeypatch):
         captured["cmd"] = cmd
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -880,7 +1050,7 @@ def test_delivery_status_forwards_relay_role_config_and_includes_default_relay_b
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -928,7 +1098,7 @@ def test_delivery_status_forwards_custom_relay_role_timeout_and_budget(monkeypat
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -970,7 +1140,7 @@ def test_delivery_status_relay_config_without_role_does_not_include_relay_timeou
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -1016,7 +1186,7 @@ def test_delivery_status_timeout_covers_custom_pr_grind_and_litmus_budget(monkey
         captured["timeout"] = kwargs["timeout"]
         return CP()
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     ns["run_delivery_status"](args)
 
@@ -1067,7 +1237,7 @@ def test_delivery_status_forwards_drift_baseline_and_includes_phase0_budget(monk
             captured["timeout"] = kwargs["timeout"]
             return CP()
 
-        monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+        patch_bounded_run(monkeypatch, ns, fake_run)
 
         ns["run_delivery_status"](args)
 
@@ -1237,7 +1407,7 @@ def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Pa
     def raise_timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["slow-loop"], timeout=1, output=b"partial", stderr=b"slow")
 
-    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    patch_bounded_run(monkeypatch, ns, raise_timeout)
     args = type(
         "Args",
         (),
@@ -1260,6 +1430,29 @@ def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Pa
     json.dumps(data)
 
 
+def test_run_pr_grind_loop_refuses_unavailable_python_without_dispatch(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["run_pr_grind_loop"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_LOOP_SHA256", hashlib.sha256(globals_["PR_GRIND_LOOP"].read_bytes()).hexdigest())
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_CHECK_SHA256", hashlib.sha256(globals_["PR_GRIND_CHECK"].read_bytes()).hexdigest())
+    snapshot = {
+        "number": 7, "html_url": "https://github.com/owner/repo/pull/7",
+        "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"full_name": "owner/repo"}},
+    }
+    monkeypatch.setitem(globals_, "github_pr_snapshot", lambda *_args: (snapshot, {"ok": True}, None))
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: (_ for _ in ()).throw(RuntimeError("trusted_root_owned_python3_integrity_failed")))
+    patch_bounded_run(monkeypatch, ns, lambda *_a, **_k: pytest.fail("drifted Python must not dispatch"))
+    args = type("Args", (), {"pr": "7", "max_wait_seconds": 1.0, "poll_interval": 0.0, "max_polls": 1, "check_timeout": 1.0, "plugin_root": None, "expected_repository": "owner/repo"})()
+
+    data, rc = ns["run_pr_grind_loop"](tmp_path, args)
+
+    assert rc == 127
+    assert data["error"] == "pr_grind_runtime_unavailable"
+    assert data["status"] == "blocked"
+    assert "python3_integrity_failed" in data["detail"]
+
+
 def test_run_pr_grind_loop_passes_and_rechecks_exact_pr_identity(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     globals_ = ns["run_pr_grind_loop"].__globals__
@@ -1277,14 +1470,19 @@ def test_run_pr_grind_loop_passes_and_rechecks_exact_pr_identity(monkeypatch, tm
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs["env"]
-        private_loop = Path(cmd[2])
+        private_loop = next(Path(str(value)) for value in cmd if Path(str(value)).name == "hermes-busdriver-pr-grind-loop")
         captured["bundle"] = private_loop.parents[1]
+        captured["stdin_retained"] = kwargs.get("input") == globals_["PR_GRIND_LOOP"].read_bytes()
         captured["checker_exists"] = (captured["bundle"] / "scripts" / "hermes-busdriver-pr-grind-check").is_file()
         captured["script_modes"] = {
             name: stat.S_IMODE((captured["bundle"] / "scripts" / name).stat().st_mode)
             for name in ("hermes-busdriver-pr-grind-loop", "hermes-busdriver-pr-grind-check")
         }
-        captured["trusted_executables_exist"] = all((captured["bundle"] / "trusted-bin" / name).is_file() for name in ("git", "gh", "jq"))
+        # v16-r34c: the bundle must NOT contain a trusted-bin. Copying git/gh/jq beside the scripts
+        # is the defect this migration removed — the copy landed where this UID can write, and macOS
+        # re-resolves its pathname at exec. Asserted as absence rather than deleted, so a
+        # reintroduction fails here instead of passing quietly.
+        captured["trusted_bin_absent"] = not (captured["bundle"] / "trusted-bin").exists()
         payload = bound_safe_loop_payload(tmp_path)
         payload.update({
             "pr": 7,
@@ -1298,7 +1496,7 @@ def test_run_pr_grind_loop_passes_and_rechecks_exact_pr_identity(monkeypatch, tm
         })
         return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
     args = type("Args", (), {
         "pr": "7", "max_wait_seconds": 1.0, "poll_interval": 0.0,
         "max_polls": 1, "check_timeout": 1.0, "expected_repository": "owner/repo",
@@ -1319,13 +1517,78 @@ def test_run_pr_grind_loop_passes_and_rechecks_exact_pr_identity(monkeypatch, tm
         ("--expected-base-sha", "b" * 40),
     ]:
         assert captured["cmd"][captured["cmd"].index(option) + 1] == value
-    assert captured["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
+    # v16-r34c: no HERMES_BUSDRIVER_PRIVATE_RUNTIME. It pointed the child at a `trusted-bin/` of
+    # private git/gh/jq copies; the child derives those from its own frozen root-owned table now, so
+    # there is nothing for a parent to supply and nothing for the flag to select. The private
+    # runtime of relay SCRIPTS below is a different thing and is unchanged — those are our bytes,
+    # digest-pinned, with no root-owned home to point at.
+    assert "HERMES_BUSDRIVER_PRIVATE_RUNTIME" not in captured["env"]
+    assert captured["stdin_retained"] is True
     assert captured["checker_exists"] is True
     assert captured["script_modes"] == {
         "hermes-busdriver-pr-grind-loop": 0o500,
         "hermes-busdriver-pr-grind-check": 0o500,
     }
-    assert captured["trusted_executables_exist"] is True
+    assert captured["trusted_bin_absent"] is True, "a private trusted-bin is back beside the scripts"
+
+
+def test_run_pr_grind_loop_executes_retained_loop_bytes_not_swappable_private_path(monkeypatch, tmp_path: Path):
+    """Deliver's private PR-grind bundle pathname is not the loop execution identity."""
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["run_pr_grind_loop"].__globals__
+    repo = init_repo(tmp_path / "repo-pr-grind-loop-toctou")
+    loop_source = tmp_path / "trusted" / "hermes-busdriver-pr-grind-loop"
+    check_source = tmp_path / "trusted" / "hermes-busdriver-pr-grind-check"
+    loop_source.parent.mkdir(parents=True)
+    payload = bound_safe_loop_payload(repo)
+    loop_source.write_text("import json\nprint(json.dumps(%r))\n" % payload)
+    check_source.write_text("# trusted checker bytes retained beside loop\n")
+    loop_source.chmod(0o500)
+    check_source.chmod(0o500)
+    attacker_ran = tmp_path / "deliver-pr-grind-loop-attacker-ran"
+    attacker = (
+        "import json, pathlib\n"
+        f"pathlib.Path({str(attacker_ran)!r}).write_text('pwned')\n"
+        f"print(json.dumps({payload!r}))\n"
+    )
+    snapshot = {
+        "number": 7,
+        "html_url": "https://github.com/owner/repo/pull/7",
+        "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"full_name": "owner/repo"}},
+    }
+    monkeypatch.setitem(globals_, "PR_GRIND_LOOP", loop_source)
+    monkeypatch.setitem(globals_, "PR_GRIND_CHECK", check_source)
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_LOOP_SHA256", hashlib.sha256(loop_source.read_bytes()).hexdigest())
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_CHECK_SHA256", hashlib.sha256(check_source.read_bytes()).hexdigest())
+    monkeypatch.setitem(globals_, "github_pr_snapshot", lambda *_args: (snapshot, {"ok": True}, None))
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: Path(sys.executable) if name == "python3" else pytest.fail(f"unexpected trusted executable {name}"))
+    original_bounded_run = globals_["_bounded_run"]
+
+    def swap_loop_path_then_exec(cmd, **kwargs):
+        entry = next(Path(str(value)) for value in cmd if Path(str(value)).name == "hermes-busdriver-pr-grind-loop")
+        entry.unlink()
+        entry.write_text(attacker)
+        entry.chmod(0o500)
+        return original_bounded_run(cmd, **kwargs)
+
+    monkeypatch.setitem(globals_, "_bounded_run", swap_loop_path_then_exec)
+    args = argparse.Namespace(
+        pr="7",
+        max_wait_seconds=1.0,
+        poll_interval=0.0,
+        max_polls=1,
+        check_timeout=1.0,
+        expected_repository="owner/repo",
+        plugin_root=None,
+        base=None,
+    )
+
+    data, rc = ns["run_pr_grind_loop"](repo, args)
+
+    assert rc == 0
+    assert data["ok"] is True
+    assert not attacker_ran.exists(), "deliver executed attacker-replaced private PR-grind loop path"
 
 
 def test_execute_pr_grind_rejects_mismatched_loop_decision_status(monkeypatch, capsys, tmp_path: Path):
@@ -1811,7 +2074,7 @@ def test_timeout_verifier_stderr_tail_stays_bounded(monkeypatch, tmp_path: Path)
     def raise_timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["slow"], timeout=5, output="partial", stderr="e" * 5005)
 
-    monkeypatch.setattr(ns["subprocess"], "run", raise_timeout)
+    patch_bounded_run(monkeypatch, ns, raise_timeout)
     result = ns["run_verifiers"](tmp_path, ["slow=python -c pass"], 5)[0]
 
     assert result["returncode"] == 124
@@ -2916,6 +3179,22 @@ def test_lock_source_integrity_failure_blocks_acquire(monkeypatch, tmp_path: Pat
     assert acquired == {"acquired": False, "reason": "trusted_lock_integrity_failed"}
 
 
+def test_lock_acquire_refuses_drifted_python_without_dispatch(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["acquire_finalization_lock"].__globals__
+    monkeypatch.setitem(globals_, "retained_lock_bytes", lambda: b"trusted lock helper")
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: (_ for _ in ()).throw(RuntimeError("trusted_root_owned_python3_integrity_failed")))
+    monkeypatch.setitem(globals_, "run_lock_helper", lambda *_a, **_k: pytest.fail("drifted Python must not dispatch"))
+
+    acquired = ns["acquire_finalization_lock"](tmp_path)
+
+    assert acquired == {
+        "acquired": False,
+        "reason": "finalization_lock_helper_unavailable",
+        "error": "trusted_lock_python_unavailable",
+    }
+
+
 # --- v16-r26B: hostile pathnames must not fabricate status/marker records ---
 
 # Separators that Python's splitlines() treats as line boundaries. git quotes the C0 ones in a
@@ -3115,7 +3394,7 @@ def test_delivery_status_executes_authenticated_private_runtime(monkeypatch, tmp
     )
     trusted_executables = {}
     trusted_digests = {}
-    for name in ("git", "gh", "jq"):
+    for name in ("git", "gh", "jq", "python3"):
         executable = tmp_path / f"trusted-{name}"
         payload = f"trusted {name}\n".encode()
         executable.write_bytes(payload)
@@ -3128,20 +3407,22 @@ def test_delivery_status_executes_authenticated_private_runtime(monkeypatch, tmp
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        assert kwargs["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
-        private = Path(cmd[2])
+        # v16-r34c: no private-runtime flag and no trusted-bin at PATH head. Both belonged to the
+        # copied-executable design; the child derives git/gh/jq from its own frozen root-owned
+        # table. The relay SCRIPT is still privately retained — that part is unchanged, and is what
+        # the remaining assertions cover: our bytes, digest-pinned, with no root-owned home.
+        assert "HERMES_BUSDRIVER_PRIVATE_RUNTIME" not in kwargs["env"]
+        assert "/opt/homebrew" not in kwargs["env"]["PATH"]
+        first_on_path = Path(kwargs["env"]["PATH"].split(os.pathsep)[0])
+        assert first_on_path == Path("/usr/bin"), "a private bin dir is back at PATH head"
+        private = Path(cmd[4])
         assert private != source
         assert private.read_bytes() == trusted_bytes
-        trusted_bin = Path(kwargs["env"]["PATH"].split(os.pathsep)[0])
-        for name, executable in trusted_executables.items():
-            private_executable = trusted_bin / name
-            assert private_executable != executable
-            assert private_executable.read_bytes() == executable.read_bytes()
-            assert private_executable.stat().st_mode & 0o777 == 0o500
+        assert kwargs["input"] == trusted_bytes
         source.write_text("raise SystemExit('mutable source executed')\n")
         return subprocess.CompletedProcess(cmd, 0, '{"ok": true}\n', "")
 
-    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
     args = argparse.Namespace(
         repo=None, plugin_root=None, relay_role=None, relay_config=None,
         relay_role_timeout=90, pr=None, pr_grind_timeout=180,
@@ -3154,38 +3435,63 @@ def test_delivery_status_executes_authenticated_private_runtime(monkeypatch, tmp
 
     assert rc == 0
     assert data == {"ok": True}
-    assert calls[0][:2] == [sys.executable, "-I"]
+    assert calls[0][:2] == [str(trusted_executables["python3"]), "-I"]
 
 
-def test_delivery_status_private_marker_fails_closed_when_runtime_bin_disappears(monkeypatch, tmp_path: Path):
+def test_the_delivery_status_child_needs_no_private_bin_and_has_none_to_lose(monkeypatch, tmp_path: Path):
+    """v16-r34c: replaces test_delivery_status_private_marker_fails_closed_when_runtime_bin_disappears
+    AND the parametrized test_real_delivery_status_child_rejects_private_runtime_mutation_before_git.
+
+    Both tested the same thing: the child noticing that the `trusted-bin/` its parent copied git/gh/jq
+    into had been tampered with — removed, symlinked, chmodded, or rewritten — before it ran git.
+    Six mutations, each carefully proving a detection.
+
+    Detection was the wrong goal. Every one of those mutations was possible because the bundle lived
+    somewhere this UID can write, and detecting a swap is a race the detector does not always win:
+    macOS has no fexecve, so between the child's last check and the kernel's re-resolution of the
+    pathname at exec there is a window, and r34's two-rename ABA fits through it with `st_nlink`
+    still 1 and every descriptor-visible field still matching.
+
+    So there is no bundle now, and that is the property here. The parent materializes only the relay
+    SCRIPTS; the child derives git/gh/jq from its own frozen root-owned table, where this UID cannot
+    write at all. `private_trusted_bin_unavailable` is not a state that can arise because there is
+    no private bin — which is why this test asserts the child WORKS rather than that it refuses.
+    A refusal would also be satisfied by a child that had simply stopped running git.
+    """
     ns = runpy.run_path(str(DELIVER))
-
-    class CP:
-        stdout = json.dumps({"ok": False, "error": "private_trusted_bin_unavailable"})
-        stderr = ""
-        returncode = 2
+    seen = {}
 
     def fake_run(cmd, **kwargs):
-        runtime_root = Path(cmd[2]).parents[1]
-        runtime_bin = runtime_root / "trusted-bin"
-        assert kwargs["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
-        for child in runtime_bin.iterdir():
-            child.unlink()
-        runtime_bin.rmdir()
+        runtime_root = Path(cmd[4]).parents[1]
+        seen["trusted_bin_exists"] = (runtime_root / "trusted-bin").exists()
+        seen["private_runtime_flag"] = "HERMES_BUSDRIVER_PRIVATE_RUNTIME" in kwargs["env"]
+        # The child is the real checker; ask IT which git it would run, in the env it was handed.
         old_env = os.environ.copy()
         try:
             os.environ.clear()
             os.environ.update(kwargs["env"])
             checker = runpy.run_path(str(runtime_root / "scripts" / "hermes-busdriver-pr-grind-check"))
-            with pytest.raises(SystemExit) as exc:
-                checker["trusted_executable_path"]("git")
-            assert json.loads(str(exc.value))["error"] == "private_trusted_bin_unavailable"
+            seen["child_git"] = checker["trusted_executable_path"]("git")
+            seen["child_table"] = checker["TRUSTED_EXECUTABLE_SOURCES"]["git"]
         finally:
             os.environ.clear()
             os.environ.update(old_env)
-        return CP()
+        return subprocess.CompletedProcess(cmd, 0, '{"ok": true}\n', "")
 
-    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    def fake_runtime(runtime_root: Path) -> tuple[Path, bytes]:
+        scripts = runtime_root / "scripts"
+        scripts.mkdir(mode=0o700)
+        status = scripts / "hermes-busdriver-delivery-status"
+        status.write_text("raise SystemExit('test double is intercepted before exec')\n")
+        status.chmod(0o500)
+        checker = scripts / "hermes-busdriver-pr-grind-check"
+        checker.write_bytes((ROOT / "scripts" / "hermes-busdriver-pr-grind-check").read_bytes())
+        checker.chmod(0o500)
+        return status, status.read_bytes()
+
+    globals_ = ns["run_delivery_status"].__globals__
+    monkeypatch.setitem(globals_, "materialize_delivery_status_runtime", fake_runtime)
+    patch_bounded_run(monkeypatch, ns, fake_run)
     args = argparse.Namespace(
         repo=None,
         plugin_root=None,
@@ -3201,90 +3507,45 @@ def test_delivery_status_private_marker_fails_closed_when_runtime_bin_disappears
         busdriver_state_dir_name=None,
     )
 
-    data, rc = ns["run_delivery_status"](args)
+    ns["run_delivery_status"](args)
 
-    assert rc == 2
-    assert data["error"] == "private_trusted_bin_unavailable"
+    assert seen["trusted_bin_exists"] is False, "the parent materialized a private bin again"
+    assert seen["private_runtime_flag"] is False, "the flag that selected that bin is back"
+    # And the child, handed nothing, still resolves git — from the table, not the environment.
+    assert seen["child_git"] == seen["child_table"] == Path("/usr/bin/git")
+    st = os.lstat(seen["child_git"])
+    assert st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ("bin_missing", "entry_missing", "bin_symlink", "entry_symlink", "mode_tamper", "digest_tamper"),
-)
-def test_real_delivery_status_child_rejects_private_runtime_mutation_before_git(
-    monkeypatch, tmp_path: Path, mutation: str
-):
+def test_dispatch_trusted_executable_is_the_validated_root_owned_source(tmp_path: Path):
+    """v16-r34c: replaces test_dispatch_trusted_executable_is_private_immutable_copy.
+
+    That test asserted the copy was private (0500 under a 0700 dir), distinct from its source, and
+    retained across a source mutation. Every one of those was true of the r34 design, and the design
+    was still wrong: macOS has no fexecve, so the kernel re-resolves the COPY'S PATHNAME at exec
+    time, and the copy sits in a directory this UID owns. r34's two-rename ABA moved ours aside and
+    theirs in with `st_nlink` still 1 and every descriptor-visible field still matching. A 0700
+    directory was never a boundary against a writer who owns it.
+
+    Note especially what the old test's monkeypatch demonstrates in hindsight: it pointed
+    TRUSTED_GIT at a tmp_path file and the resolver accepted it. The source was a *variable*. It is
+    a frozen table now, and the assertions below are the ones that could not have been made before:
+    the returned path IS the table's, root-owned, unwritable by us, and SIP-restricted.
+    """
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
-    repo = init_repo(tmp_path / "repo")
-    real_run = subprocess.run
-    sentinel = tmp_path / "sentinel"
-    fallback = tmp_path / "fallback"
-    fallback.mkdir()
 
-    def wrapper(path: Path) -> None:
-        path.write_text(
-            "#!/bin/sh\n"
-            f"printf ran >> {shlex.quote(str(sentinel))}\n"
-            "exec /usr/bin/git \"$@\"\n"
-        )
-        path.chmod(0o500)
+    resolved = ns["trusted_executable_path"]("git")
 
-    def mutate_then_run(cmd, **kwargs):
-        runtime_root = Path(cmd[2]).parents[1]
-        trusted_bin = runtime_root / "trusted-bin"
-        if mutation == "bin_missing":
-            shutil.rmtree(trusted_bin)
-        elif mutation == "entry_missing":
-            (trusted_bin / "git").unlink()
-        elif mutation == "bin_symlink":
-            shutil.rmtree(trusted_bin)
-            wrapper(fallback / "git")
-            os.symlink(fallback, trusted_bin)
-        elif mutation == "entry_symlink":
-            (trusted_bin / "git").unlink()
-            wrapper(fallback / "git")
-            os.symlink(fallback / "git", trusted_bin / "git")
-        elif mutation == "mode_tamper":
-            (trusted_bin / "git").chmod(0o700)
-        elif mutation == "digest_tamper":
-            target = trusted_bin / "git"
-            target.chmod(0o700)
-            wrapper(target)
-        return real_run(cmd, **kwargs)
-
-    monkeypatch.setattr(ns["run_delivery_status"].__globals__["subprocess"], "run", mutate_then_run)
-    args = argparse.Namespace(
-        repo=str(repo), plugin_root=str(tmp_path / "missing-plugin"), pr=None,
-        pr_grind_result_file=None, delivery_status_timeout=60,
-        litmus_base_ref=None, relay_role=None, relay_config=None,
-        relay_role_timeout=10, relay_role_network_budget=1,
-        drift_baseline=None, busdriver_state_dir_name=None,
-    )
-    data, rc = ns["run_delivery_status"](args, include_lock_status=False)
-    assert rc != 0
-    assert str(data.get("error", "")).startswith("private_trusted_")
-    assert not sentinel.exists()
-
-
-def test_dispatch_trusted_executable_is_private_immutable_copy(monkeypatch, tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_DELIVER))
-    globals_ = ns["trusted_executable_path"].__globals__
-    source = tmp_path / "mutable-git"
-    payload = b"trusted executable bytes\n"
-    source.write_bytes(payload)
-    source.chmod(0o700)
-    monkeypatch.setitem(globals_, "TRUSTED_GIT", source)
-    monkeypatch.setitem(globals_["TRUSTED_EXECUTABLE_DIGESTS"], "git", hashlib.sha256(payload).hexdigest())
-
-    private = ns["trusted_executable_path"]("git")
-
-    assert private != source
-    assert private.read_bytes() == payload
-    assert private.stat().st_mode & 0o777 == 0o500
-    assert private.parent.stat().st_mode & 0o777 == 0o700
-    source.write_bytes(b"source changed after authentication\n")
-    assert ns["trusted_executable_path"]("git") == private
-    assert private.read_bytes() == payload
+    assert resolved == ns["TRUSTED_EXECUTABLE_SOURCES"]["git"] == Path("/usr/bin/git")
+    assert not str(resolved).startswith(str(tmp_path)), "a caller-writable path reached dispatch"
+    st = os.lstat(resolved)
+    assert not stat.S_ISLNK(st.st_mode), "a symlinked name is a name someone else can re-point"
+    assert st.st_uid == 0, "a git this UID owns is a git this UID can replace"
+    assert not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    assert st.st_flags & 0x00080000, "SF_RESTRICTED replaces nlink==1 for the shim-backed source"
+    # Revalidated per call rather than retained: the contract is "validated immediately before
+    # dispatch", so the answer is recomputed, not remembered.
+    assert ns["trusted_executable_path"]("git") == resolved
 
 
 def test_direct_commit_preflight_git_edges_use_private_authenticated_path(monkeypatch, tmp_path: Path):
@@ -3315,7 +3576,7 @@ def test_direct_commit_preflight_git_edges_use_private_authenticated_path(monkey
 
     globals_ = ns["git_mutation_config_safety"].__globals__
     monkeypatch.setitem(globals_, "trusted_executable_path", lambda _name: private)
-    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     assert ns["git_mutation_config_safety"](repo) == (True, None)
     assert ns["github_remote_url"](repo) == "https://github.com/owner/repo.git"
@@ -3380,7 +3641,7 @@ def test_unsupported_execute_operation_fails_closed_without_verifier(tmp_path: P
     assert_finalization_blocked(data["decision"])
 
 
-def test_git_output_disables_fsmonitor_and_global_git_config(monkeypatch, tmp_path: Path):
+def test_git_output_status_uses_sandbox_and_refuses_stderr(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo")
     captured = {}
@@ -3395,17 +3656,20 @@ def test_git_output_disables_fsmonitor_and_global_git_config(monkeypatch, tmp_pa
         captured["env"] = kwargs.get("env")
         return FakeCompleted()
 
-    monkeypatch.setattr(ns["git_output"].__globals__["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
 
     rc, out, err = ns["git_output"](repo, "status", "--porcelain=v1", "--untracked-files=all")
 
-    assert rc == 0
-    assert out == " M .claude/litmus-passed.local"
-    assert err == " warning with leading space"
-    assert Path(captured["cmd"][0]).name == "git"
-    assert captured["cmd"][1:5] == ["-C", str(repo), "-c", "core.fsmonitor=false"]
+    assert rc == 126
+    assert out == ""
+    assert err == "git_observation_stderr"
+    assert captured["cmd"][:3] == ["/usr/bin/sandbox-exec", "-p", ns["GIT_OBSERVATION_SANDBOX_PROFILE"]]
+    assert captured["cmd"][3] == str(ns["TRUSTED_EXECUTABLE_SOURCES"]["git-real"])
     assert captured["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
     assert captured["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert captured["env"]["GIT_NO_LAZY_FETCH"] == "1"
+    assert captured["env"]["GIT_ALLOW_PROTOCOL"] == ""
+    assert "SSH_AUTH_SOCK" not in captured["env"]
 
 
 def test_staged_diff_hash_uses_full_diff_bytes(tmp_path: Path):
@@ -3421,7 +3685,10 @@ def test_all_commit_diff_evidence_executes_private_authenticated_git(monkeypatch
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     private_root = tmp_path / "private"
     private_root.mkdir(mode=0o700)
-    private_git = private_root / "git"
+    private_sandbox = private_root / "sandbox-exec"
+    private_sandbox.write_bytes(b"authenticated sandbox\n")
+    private_sandbox.chmod(0o500)
+    private_git = private_root / "git-real"
     private_git.write_bytes(b"authenticated git\n")
     private_git.chmod(0o500)
     seen: list[list[str]] = []
@@ -3432,8 +3699,11 @@ def test_all_commit_diff_evidence_executes_private_authenticated_git(monkeypatch
         stderr = b""
 
     def fake_trusted(name: str) -> Path:
-        assert name == "git"
-        return private_git
+        if name == "sandbox-exec":
+            return private_sandbox
+        if name == "git-real":
+            return private_git
+        raise AssertionError(f"unexpected executable lookup: {name}")
 
     def fake_run(cmd, **_kwargs):
         seen.append(cmd)
@@ -3441,14 +3711,269 @@ def test_all_commit_diff_evidence_executes_private_authenticated_git(monkeypatch
 
     globals_ = ns["staged_diff_hash"].__globals__
     monkeypatch.setitem(globals_, "trusted_executable_path", fake_trusted)
-    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
     repo = tmp_path / "repo"
     repo.mkdir()
     assert ns["staged_diff_hash"](repo)
     assert ns["reviewed_tree_diff_hash"](repo, "a" * 40, "b" * 40)
     assert ns["diff_hash"](repo, "HEAD")
     assert len(seen) == 3
-    assert all(Path(cmd[0]) == private_git for cmd in seen)
+    assert all(Path(cmd[0]) == private_sandbox for cmd in seen)
+    assert all(Path(cmd[3]) == private_git for cmd in seen)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [
+        (0, (False, None)),
+        (1, (True, None)),
+        (2, (False, "staged_diff_status_failed")),
+    ],
+)
+def test_staged_changes_status_routes_through_observation_boundary(
+    monkeypatch, tmp_path: Path, returncode: int, expected: tuple[bool, str | None]
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["staged_changes_status"].__globals__
+    seen: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_observation(repo: Path, *args: str):
+        seen.append((repo, args))
+        return returncode, b"", "observation failed" if returncode not in {0, 1} else ""
+
+    def forbidden_lookup(name: str):
+        raise AssertionError(f"direct executable lookup bypassed observation boundary: {name}")
+
+    monkeypatch.setitem(globals_, "git_observation_raw", fake_observation)
+    monkeypatch.setitem(globals_, "trusted_executable_path", forbidden_lookup)
+    patch_bounded_run(
+        monkeypatch,
+        ns,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("direct bounded run bypassed observation boundary")
+        ),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert ns["staged_changes_status"](repo) == expected
+    assert seen == [
+        (
+            repo,
+            (
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--cached",
+                "--quiet",
+            ),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("diff", "--cached"),
+        ("status", "--porcelain"),
+        ("-c", "alias.hidden=diff", "hidden", "--cached"),
+        ("config", "--get", "remote.origin.url"),
+    ],
+)
+def test_git_raw_rejects_all_invocations_before_executable_resolution(
+    monkeypatch, tmp_path: Path, args: tuple[str, ...]
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["git_raw"].__globals__
+
+    def forbidden_lookup(name: str):
+        raise AssertionError(f"disabled git_raw reached executable lookup: {name}")
+
+    monkeypatch.setitem(globals_, "trusted_executable_path", forbidden_lookup)
+    assert ns["git_raw"](tmp_path, *args) == (126, b"", "git_raw_disabled")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("diff", "--cached"),
+        ("config", "--get", "remote.origin.url"),
+        ("rev-parse", "HEAD"),
+    ],
+)
+def test_git_output_routes_every_verb_through_observation_boundary(
+    monkeypatch, tmp_path: Path, args: tuple[str, ...]
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["git_output"].__globals__
+    seen: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_observation(repo: Path, *observed_args: str):
+        seen.append((repo, observed_args))
+        return 0, b"observed\n", ""
+
+    monkeypatch.setitem(globals_, "git_observation_raw", fake_observation)
+    monkeypatch.setitem(
+        globals_,
+        "git_raw",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("git_output bypassed observation boundary")
+        ),
+    )
+
+    assert ns["git_output"](tmp_path, *args) == (0, "observed", "")
+    assert seen == [(tmp_path, args)]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("symbolic-ref", "refs/remotes/origin/HEAD"),
+        ("remote",),
+        ("rev-parse", "HEAD"),
+        ("rev-parse", "--verify", f"{'a' * 40}^{{commit}}"),
+        ("diff", "--cached", "--name-only", "-z", "--no-renames", "a" * 40, "--"),
+        ("log", "-1", "--format=%B", "a" * 40),
+        ("config", "--get-all", "remote.origin.pushurl"),
+        ("config", "--get-regexp", r"^url\..*\.(pushInsteadOf|insteadOf)$"),
+        ("config", "branch.main.remote"),
+        ("branch", "--show-current"),
+        ("rev-list", "--count", "origin/main..HEAD"),
+        ("ls-tree", "-r", "-z", "--name-only", "a" * 40, "--", ":(literal)x"),
+        ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+    ],
+)
+def test_git_observation_shape_validator_accepts_only_current_read_forms(args: tuple[str, ...]):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert ns["git_observation_args_are_read_only"](args) is True
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (),
+        ("-c", "alias.hidden=diff", "hidden", "--cached"),
+        ("write-tree",),
+        ("commit-tree", "a" * 40),
+        ("symbolic-ref", "HEAD", "refs/heads/attacker"),
+        ("remote", "add", "attacker", "https://example.invalid/repo"),
+        ("branch", "attacker"),
+        ("config", "user.name", "attacker"),
+        ("config", "--add", "alias.hidden", "diff"),
+        ("diff", "--output=/tmp/escape", "HEAD"),
+        ("diff", "--ext-diff", "HEAD"),
+        ("log", "-p", "HEAD"),
+        ("log", "--output=/tmp/escape", "HEAD"),
+        ("rev-list", "--objects", "HEAD"),
+    ],
+)
+def test_git_observation_shape_validator_rejects_aliases_and_mutations(args: tuple[str, ...]):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert ns["git_observation_args_are_read_only"](args) is False
+
+
+def test_git_observation_hardening_uses_validated_verb_not_arbitrary_argument(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["git_observation_raw"].__globals__
+    captured: dict[str, list[str]] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_bounded(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return Completed()
+
+    monkeypatch.setitem(
+        globals_,
+        "trusted_executable_path",
+        lambda name: Path("/usr/bin/sandbox-exec") if name == "sandbox-exec" else Path("/usr/bin/git"),
+    )
+    monkeypatch.setitem(globals_, "_bounded_run", fake_bounded)
+
+    assert ns["git_observation_raw"](tmp_path, "config", "--get-regexp", "diff") == (0, b"", "")
+    argv = captured["argv"]
+    config_at = argv.index("config")
+    assert argv[config_at : config_at + 4] == ["config", "--no-includes", "--get-regexp", "diff"]
+    assert "--no-ext-diff" not in argv
+    assert "--no-textconv" not in argv
+    assert "--ignore-submodules=all" not in argv
+
+
+def test_production_git_output_callsites_exclude_mutating_verbs():
+    tree = ast.parse(PRODUCTION_DELIVER.read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "git_output"
+    ]
+    literal_verbs = {
+        node.args[1].value
+        for node in calls
+        if len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+    }
+    assert not literal_verbs & {"write-tree", "commit-tree", "update-ref", "add", "rm", "restore", "clean", "commit", "push", "fetch"}
+    assert "write-tree" not in literal_verbs
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_safe"
+        and node.args
+        and isinstance(node.args[0], ast.List)
+        and [elt.value for elt in node.args[0].elts if isinstance(elt, ast.Constant)][:2] == ["git", "write-tree"]
+        for node in ast.walk(tree)
+    )
+
+
+def test_run_safe_capture_stdout_decodes_to_plain_oid():
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    effect = ns["run_safe"](["git", "rev-parse", "HEAD"], ROOT, timeout=30, capture_stdout=True)
+
+    assert effect["ok"] is True
+    assert isinstance(effect["stdout"], str)
+    oid = str(effect.get("stdout") or effect.get("stdout_tail") or "").strip()
+    assert re.fullmatch(r"[0-9a-fA-F]{40,64}", oid)
+    assert not oid.startswith("b'")
+
+
+@pytest.mark.parametrize(
+    ("captured", "expected_returncode", "expected_error"),
+    [
+        ((124, "", "", False, True), 124, "timeout"),
+        ((1, "", "", True, False), 1, "stdout_capture_limit_exceeded"),
+    ],
+)
+def test_run_safe_does_not_signal_again_after_bounded_layer_reaps(
+    monkeypatch, captured, expected_returncode: int, expected_error: str
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["run_safe"].__globals__
+
+    class FakeProcess:
+        returncode = captured[0]
+
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda _name: Path("/usr/bin/git"))
+    monkeypatch.setitem(globals_["subprocess"].__dict__, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setitem(
+        globals_,
+        "_bounded_communicate",
+        lambda *args, **kwargs: globals_["BoundedOutput"](*captured),
+    )
+
+    def forbidden_post_reap_signal(_proc):
+        raise AssertionError("run_safe_signalled_reaped_process_group")
+
+    monkeypatch.setitem(globals_, "kill_process_group", forbidden_post_reap_signal)
+    effect = ns["run_safe"](["git", "status"], ROOT, timeout=1)
+
+    assert effect["ok"] is False
+    assert effect["returncode"] == expected_returncode
+    assert effect["error"] == expected_error
 
 
 def test_commit_staged_index_rejects_index_changed_after_review_binding(tmp_path: Path):
@@ -4061,11 +4586,11 @@ def test_fixed_early_blocked_operations_are_disjoint_from_artifact_truth():
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     fixed = set(ns["FIXED_EARLY_BLOCKED_OPERATIONS"])
 
-    assert fixed == {"pre-pr-review", "push", "pr-create", "merge"}
+    assert fixed == {"verify", "pre-pr-review", "push", "pr-create", "merge"}
     assert fixed & set(ns["ARTIFACT_OUTCOME_CONTRACT"]) == set()
     assert fixed & set(ns["AUTHORITY_ALLOWED_MUTATING_OUTCOMES"]) == set()
-    # verify is absent for a sibling reason (its own fixed verifier blocker), so the exact key
-    # set is narrower than "everything not in FIXED_EARLY_BLOCKED_OPERATIONS".
+    # verify is fixed-blocked in the same pre-identity map because installed production contains
+    # no arbitrary verifier executor.
     assert set(ns["ARTIFACT_OUTCOME_CONTRACT"]) == {"pr-grind", "commit"}
     assert ns["MUTATING_ARTIFACT_PHASES"] == {"commit"}
     assert ns["AUTHORITY_ALLOWED_MUTATING_OUTCOMES"] == {"commit": {("committed", "committed")}}
@@ -4128,8 +4653,30 @@ def _production_deliver(repo: Path, plugin: Path, *extra: str, artifact_dir: Pat
     return cp, json.loads(cp.stdout)
 
 
+def test_production_contains_no_verifier_executor_or_legacy_post_reap_signaller():
+    source = PRODUCTION_DELIVER.read_text()
+    tree = ast.parse(source)
+    forbidden = {
+        "parse_verifier", "verifier_error_name", "run_verifiers", "verifier_dispatch_blocker",
+        "kill_process_group",
+    }
+
+    assert not {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in forbidden
+    }
+    assert not [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run_verifiers"
+    ]
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert ns["FIXED_EARLY_BLOCKED_OPERATIONS"]["verify"] == "verifier_containment_unavailable"
+
+
 def test_production_verify_creates_no_run_identity_or_artifact(tmp_path: Path):
-    # main() fixed-blocks execute verify on verifier_dispatch_blocker() before run identity,
+    # main() fixed-blocks execute verify from FIXED_EARLY_BLOCKED_OPERATIONS before run identity,
     # delivery status and artifact handling, so no production verify artifact bytes exist.
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
@@ -4470,7 +5017,7 @@ def test_live_remote_branch_head_preserves_credentials_env(monkeypatch, tmp_path
         return CP()
 
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
-    monkeypatch.setattr(ns["live_remote_branch_head"].__globals__["subprocess"], "run", fake_run)
+    patch_bounded_run(monkeypatch, ns, fake_run)
     assert ns["live_remote_branch_head"](init_repo(tmp_path / "repo"), "feature", "origin") == ("abc123", None)
     assert {k: captured["env"][k] for k in ("SSH_AUTH_SOCK", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")} == {"SSH_AUTH_SOCK": "/tmp/agent.sock", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
@@ -5009,18 +5556,18 @@ def test_commit_staged_index_fails_closed_when_post_commit_status_unavailable(mo
     before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
     (repo / "tracked.txt").write_text("reviewed\n")
     assert run(["git", "add", "tracked.txt"], repo).returncode == 0
-    # git_raw is the single choke point every status read goes through since NUL framing landed.
-    real_git_raw = ns["git_raw"]
+    # Sandboxed git_observation_raw is the single choke point every status read goes through.
+    real_git_observation_raw = ns["git_observation_raw"]
     status_calls = {"count": 0}
 
-    def fake_git_raw(repo_arg, *args):
+    def fake_git_observation_raw(repo_arg, *args):
         if args[:1] == ("status",):
             status_calls["count"] += 1
             if status_calls["count"] > 2:
                 return 128, b"", "status unavailable"
-        return real_git_raw(repo_arg, *args)
+        return real_git_observation_raw(repo_arg, *args)
 
-    monkeypatch.setitem(ns["commit_staged_index"].__globals__, "git_raw", fake_git_raw)
+    monkeypatch.setitem(ns["commit_staged_index"].__globals__, "git_observation_raw", fake_git_observation_raw)
 
     effect = ns["commit_staged_index"](repo, "status unavailable", {"BUSDRIVER_STATE_DIR": ".claude"})
 
@@ -6044,7 +6591,7 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
     globals_ = ns["execute_mutating_operation"].__globals__
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
 
-    # Patched at git_raw: status is NUL-framed now, and git_output delegates here anyway.
+    # Observation status is sandboxed; non-observation lookups still use git_raw.
     def fake_git_raw(_repo, *args):
         if args[:2] == ("rev-parse", "HEAD"):
             return 0, b"reviewed-local-head", ""
@@ -6070,6 +6617,7 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: (None, "remote_branch_not_found"))
     monkeypatch.setitem(globals_, "git_raw", fake_git_raw)
+    monkeypatch.setitem(globals_, "git_observation_raw", fake_git_raw)
     monkeypatch.setitem(globals_, "run_safe", fake_run_safe)
     args = argparse.Namespace(
         operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-pre-push-dirty",
@@ -6232,7 +6780,7 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
             return None, "remote_branch_not_found"
         return "reviewed-local-head", None
 
-    # Patched at git_raw: status is NUL-framed now, and git_output delegates here anyway.
+    # Observation status is sandboxed; non-observation lookups still use git_raw.
     def fake_git_raw(_repo, *args):
         if args[:2] == ("rev-parse", "HEAD"):
             return 0, b"reviewed-local-head", ""
@@ -6255,6 +6803,7 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_raw", fake_git_raw)
+    monkeypatch.setitem(globals_, "git_observation_raw", fake_git_raw)
     monkeypatch.setitem(globals_, "run_safe", lambda _cmd, _repo, **_kwargs: {"ok": True, "returncode": 0})
     args = argparse.Namespace(
         operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-push-status-failed",
@@ -6527,10 +7076,15 @@ def test_authenticated_plugin_snapshot_uses_pinned_commit_not_worktree(monkeypat
     destination = tmp_path / "authenticated-copy"
     assert ns["materialize_authenticated_busdriver_snapshot"](plugin, destination) is True
     assert [name for name, _resolved in trusted_git_calls] == ["git"]
+    # v16-r34c: the git that runs IS the frozen root-owned source, not a 0500 private copy of it.
+    # The three assertions this replaces (`!= TRUSTED_GIT`, same bytes, mode 0500) described the
+    # copy, and the copy was the defect: it lived where this UID can write, and macOS re-resolves
+    # its pathname at exec. The property that actually mattered here is the last one and it is
+    # unchanged — the ambient PATH's git, planted by this test, is never the one that ran.
     authenticated_git = Path(trusted_git_calls[0][1])
-    assert authenticated_git != globals_["TRUSTED_GIT"]
-    assert authenticated_git.read_bytes() == globals_["TRUSTED_GIT"].read_bytes()
-    assert authenticated_git.stat().st_mode & 0o777 == 0o500
+    assert authenticated_git == globals_["TRUSTED_EXECUTABLE_SOURCES"]["git"] == Path("/usr/bin/git")
+    st = os.lstat(authenticated_git)
+    assert st.st_uid == 0 and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
     assert not ambient_git_sentinel.exists()
     assert (destination / "skills" / "litmus" / "scripts" / "run-review-loop.sh").read_text() == "#!/bin/sh\nprintf trusted\\n"
 
@@ -6607,13 +7161,15 @@ def test_run_safe_only_forwards_github_credentials_to_gh(monkeypatch, tmp_path: 
         executable.write_text("#!/bin/sh\nprintf '%s' \"${GH_TOKEN:-missing}\"\n")
         executable.chmod(0o700)
 
+    # v16-r34c: the doubles arrive through the resolver, not through TRUSTED_GH/TRUSTED_GIT.
+    # Rebinding those globals used to be enough BECAUSE the source was a variable — which is the
+    # defect the root-owned contract removed, so it is no longer a seam and should not be. What is
+    # under test here is run_safe's ENV decision (who gets the token), not how git and gh are found;
+    # that is tests/contract/test_trusted_root_owned_execution.py's job, and it would refuse these
+    # tmp_path fakes for user-writable ancestry — correctly — if they were routed through it.
+    doubles = {"gh": gh, "git": git}
     globals_ = ns["run_safe"].__globals__
-    monkeypatch.setitem(globals_, "TRUSTED_GH", gh)
-    monkeypatch.setitem(globals_, "TRUSTED_GIT", git)
-    monkeypatch.setitem(globals_, "TRUSTED_EXECUTABLE_DIGESTS", {
-        "gh": hashlib.sha256(gh.read_bytes()).hexdigest(),
-        "git": hashlib.sha256(git.read_bytes()).hexdigest(),
-    })
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: doubles[name])
 
     gh_effect = ns["run_safe"](["gh"], tmp_path)
     git_effect = ns["run_safe"](["git"], tmp_path)
@@ -7490,15 +8046,25 @@ def test_trusted_path_coverage_guard_catches_an_unguarded_call_site():
 def test_delivery_status_trusted_path_drift_emits_one_fail_closed_envelope(mode, monkeypatch, capsys, tmp_path: Path):
     # Routine pin drift while materializing the delivery-status runtime must land on the
     # documented runtime-integrity failure, not a traceback — plan mode included.
+    #
+    # v16-r34c: the drift is injected into the runtime's SCRIPT pin, because that is the only pin
+    # this path still checks. It used to drift `trusted_executable_path`, which worked because
+    # materialize_delivery_status_executables() copied git/gh/jq into the child's bundle and
+    # resolved them here to do it. That function is gone — the child validates the root-owned
+    # sources itself — so a drifted resolver is now unreachable from this call path and the old
+    # injection proved nothing while still passing its first two assertions. The property under
+    # test is unchanged and is the reason this test exists: ONE fail-closed envelope carrying the
+    # documented reason, never a traceback, in every mode.
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     repo = init_repo(tmp_path / "repo")
     base = tmp_path / "delivery-runs"
     monkeypatch.setenv(ARTIFACT_ENV, str(base))
 
-    def drifted(_name: str):
-        raise RuntimeError("trusted_runtime_executable_integrity_failed:git")
-
-    monkeypatch.setitem(ns["main"].__globals__, "trusted_executable_path", drifted)
+    monkeypatch.setitem(
+        ns["main"].__globals__["TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS"],
+        "scripts/hermes-busdriver-delivery-status",
+        "0" * 64,
+    )
     argv = [
         str(PRODUCTION_DELIVER), "--repo", str(repo),
         "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
@@ -7525,13 +8091,19 @@ def test_delivery_status_trusted_path_drift_emits_one_fail_closed_envelope(mode,
 
 
 def test_run_delivery_status_trusted_path_drift_returns_its_runtime_integrity_failure(monkeypatch, tmp_path: Path):
+    """v16-r34c: drift is injected into the runtime's SCRIPT pin — the only pin this path still
+    checks. See the sibling envelope test above for why the resolver is no longer reachable here:
+    run_delivery_status() materializes the relay scripts and nothing else, because the child
+    validates the root-owned git/gh/jq itself rather than being handed copies. The assertion is
+    unchanged: the failure comes back as this function's documented error, not as an exception."""
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     repo = init_repo(tmp_path / "repo")
 
-    def drifted(_name: str):
-        raise RuntimeError("trusted_executable_integrity_failed:git")
-
-    monkeypatch.setitem(ns["run_delivery_status"].__globals__, "trusted_executable_path", drifted)
+    monkeypatch.setitem(
+        ns["run_delivery_status"].__globals__["TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS"],
+        "scripts/hermes-busdriver-delivery-status",
+        "0" * 64,
+    )
     args = argparse.Namespace(
         repo=str(repo), plugin_root=None, pr=None, pr_grind_result_file=None,
         drift_baseline=None, busdriver_state_dir_name=None, relay_role=None, relay_config=None,
@@ -7678,7 +8250,7 @@ def test_git_output_keeps_timeout_and_launch_failure_channels_distinct(monkeypat
     def timing_out(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd="git", timeout=30)
 
-    monkeypatch.setitem(ns["git_output"].__globals__, "subprocess", type("S", (), {"run": staticmethod(timing_out), "TimeoutExpired": subprocess.TimeoutExpired})())
+    patch_bounded_run(monkeypatch, ns, timing_out)
     rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
     assert (rc, out) == (124, "")
     assert "timed out" in err
@@ -7686,7 +8258,7 @@ def test_git_output_keeps_timeout_and_launch_failure_channels_distinct(monkeypat
     def failing_launch(*_args, **_kwargs):
         raise OSError("exec format error")
 
-    monkeypatch.setitem(ns["git_output"].__globals__, "subprocess", type("S", (), {"run": staticmethod(failing_launch), "TimeoutExpired": subprocess.TimeoutExpired})())
+    patch_bounded_run(monkeypatch, ns, failing_launch)
     rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
     assert (rc, out) == (127, "")
     assert "exec format error" in err
@@ -7698,15 +8270,11 @@ def test_git_output_decodes_non_utf8_paths_without_traceback(monkeypatch, tmp_pa
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     repo = init_repo(tmp_path / "repo-git-output-bytes")
 
-    class FakeCompleted:
-        returncode = 0
-        stdout = b"weird-\xff-name.txt\x00"
-        stderr = b"warning: \xfe\n"
-
+    globals_ = ns["git_output"].__globals__
     monkeypatch.setitem(
-        ns["git_output"].__globals__,
-        "subprocess",
-        type("S", (), {"run": staticmethod(lambda *_a, **_k: FakeCompleted()), "TimeoutExpired": subprocess.TimeoutExpired})(),
+        globals_,
+        "git_observation_raw",
+        lambda *_args: (0, b"weird-\xff-name.txt\x00", "warning: �"),
     )
 
     rc, out, err = ns["git_output"](repo, "ls-tree", "-r", "-z", "--name-only", "HEAD")
@@ -8548,3 +9116,53 @@ def test_genuine_marker_path_is_still_allowed():
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
 
     assert ns["blocking_dirty_entries"]([" M .claude/freeze.local"], ns["allowed_marker_paths"]([".claude"])) == []
+
+
+# --- v16-r34 item 7: the double must be able to fail the bound it stands in for -------------------
+
+
+def test_the_bounded_adapter_refuses_an_oversized_child_rather_than_hiding_it(monkeypatch):
+    """A test double for a BOUND that can never fail the bound is not a double, it is a bypass.
+
+    r33's adapter declared `limit` and never read it, and hardcoded `overflowed=False`. Under it
+    `_bounded_run`'s `RuntimeError("child_output_too_large")` and `git_raw`'s `git_output_too_large`
+    were unreachable, and a production caller that had dropped its bound outright still passed every
+    test in this file — the assertions could not tell a bounded pipe from an unbounded one.
+
+    So this asserts the property the rest of the suite's bound-related tests silently rest on: with
+    the adapter installed, a child that says more than it is allowed to is still refused, at both
+    seams, with production's own semantics — refused whole rather than sliced, because a slice cuts
+    the `token:` prefix off a secret and emits the remainder as ordinary text.
+    """
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["run_safe"].__globals__
+    limit = globals_["MAX_CAPTURED_BYTES"]
+
+    def oversized(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "x" * (limit + 1), "")
+
+    patch_bounded_run(monkeypatch, ns, oversized)
+
+    # The run_bounded seam: production refuses both streams and reports the overflow.
+    result = globals_["run_bounded"](["git", "status"], timeout=30)
+    assert result.overflowed is True, "the adapter cannot report an overflow — the bound is unverified"
+    assert result.stdout == "" and result.stderr == "", "overflowing output must be refused, not sliced"
+
+    # The _bounded_run seam: production's RuntimeError channel, which every call site already handles.
+    with pytest.raises(RuntimeError, match="child_output_too_large"):
+        globals_["_bounded_run"](["git", "status"])
+
+
+def test_the_bounded_adapter_lets_an_in_bound_child_through_untouched(monkeypatch):
+    """The other side of the same coin: the double must not refuse the ordinary case either."""
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["run_safe"].__globals__
+    limit = globals_["MAX_CAPTURED_BYTES"]
+    payload = "x" * limit  # exactly the bound is not an overflow
+
+    patch_bounded_run(monkeypatch, ns, lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, payload, ""))
+
+    result = globals_["run_bounded"](["git", "status"], timeout=30)
+    assert result.overflowed is False
+    assert result.stdout == payload
+    assert globals_["_bounded_run"](["git", "status"]).stdout == payload

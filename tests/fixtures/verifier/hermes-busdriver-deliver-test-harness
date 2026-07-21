@@ -1,17 +1,234 @@
 #!/usr/bin/env python3
-"""Contract-test-only verifier dependency injection for delivery.
+"""Contract-test-only arbitrary-verifier harness for delivery.
 
-Production has no parser flag or environment variable that enables verifier
-execution. This non-installed harness preserves lower-level verifier contracts
-without exposing the unsafe production dispatch surface.
+Installed production contains no verifier parser, executor, or dormant unlock
+branch. This source-separated, non-installed harness preserves the lower-level
+verifier/redaction/artifact contracts without reopening production dispatch.
 """
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
+import argparse
+import json
+import os
+import re
 import runpy
+import shlex
+import subprocess
+import sys
+import tempfile
+import types
+
 
 IS_MAIN = __name__ == "__main__"
 ROOT = Path(__file__).resolve().parents[3]
-ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-deliver"))
-ns["main"].__globals__["verifier_dispatch_blocker"] = lambda: None
-globals().update(ns)
+DELIVERY_STATUS_HARNESS = ROOT / "tests" / "fixtures" / "delivery-status-test-harness"
+VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
+
+fixture_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+fixture_parser.add_argument("--pr-grind-result-file")
+fixture_args, remaining = fixture_parser.parse_known_args(sys.argv[1:])
+sys.argv[1:] = remaining
+
+production = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-deliver"))
+production_globals = production["main"].__globals__
+production_main = production["main"]
+
+# The production dispatcher authenticates and executes a retained production delivery-status.
+# This non-installed harness substitutes the source-separated status harness so fixture result
+# injection remains test-only all the way down the child edge.
+production_globals["materialize_delivery_status_runtime"] = lambda _runtime_root: (DELIVERY_STATUS_HARNESS, DELIVERY_STATUS_HARNESS.read_bytes())
+production_globals["FIXTURE_PR_GRIND_RESULT_FILE"] = fixture_args.pr_grind_result_file
+
+
+def parse_verifier(item: str, index: int) -> tuple[str, str]:
+    if VERIFIER_LABEL.match(item):
+        name, command = item.split("=", 1)
+        command = command.strip()
+        if not command:
+            raise ValueError("empty verifier command")
+        return name.strip(), command
+    command = item.strip()
+    if not command:
+        raise ValueError("empty verifier command")
+    return f"verifier_{index}", command
+
+
+def verifier_error_name(item: str, index: int) -> str:
+    if VERIFIER_LABEL.match(item):
+        name, _command = item.split("=", 1)
+        return name.strip() or f"verifier_{index}"
+    return f"verifier_{index}"
+
+
+def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[str, Any]]:
+    """Fixture-only executor; installed production deliberately has no equivalent."""
+    results: list[dict[str, Any]] = []
+    verifier_home = tempfile.TemporaryDirectory(prefix="hermes-deliver-verifier-home-")
+    verifier_env = {
+        "HOME": verifier_home.name,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", ""),
+        "TMPDIR": os.environ.get("TMPDIR", tempfile.gettempdir()),
+    }
+    bounded_run = production_globals["_bounded_run"]
+    tail = production_globals["tail"]
+    tail_limit = production_globals["TAIL_LIMIT"]
+    for index, item in enumerate(verifiers, start=1):
+        try:
+            name, command = parse_verifier(item, index)
+            argv = shlex.split(command)
+            if not argv:
+                raise ValueError("empty verifier command")
+        except ValueError as exc:
+            results.append({
+                "name": verifier_error_name(item, index),
+                "command": item,
+                "returncode": 2,
+                "ok": False,
+                "stdout_tail": "",
+                "stderr_tail": str(exc),
+            })
+            continue
+        try:
+            completed = bounded_run(
+                argv, cwd=str(repo), shell=False, text=True, check=False,
+                timeout=timeout, env=verifier_env,
+            )
+            results.append({
+                "name": name,
+                "command": command,
+                "returncode": completed.returncode,
+                "ok": completed.returncode == 0,
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+            })
+        except subprocess.TimeoutExpired as exc:
+            timeout_prefix = f"timeout after {timeout}s\n"
+            stderr_tail = timeout_prefix + tail(exc.stderr, max(0, tail_limit - len(timeout_prefix)))
+            results.append({
+                "name": name,
+                "command": command,
+                "returncode": 124,
+                "ok": False,
+                "stdout_tail": tail(exc.stdout),
+                "stderr_tail": stderr_tail.rstrip(),
+            })
+        except (OSError, RuntimeError) as exc:
+            results.append({
+                "name": name,
+                "command": command,
+                "returncode": 127,
+                "ok": False,
+                "stdout_tail": "",
+                "stderr_tail": tail(f"{type(exc).__name__}: {exc}"),
+            })
+    verifier_home.cleanup()
+    return results
+
+
+# Make the fixture executor visible to runpy-based unit tests and to helpers whose globals are the
+# loaded production namespace. This is dependency injection into a test-only source boundary, not
+# a production flag or environment switch.
+production_globals["parse_verifier"] = parse_verifier
+production_globals["verifier_error_name"] = verifier_error_name
+production_globals["run_verifiers"] = run_verifiers
+
+
+def verifier_fixture_main() -> int:
+    args = production_globals["parse_args"]()
+    if not (args.mode == "execute" and args.operation == "verify"):
+        return production_main()
+
+    if not args.run_id:
+        args.run_id = production_globals["new_run_id"]()
+    delivery_status, status_rc = production_globals["run_delivery_status"](args)
+    delivery_ok = bool(delivery_status.get("ok"))
+    verifiers: list[dict[str, Any]] = []
+
+    if not delivery_ok:
+        reason = "delivery_status_failed"
+        result_ok = False
+        result_decision = production_globals["decision"]("blocked", reason)
+        returncode = status_rc or 1
+    elif not args.verifier:
+        reason = "no_verifiers"
+        result_ok = False
+        result_decision = production_globals["decision"]("blocked", reason)
+        returncode = 2
+    else:
+        repo = Path(args.repo or ".").expanduser().resolve()
+        verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
+        result_ok = all(item["ok"] for item in verifiers)
+        reason = "verified" if result_ok else "verifier_failed"
+        result_decision = production_globals["decision"]("verified" if result_ok else "blocked", reason)
+        returncode = 0 if result_ok else 1
+
+    result = {
+        "schema": production_globals["SCHEMA"],
+        "version": 1,
+        "ok": result_ok,
+        "mode": args.mode,
+        "operation": production_globals["effective_operation"](args),
+        "repo": delivery_status.get("repo"),
+        "pr": production_globals["pr_summary"](args.pr, delivery_status),
+        "delivery_status": delivery_status,
+        "pr_grind_loop": None,
+        "mutating_run": None,
+        "verifiers": verifiers,
+        "steps": production_globals["steps_for"](reason, args.operation),
+        "decision": result_decision,
+        "run": production_globals["delivery_run"](args, delivery_status, result_decision, reason),
+        "run_artifact_path": None,
+    }
+    result = production_globals["redact_value"](result)
+    try:
+        production_globals["write_artifact"](result)
+    except (
+        OSError,
+        production_globals["ArtifactDirectoryInvalid"],
+        production_globals["ArtifactTooLarge"],
+    ) as exc:
+        artifact_error = production_globals["redact_text"](str(exc))
+        result["ok"] = False
+        result["run_artifact_error"] = artifact_error
+        result["decision"] = production_globals["decision"]("blocked", "artifact_write_failed")
+        result["mutating_run"] = None
+        if isinstance(result.get("run"), dict):
+            result["run"]["status"] = "blocked"
+            result["run"]["reason"] = "artifact_write_failed"
+            result["run"]["authority"] = {
+                key: False for key in production_globals["BLOCKED_FLAGS"]
+            }
+            result["run"]["artifacts"] = []
+        result["steps"] = production_globals["steps_for"]("artifact_write_failed")
+        returncode = 1
+
+    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    return returncode
+
+
+# Bind the fixture entry point to the production namespace. Existing runpy tests deliberately
+# monkeypatch `main.__globals__`; keeping that namespace is what makes their patches exercise the
+# real dispatcher rather than this wrapper's module dictionary.
+production_globals["production_globals"] = production_globals
+production_globals["production_main"] = production_main
+production_globals["run_verifiers"] = run_verifiers
+fixture_main = types.FunctionType(
+    verifier_fixture_main.__code__, production_globals, name="main",
+)
+
+# Export the loaded production helpers for existing runpy contract tests, then restore the fixture
+# symbols that intentionally shadow the missing production executor and main entry point.
+globals().update(production)
+globals().update({
+    "parse_verifier": parse_verifier,
+    "verifier_error_name": verifier_error_name,
+    "run_verifiers": run_verifiers,
+    "main": fixture_main,
+})
+
 if IS_MAIN:
-    raise SystemExit(ns["main"]())
+    raise SystemExit(fixture_main())
