@@ -1,10 +1,15 @@
 import argparse
+import ast
+import contextlib
+import copy
 import hashlib
+import hmac
 import json
 import os
 import runpy
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import pytest
@@ -559,11 +564,14 @@ def test_production_atomic_blockers_precede_delivery_status(
     assert data["run_artifact_path"] is None
     assert data["run"]["run_id"] is None
     assert data["run"]["created_at"] is None
+    assert data["mutating_run"] is None
     assert data["steps"][0] == {
         "name": "finalization_lock",
         "status": "skipped",
         "reason": "early_policy_blocker_before_lock",
     }
+    if operation != "plan":
+        assert ns["FIXED_EARLY_BLOCKED_OPERATIONS"][operation] == reason
 
 
 @pytest.mark.parametrize(
@@ -1510,33 +1518,32 @@ def test_execute_verify_runs_verifier_and_writes_hermes_artifact(tmp_path: Path)
 
 def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
+    missing_repo = tmp_path / "missing-repo"
     plugin = fake_busdriver(tmp_path / "busdriver")
     artifact_dir = tmp_path / "delivery-runs"
-    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
+    # commit against a missing repo is a reachable production producer: delivery status fails
+    # before any mutation and main persists the blocked delivery_status artifact. (Harness
+    # verify runs also write files, but those are not production-valid durable artifacts.)
     cp_first, first_data = invoke(
-        repo,
+        missing_repo,
         plugin,
         "--mode",
         "execute",
         "--operation",
-        "verify",
+        "commit",
         "--run-id",
         "lookup-123",
-        "--verifier",
-        f"first={verifier_cmd}",
         artifact_dir=artifact_dir,
     )
     cp_second, second_data = invoke(
-        repo,
+        missing_repo,
         plugin,
         "--mode",
         "execute",
         "--operation",
-        "verify",
+        "commit",
         "--run-id",
         "lookup-123",
-        "--verifier",
-        f"second={verifier_cmd}",
         artifact_dir=artifact_dir,
     )
     first_artifact = Path(first_data["run_artifact_path"])
@@ -1617,8 +1624,9 @@ def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_
         for path in artifact_dir.iterdir()
     }
 
-    assert cp_first.returncode == 0
-    assert cp_second.returncode == 0
+    # both producers fail closed at the delivery-status check; the blocked artifact is still durable
+    assert cp_first.returncode == 2
+    assert cp_second.returncode == 2
     assert cp.returncode == 1
     assert before == after
     assert data["ok"] is False
@@ -1637,23 +1645,23 @@ def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_
 
 def test_status_mode_rejects_modified_legacy_v1_artifact_without_writer_authentication(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
+    missing_repo = tmp_path / "missing-repo"
     plugin = fake_busdriver(tmp_path / "busdriver")
     artifact_dir = tmp_path / "delivery-runs"
-    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
-    cp_verify, verify_data = invoke(
-        repo,
+    # commit against a missing repo is a reachable production producer: it fails the delivery-status
+    # check before any mutation and persists a structurally valid blocked artifact.
+    cp_producer, producer_data = invoke(
+        missing_repo,
         plugin,
         "--mode",
         "execute",
         "--operation",
-        "verify",
+        "commit",
         "--run-id",
         "legacy-123",
-        "--verifier",
-        f"ok={verifier_cmd}",
         artifact_dir=artifact_dir,
     )
-    artifact = Path(verify_data["run_artifact_path"])
+    artifact = Path(producer_data["run_artifact_path"])
     legacy_payload = json.loads(artifact.read_text())
     legacy_payload["decision"].pop("marker_write_allowed")
     legacy_payload["run"]["authority"].pop("marker_write_allowed")
@@ -1661,7 +1669,7 @@ def test_status_mode_rejects_modified_legacy_v1_artifact_without_writer_authenti
 
     cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "legacy-123", artifact_dir=artifact_dir)
 
-    assert cp_verify.returncode == 0
+    assert cp_producer.returncode == 2
     assert cp.returncode == 1
     assert data["status_lookup"]["found"] is False
     assert "artifact_path" not in data["status_lookup"]
@@ -1674,32 +1682,31 @@ def test_status_mode_returns_latest_valid_failed_delivery_status_artifact(tmp_pa
     missing_repo = tmp_path / "missing-repo"
     plugin = fake_busdriver(tmp_path / "busdriver")
     artifact_dir = tmp_path / "delivery-runs"
-    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
 
+    # older: blocked commit artifact from a valid repo with nothing staged.
     cp_ok, ok_data = invoke(
         repo,
         plugin,
         "--mode",
         "execute",
         "--operation",
-        "verify",
+        "commit",
         "--run-id",
         "lookup-failed-latest",
-        "--verifier",
-        f"ok={verifier_cmd}",
+        "--commit-message",
+        "nothing staged",
         artifact_dir=artifact_dir,
     )
+    # newer: delivery_status_failed commit artifact from a missing repo.
     cp_failed, failed_data = invoke(
         missing_repo,
         plugin,
         "--mode",
         "execute",
         "--operation",
-        "verify",
+        "commit",
         "--run-id",
         "lookup-failed-latest",
-        "--verifier",
-        f"skip={verifier_cmd}",
         artifact_dir=artifact_dir,
     )
     ok_artifact = Path(ok_data["run_artifact_path"])
@@ -1709,7 +1716,7 @@ def test_status_mode_returns_latest_valid_failed_delivery_status_artifact(tmp_pa
 
     cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "lookup-failed-latest", artifact_dir=artifact_dir)
 
-    assert cp_ok.returncode == 0
+    assert cp_ok.returncode != 0
     assert cp_failed.returncode != 0
     assert cp.returncode == 1
     assert data["status_lookup"] == {
@@ -1919,7 +1926,8 @@ def test_artifact_write_failure_cleans_temp_file_and_clears_path(monkeypatch, tm
     artifact_dir = tmp_path / "delivery-runs"
     monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
 
-    def fail_replace(_src, _dst):
+    # Kwargs-tolerant: the artifact replace is descriptor-relative (src_dir_fd/dst_dir_fd).
+    def fail_replace(*_args, **_kwargs):
         raise OSError("replace failed")
 
     monkeypatch.setattr(ns["os"], "replace", fail_replace)
@@ -1966,7 +1974,738 @@ def test_artifact_write_failure_does_not_publish_phantom_path(tmp_path: Path):
     assert_finalization_blocked(data["decision"])
 
 
-def test_artifact_write_failure_after_completed_mutation_preserves_side_effect_status(monkeypatch, capsys, tmp_path: Path):
+def artifact_write_error(ns: dict, kind: str) -> Exception:
+    # The three failures write_artifact can raise before/while writing: an OSError from the write
+    # itself, the directory guard's RuntimeError subclass, and the over-limit guard's. main() must
+    # route all of them to the same redacted stdout fallback. ns.get keeps the pre-repair failure
+    # semantic (a bare RuntimeError escaping main) rather than a KeyError on a missing name.
+    if kind == "oserror":
+        return OSError("artifact disk full")
+    if kind == "too_large":
+        return ns.get("ArtifactTooLarge", RuntimeError)("delivery_artifact_too_large")
+    return ns.get("ArtifactDirectoryInvalid", RuntimeError)("delivery_artifact_directory_invalid")
+
+
+ARTIFACT_WRITE_ERROR_KINDS = ["oserror", "directory_guard", "too_large"]
+
+
+def test_artifact_base_symlink_reaches_writer_guard_and_main_fails_closed(tmp_path: Path):
+    # A production-controlled artifact base that is a symlink to a real directory survives
+    # mkdir(exist_ok=True) and reaches the writer's directory guard. main() must emit the redacted
+    # fail-closed JSON fallback rather than letting the guard's RuntimeError escape.
+    real_dir = tmp_path / "real-runs"
+    real_dir.mkdir()
+    base_symlink = tmp_path / "runs-link"
+    base_symlink.symlink_to(real_dir, target_is_directory=True)
+
+    env = os.environ.copy()
+    env[ARTIFACT_ENV] = str(base_symlink)
+    cp = run([
+        sys.executable, str(PRODUCTION_DELIVER),
+        "--repo", str(tmp_path / "missing-repo"),
+        "--plugin-root", str(tmp_path / "missing-plugin"),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+    ], env=env)
+
+    assert cp.returncode == 1
+    assert "Traceback" not in cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["ok"] is False
+    assert data["run_artifact_path"] is None
+    assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in BLOCKED_KEYS}}
+    assert data["run"]["status"] == "blocked"
+    assert data["run"]["reason"] == "artifact_write_failed"
+    assert data["run"]["artifacts"] == []
+    assert data["mutating_run"] is None
+    assert_finalization_blocked(data["decision"])
+    # The guard must stay fail closed: the symlink is not followed and no artifact bytes exist.
+    assert base_symlink.is_symlink()
+    assert list(real_dir.iterdir()) == []
+
+
+# --- Ancestor-safe artifact directory I/O ---------------------------------------------------
+#
+# The r15 guard rejected only a final-component base symlink. The property under test here is
+# broader: NO symlink at any existing component of the configured artifact directory may be
+# followed for creation, writing, lookup, or external-artifact detection. Each test drives a
+# real filesystem layout under tmp_path rather than a mocked path object, because the whole
+# proof is about what the kernel does with O_NOFOLLOW, not about what Path claims.
+
+
+def _open_fd_count() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def _nofollow_payload(run_id: str, repo_root: Path) -> dict:
+    """A structurally valid, reachable pr-grind artifact body, unsigned.
+
+    write_artifact adds the process-scoped writer authentication, so a payload written through
+    it is accepted by the same-process authenticated lookup while the key is live.
+    """
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    return {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "pr-grind",
+        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": "pr_grind",
+            "status": "pr_grind_clean",
+            "reason": "latest_pr_head_clean_read_only",
+            "repo_root": str(repo_root),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+        "run_artifact_path": None,
+    }
+
+
+def _invoke_production_commit(base: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env[ARTIFACT_ENV] = str(base)
+    return run([
+        sys.executable, str(PRODUCTION_DELIVER),
+        "--repo", str(tmp_path / "missing-repo"),
+        "--plugin-root", str(tmp_path / "missing-plugin"),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+    ], env=env)
+
+
+def _assert_artifact_write_failed_envelope(cp: subprocess.CompletedProcess[str]) -> dict:
+    assert cp.returncode == 1
+    assert "Traceback" not in cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["ok"] is False
+    assert data["run_artifact_path"] is None
+    assert data["decision"] == {"status": "blocked", "reason": "artifact_write_failed", **{key: False for key in BLOCKED_KEYS}}
+    assert data["run"]["status"] == "blocked"
+    assert data["run"]["reason"] == "artifact_write_failed"
+    assert data["run"]["artifacts"] == []
+    assert data["mutating_run"] is None
+    assert_finalization_blocked(data["decision"])
+    return data
+
+
+def test_artifact_base_ancestor_symlink_is_not_followed_and_main_fails_closed(tmp_path: Path):
+    # /safe/link/runs where `link` is a symlink to a real directory: the final component is not
+    # itself a symlink, so the r15 final-component guard passes it and mkdir(parents=True)
+    # traverses the link. The no-follow traversal must reject it before anything is created.
+    real_dir = tmp_path / "real-parent"
+    real_dir.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real_dir, target_is_directory=True)
+
+    _assert_artifact_write_failed_envelope(_invoke_production_commit(link / "runs", tmp_path))
+
+    assert link.is_symlink()
+    assert list(real_dir.iterdir()) == [], "artifact tree was created through the ancestor symlink"
+
+
+def test_artifact_base_deep_ancestor_symlink_is_not_followed(tmp_path: Path):
+    # The symlink is two levels above the final component; every existing component must be
+    # traversed no-follow, not just the base's immediate parent.
+    real_dir = tmp_path / "real-root"
+    (real_dir / "nested").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real_dir, target_is_directory=True)
+
+    _assert_artifact_write_failed_envelope(_invoke_production_commit(link / "nested" / "runs", tmp_path))
+
+    assert link.is_symlink()
+    assert list((real_dir / "nested").iterdir()) == []
+
+
+def test_artifact_base_regular_file_component_fails_closed(tmp_path: Path):
+    # An existing non-directory component: mkdir cannot replace it and the no-follow open must
+    # route through the same expected-failure fallback rather than an escaping exception.
+    occupied = tmp_path / "occupied"
+    occupied.write_text("not a directory")
+
+    _assert_artifact_write_failed_envelope(_invoke_production_commit(occupied / "runs", tmp_path))
+
+    assert occupied.read_text() == "not a directory"
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory permission bits")
+def test_artifact_base_unsearchable_component_fails_closed(tmp_path: Path):
+    # A permission error on an existing component is an expected artifact-directory failure.
+    walled = tmp_path / "walled"
+    walled.mkdir(mode=0o000)
+    try:
+        _assert_artifact_write_failed_envelope(_invoke_production_commit(walled / "runs", tmp_path))
+    finally:
+        walled.chmod(0o700)
+
+
+def test_writer_creates_nested_missing_path_with_safe_modes_and_signed_lookup(monkeypatch, tmp_path: Path):
+    # The positive path: a normal nested missing directory is created 0700 component by
+    # component, the artifact lands 0600, no temp file survives, and the same-process signed
+    # lookup accepts it while the writer key is live.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "outer" / "inner" / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "nested-writer-ok"
+    payload = _nofollow_payload(run_id, tmp_path)
+
+    before_fds = _open_fd_count()
+    ns["write_artifact"](payload)
+    assert _open_fd_count() == before_fds, "write_artifact leaked a descriptor"
+
+    path = Path(payload["run_artifact_path"])
+    assert path.is_file() and not path.is_symlink()
+    assert stat.S_IMODE(path.lstat().st_mode) == 0o600
+    assert stat.S_IMODE(base.lstat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "outer").lstat().st_mode) == 0o700
+    assert [entry.name for entry in base.iterdir()] == [path.name], "temp file survived the write"
+    assert payload["run"]["artifacts"] == [{"kind": "result", "path": str(path)}]
+
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None
+    assert found[0] == path
+    assert found[1]["run"]["run_id"] == run_id
+
+
+def test_artifact_lookup_does_not_follow_ancestor_symlink(monkeypatch, tmp_path: Path):
+    # A correctly shaped, correctly signed artifact behind an ancestor symlink is not evidence:
+    # the lookup must refuse to traverse the link even though the target content would pass
+    # every structural and authentication check.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    real_parent = tmp_path / "real-parent"
+    runs = real_parent / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(runs))
+    run_id = "ancestor-lookup"
+    ns["write_artifact"](_nofollow_payload(run_id, tmp_path))
+    assert ns["artifact_for_run_id"](run_id) is not None, "control: the artifact is valid via its real path"
+
+    link = tmp_path / "link"
+    link.symlink_to(real_parent, target_is_directory=True)
+    before_fds = _open_fd_count()
+    monkeypatch.setenv(ARTIFACT_ENV, str(link / "delivery-runs"))
+
+    assert ns["artifact_for_run_id"](run_id) is None
+    assert _open_fd_count() == before_fds, "lookup leaked a descriptor"
+
+    status_args = argparse.Namespace(mode="status", operation="status", run_id=run_id, pr=None, pretty=False)
+    result, rc = ns["status_mode_result"](status_args)
+    assert rc != 0
+    assert result["status_lookup"]["found"] is False
+    assert result["status_lookup"]["reason"] == "run_not_found"
+    assert result["decision"]["reason"] == "run_not_found"
+    assert_finalization_blocked(result["decision"])
+
+
+def test_has_process_external_artifact_does_not_follow_ancestor_symlink(monkeypatch, tmp_path: Path):
+    # The external-artifact probe is the other half of the status reason. Data behind an
+    # ancestor symlink must not be admitted as evidence that some other process wrote a run.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    real_parent = tmp_path / "real-parent"
+    runs = real_parent / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(runs))
+    run_id = "ancestor-external"
+    ns["write_artifact"](_nofollow_payload(run_id, tmp_path))
+    ns["_ARTIFACT_AUTH_KEYS"].clear()
+    assert ns["has_process_external_artifact"](run_id) is True, "control: process-external via its real path"
+
+    link = tmp_path / "link"
+    link.symlink_to(real_parent, target_is_directory=True)
+    monkeypatch.setenv(ARTIFACT_ENV, str(link / "delivery-runs"))
+
+    assert ns["has_process_external_artifact"](run_id) is False
+
+
+def test_artifact_file_symlink_remains_rejected(monkeypatch, tmp_path: Path):
+    # An artifact entry that is itself a symlink stays rejected: the signature binds only the
+    # file name, so a follower would accept the target's bytes verbatim.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    real_runs = tmp_path / "real-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(real_runs))
+    run_id = "file-symlink"
+    payload = _nofollow_payload(run_id, tmp_path)
+    ns["write_artifact"](payload)
+    target = Path(payload["run_artifact_path"])
+
+    linked_runs = tmp_path / "linked-runs"
+    linked_runs.mkdir(mode=0o700)
+    (linked_runs / target.name).symlink_to(target)
+    monkeypatch.setenv(ARTIFACT_ENV, str(linked_runs))
+
+    assert ns["artifact_for_run_id"](run_id) is None
+    assert ns["has_process_external_artifact"](run_id) is False
+
+
+def test_artifact_directory_identity_drift_unlinks_artifact_and_fails_closed(monkeypatch, tmp_path: Path):
+    # If the configured path stops naming the directory the bytes were written into, the write
+    # must not be reported as successful. Deterministic hook rather than a race: the re-open
+    # returns a different directory, standing in for a swap between write and confirmation.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    real_dir_fd = ns["artifact_dir_fd"]
+    opened: list[int] = []
+
+    def drifting_dir_fd(*, create: bool) -> int:
+        if create:
+            return real_dir_fd(create=create)
+        fd = os.open(str(decoy), os.O_RDONLY | os.O_DIRECTORY)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setitem(ns["write_artifact"].__globals__, "artifact_dir_fd", drifting_dir_fd)
+    run_id = "identity-drift"
+    payload = _nofollow_payload(run_id, tmp_path)
+
+    before_fds = _open_fd_count()
+    with pytest.raises(ns["ArtifactDirectoryInvalid"]):
+        ns["write_artifact"](payload)
+    assert _open_fd_count() == before_fds, "identity-drift path leaked a descriptor"
+
+    assert payload["run_artifact_path"] is None
+    assert payload["run"]["artifacts"] == []
+    assert "writer_authentication" not in payload
+    # Unlinked descriptor-relative from the fd actually written through, temp included.
+    assert list(base.iterdir()) == []
+    assert list(decoy.iterdir()) == []
+
+
+def test_artifact_directory_reopen_failure_unlinks_artifact_and_fails_closed(monkeypatch, tmp_path: Path):
+    # The realistic drift shape: an ancestor is swapped to a symlink after the write, so the
+    # confirmation re-open fails closed instead of returning a different directory. The bytes are
+    # still reachable through the original fd and must be removed there — reporting a cleared
+    # result while leaving a signed artifact behind is the failure this guards.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    real_dir_fd = ns["artifact_dir_fd"]
+
+    def unsafe_on_reopen(*, create: bool) -> int:
+        if create:
+            return real_dir_fd(create=create)
+        raise ns["ArtifactDirectoryInvalid"]("delivery_artifact_directory_invalid")
+
+    monkeypatch.setitem(ns["write_artifact"].__globals__, "artifact_dir_fd", unsafe_on_reopen)
+    payload = _nofollow_payload("reopen-failure", tmp_path)
+
+    before_fds = _open_fd_count()
+    with pytest.raises(ns["ArtifactDirectoryInvalid"]) as excinfo:
+        ns["write_artifact"](payload)
+    assert _open_fd_count() == before_fds, "reopen-failure path leaked a descriptor"
+    assert str(excinfo.value) == "delivery_artifact_directory_identity_drift"
+
+    assert payload["run_artifact_path"] is None
+    assert payload["run"]["artifacts"] == []
+    assert "writer_authentication" not in payload
+    # Descriptor-relative unlink through the original fd, so neither the final artifact nor the
+    # temp survives in the directory the bytes actually landed in.
+    assert list(base.iterdir()) == []
+
+
+def test_artifact_write_failure_leaves_no_temp_file(monkeypatch, tmp_path: Path):
+    # A failure while serializing must not strand the O_EXCL temp file in the artifact tree.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(ns["os"], "replace", fail_replace)
+    payload = _nofollow_payload("temp-cleanup", tmp_path)
+
+    before_fds = _open_fd_count()
+    with pytest.raises(OSError):
+        ns["write_artifact"](payload)
+    assert _open_fd_count() == before_fds, "failed write leaked a descriptor"
+
+    assert payload["run_artifact_path"] is None
+    assert payload["run"]["artifacts"] == []
+    assert list(base.iterdir()) == []
+
+
+@contextlib.contextmanager
+def _no_block(seconds: int = 5):
+    """Turn a blocking call into a failed assertion instead of a hung suite.
+
+    Not the assertion under test — the FIFO tests assert the returned value. This is only the
+    guard that keeps a regression (an open without O_NONBLOCK) from wedging the run forever.
+    """
+    def _fire(_signum, _frame):
+        raise AssertionError("artifact read blocked instead of failing closed")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _write_entry(base: Path, name: str, payload: bytes) -> Path:
+    path = base / name
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return path
+
+
+def _json_body_of_size(size: int) -> bytes:
+    """Exactly `size` bytes of a JSON object, padded in a single ASCII string value."""
+    overhead = len(json.dumps({"pad": ""}).encode())
+    return json.dumps({"pad": "a" * (size - overhead)}).encode()
+
+
+def _read_entry(ns, base: Path, name: str):
+    dir_fd = ns["artifact_dir_fd"](create=True)
+    try:
+        return ns["read_artifact_entry"](dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def test_relocated_same_name_signed_artifact_is_rejected(monkeypatch, tmp_path: Path):
+    # r16 bound the MAC to path.name only, so byte-for-byte copying a valid signed artifact to
+    # any other safe artifact base under the same filename authenticated while the writer key was
+    # live. The signature must bind the full discovered path instead.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    original = tmp_path / "original-runs"
+    relocated = tmp_path / "relocated-runs"
+    relocated.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(original))
+    run_id = "relocation"
+    payload = _nofollow_payload(run_id, tmp_path)
+    ns["write_artifact"](payload)
+    path = Path(payload["run_artifact_path"])
+
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == path, "control: the original base authenticates"
+
+    raw = path.read_bytes()
+    _write_entry(relocated, path.name, raw)
+    monkeypatch.setenv(ARTIFACT_ENV, str(relocated))
+    assert ns["artifact_for_run_id"](run_id) is None, "relocated same-name copy authenticated"
+
+    # Same bytes, different filename, in the base they were signed for: the name is part of the
+    # bound path, so this is a different path and must not authenticate either.
+    monkeypatch.setenv(ARTIFACT_ENV, str(original))
+    renamed = _write_entry(original, "20260715-000000-renamed-1.json", raw)
+    assert ns["authenticate_artifact"](json.loads(raw), renamed) is False
+    assert ns["artifact_for_run_id"](run_id)[0] == path, "control: the original entry still authenticates"
+
+    # Rewriting the payload's own path claim to match the relocated file is likewise refused: the
+    # claim is inside the signed body.
+    tampered = json.loads(raw)
+    relocated_path = relocated / path.name
+    tampered["run_artifact_path"] = str(relocated_path)
+    tampered["run"]["artifacts"] = [{"kind": "result", "path": str(relocated_path)}]
+    monkeypatch.setenv(ARTIFACT_ENV, str(relocated))
+    _write_entry(relocated, path.name, json.dumps(tampered).encode())
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda data, path: data.update({"run_artifact_path": None}), id="missing_path_claim"),
+        pytest.param(lambda data, path: data["run"].update({"artifacts": []}), id="missing_artifact_entry"),
+        pytest.param(
+            lambda data, path: data["run"].update(
+                {"artifacts": [{"kind": "result", "path": str(path)}, {"kind": "result", "path": str(path)}]}
+            ),
+            id="duplicate_artifact_entry",
+        ),
+        pytest.param(
+            lambda data, path: data["run"].update({"artifacts": [{"kind": "result", "path": str(path.parent)}]}),
+            id="other_path_shape",
+        ),
+    ],
+)
+def test_artifact_path_claims_must_identify_the_discovered_path(monkeypatch, tmp_path: Path, mutate):
+    # Acceptance requires the payload's own path claims to name the file it was found at. Each
+    # mutated body is RE-SIGNED with the live writer key, so its MAC is valid and only the
+    # independent path-claim check can reject it.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    payload = _nofollow_payload("path-claims", tmp_path)
+    ns["write_artifact"](payload)
+    path = Path(payload["run_artifact_path"])
+
+    def resign(data: dict) -> dict:
+        # artifact_auth_message drops writer_authentication before signing, so the stale mac in
+        # the body cannot influence the value computed to replace it.
+        key = ns["_ARTIFACT_AUTH_KEYS"][data["writer_authentication"]["key_id"]]
+        data["writer_authentication"]["mac"] = hmac.new(
+            key, ns["artifact_auth_message"](data, path), hashlib.sha256
+        ).hexdigest()
+        return data
+
+    assert ns["authenticate_artifact"](resign(json.loads(path.read_bytes())), path) is True, "control: re-signing is faithful"
+
+    data = json.loads(path.read_bytes())
+    mutate(data, path)
+    assert ns["authenticate_artifact"](resign(data), path) is False
+
+
+def test_artifact_byte_limit_is_one_mebibyte_shared_by_producer_and_reader():
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert ns["ARTIFACT_MAX_BYTES"] == 1024 * 1024
+
+
+def test_artifact_read_flags_are_non_blocking():
+    # r16 opened artifact entries without O_NONBLOCK, so a FIFO in the artifact directory blocked
+    # the open indefinitely. The flag is the fix; the FIFO test below is its behavioral proof.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert ns["_NOFOLLOW_FILE_FLAGS"] & os.O_NONBLOCK, "artifact reads may block on a FIFO"
+
+
+def test_require_nofollow_primitives_fails_closed_without_nonblock(monkeypatch):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    monkeypatch.delattr(ns["os"], "O_NONBLOCK", raising=False)
+    with pytest.raises(ns["ArtifactDirectoryInvalid"]) as excinfo:
+        ns["require_nofollow_primitives"]()
+    assert str(excinfo.value) == "delivery_artifact_nonblock_unavailable"
+
+
+def test_artifact_read_rejects_fifo_without_blocking_or_leaking(monkeypatch, tmp_path: Path):
+    # A FIFO named like an artifact, with no writer attached, is the blocking case: the open must
+    # return immediately and fstat must reject the entry as non-regular.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    os.mkfifo(base / "20260715-000000-fifo-1.json", 0o600)
+
+    before_fds = _open_fd_count()
+    with _no_block():
+        assert _read_entry(ns, base, "20260715-000000-fifo-1.json") is None
+        assert ns["artifact_entries"]("fifo-run") == []
+    assert _open_fd_count() == before_fds, "the rejected FIFO leaked a descriptor"
+
+
+def test_artifact_read_accepts_exactly_the_limit_and_rejects_one_byte_over(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    limit = ns["ARTIFACT_MAX_BYTES"]
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    _write_entry(base, "at-limit.json", _json_body_of_size(limit))
+    _write_entry(base, "over-limit.json", _json_body_of_size(limit + 1))
+
+    before_fds = _open_fd_count()
+    entry = _read_entry(ns, base, "at-limit.json")
+    assert entry is not None and len(entry[0]["pad"]) > 0
+    assert _read_entry(ns, base, "over-limit.json") is None
+    assert _open_fd_count() == before_fds, "a bounded read leaked a descriptor"
+
+
+def test_artifact_read_rejects_oversized_stat_before_reading_or_parsing(monkeypatch, tmp_path: Path):
+    # The size verdict is reached from fstat alone: neither an unbounded read nor the JSON parser
+    # may be reached for a file the stat already disqualifies. A sparse file keeps the control
+    # cheap while still being a real oversized regular file on disk.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    path = base / "sparse.json"
+    with open(path, "wb") as handle:
+        handle.truncate(ns["ARTIFACT_MAX_BYTES"] + 1)
+    path.chmod(0o600)
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("oversized artifact was read before its size was checked")
+
+    def forbidden_loads(*_args, **_kwargs):
+        raise AssertionError("oversized artifact reached the JSON parser")
+
+    monkeypatch.setattr(ns["os"], "read", forbidden_read)
+    monkeypatch.setattr(ns["json"], "loads", forbidden_loads)
+
+    assert _read_entry(ns, base, "sparse.json") is None
+
+
+def test_artifact_read_bounds_growth_after_fstat(monkeypatch, tmp_path: Path):
+    # fstat is a snapshot: a file that reports an acceptable size and is longer by the time it is
+    # read must still be bounded by the read itself, not trusted from the stale stat.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    limit = ns["ARTIFACT_MAX_BYTES"]
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    _write_entry(base, "grown.json", _json_body_of_size(limit + 1))
+
+    real_fstat = ns["os"].fstat
+
+    class SmallStat:
+        # Every field real except the size, which reports as it was before the growth.
+        def __init__(self, st):
+            self._st = st
+
+        st_size = 32
+
+        def __getattr__(self, item):
+            return getattr(self._st, item)
+
+    def stale_fstat(fd):
+        return SmallStat(real_fstat(fd))
+
+    monkeypatch.setattr(ns["os"], "fstat", stale_fstat)
+
+    reads: list[int] = []
+    real_read = ns["os"].read
+
+    def counting_read(fd, count):
+        reads.append(count)
+        return real_read(fd, count)
+
+    monkeypatch.setattr(ns["os"], "read", counting_read)
+
+    assert _read_entry(ns, base, "grown.json") is None
+    assert reads and max(reads) <= limit + 1, "the read was not bounded by the limit"
+
+
+def test_producer_rejects_over_limit_artifact_without_residue(monkeypatch, tmp_path: Path):
+    # Oversized bytes are never persisted: the writer fails before the temp file exists, clears
+    # the artifact and authentication fields, and hands main() its expected write failure.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    payload = _nofollow_payload("over-limit", tmp_path)
+    payload["oversized"] = "a" * (ns["ARTIFACT_MAX_BYTES"] + 1)
+
+    before_fds = _open_fd_count()
+    with pytest.raises(ns["ArtifactTooLarge"]) as excinfo:
+        ns["write_artifact"](payload)
+    assert str(excinfo.value) == "delivery_artifact_too_large"
+    assert _open_fd_count() == before_fds, "the rejected write leaked a descriptor"
+
+    assert payload["run_artifact_path"] is None
+    assert payload["run"]["artifacts"] == []
+    assert "writer_authentication" not in payload
+    assert list(base.iterdir()) == [], "oversized bytes or a temp file survived"
+
+
+def test_producer_accepts_an_artifact_of_exactly_the_limit(monkeypatch, tmp_path: Path):
+    # The boundary is inclusive. Calibrated in two passes: the writer's own additions
+    # (run_artifact_path, the fixed-width key_id and mac) are constant-length, so the first
+    # write's size fixes the padding the second one needs to land exactly on the limit.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    limit = ns["ARTIFACT_MAX_BYTES"]
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    template = _nofollow_payload("at-limit", tmp_path)
+    template["pad"] = "a" * (limit // 2)
+
+    probe = copy.deepcopy(template)
+    ns["write_artifact"](probe)
+    probe_path = Path(probe["run_artifact_path"])
+    measured = probe_path.stat().st_size
+    probe_path.unlink()
+
+    payload = copy.deepcopy(template)
+    payload["pad"] = "a" * (limit // 2 + (limit - measured))
+    ns["write_artifact"](payload)
+    path = Path(payload["run_artifact_path"])
+    assert path.stat().st_size == limit
+
+    found = ns["artifact_for_run_id"]("at-limit")
+    assert found is not None and found[0] == path, "an artifact at exactly the limit must round-trip"
+
+
+def test_over_limit_artifact_routes_main_to_the_truthful_write_failure_fallback(monkeypatch, capsys, tmp_path: Path):
+    # End to end through the real writer: an oversized result reaches main()'s expected-failure
+    # fallback, which reports the ordinary write failure and leaves no bytes behind. The
+    # ARTIFACT_WRITE_ERROR_KINDS cases above cover the fallback envelope for a stubbed raise; this
+    # one proves the real over-limit path arrives there.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    globals_ = ns["main"].__globals__
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    delivery_status = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": str(repo)}, "markers": {"blocking": []},
+        "decision": {"status": "draft_changes_need_busdriver_finalization", "blockers": [], **false_flags},
+        # The oversize rides in on real result data and is serialized by the real writer, so it is
+        # the production limit that rejects this run, not a stubbed raise.
+        "oversized": "a" * (ns["ARTIFACT_MAX_BYTES"] + 1),
+    }
+    mutation_result = {
+        "ok": False,
+        "decision": {"status": "blocked", "reason": "git_commit_failed", **false_flags},
+        "mutating_run": None,
+        "steps": [{"name": "git_commit", "status": "blocked", "reason": "git_commit_failed"}],
+    }
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "execute_mutating_operation", lambda _args, _status: (mutation_result, 2))
+    monkeypatch.setattr(sys, "argv", [
+        str(PRODUCTION_DELIVER), "--repo", str(repo),
+        "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+    ])
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert data["ok"] is False
+    assert data["run_artifact_path"] is None
+    assert data["run"]["reason"] == "artifact_write_failed"
+    assert data["run"]["artifacts"] == []
+    assert data["mutating_run"] is None
+    assert data["run_artifact_error"] == "delivery_artifact_too_large"
+    assert_finalization_blocked(data["decision"])
+    assert list(base.iterdir()) == [], "oversized bytes survived the rejected write"
+
+
+def test_unrelated_runtime_error_from_writer_still_propagates(monkeypatch, tmp_path: Path):
+    # The narrow catch protects the fail-closed fallback; it must not become a blanket
+    # RuntimeError swallow that hides an unrelated defect as "artifact_write_failed".
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    globals_ = ns["main"].__globals__
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    delivery_status = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": str(repo)}, "markers": {"blocking": []},
+        "decision": {"status": "draft_changes_need_busdriver_finalization", "blockers": [], **false_flags},
+    }
+    mutation_result = {
+        "ok": False,
+        "decision": {"status": "blocked", "reason": "git_commit_failed", **false_flags},
+        "mutating_run": None,
+        "steps": [{"name": "git_commit", "status": "blocked", "reason": "git_commit_failed"}],
+    }
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "execute_mutating_operation", lambda _args, _status: (mutation_result, 2))
+    monkeypatch.setitem(
+        globals_,
+        "write_artifact",
+        lambda _result: (_ for _ in ()).throw(RuntimeError("unrelated writer defect")),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        str(PRODUCTION_DELIVER), "--repo", str(repo),
+        "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+    ])
+
+    with pytest.raises(RuntimeError, match="unrelated writer defect"):
+        ns["main"]()
+
+
+@pytest.mark.parametrize("error_kind", ARTIFACT_WRITE_ERROR_KINDS)
+def test_artifact_write_failure_after_completed_mutation_preserves_side_effect_status(error_kind, monkeypatch, capsys, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo")
     globals_ = ns["main"].__globals__
@@ -1983,7 +2722,8 @@ def test_artifact_write_failure_after_completed_mutation_preserves_side_effect_s
     }
     monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
     monkeypatch.setitem(globals_, "execute_mutating_operation", lambda _args, _status: (mutation_result, 0))
-    monkeypatch.setitem(globals_, "write_artifact", lambda _result: (_ for _ in ()).throw(OSError("artifact disk full")))
+    error = artifact_write_error(ns, error_kind)
+    monkeypatch.setitem(globals_, "write_artifact", lambda _result: (_ for _ in ()).throw(error))
     monkeypatch.setattr(sys, "argv", [str(DELIVER), "--repo", str(repo), "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")), "--mode", "execute", "--operation", "commit", "--commit-message", "msg"])
 
     rc = ns["main"]()
@@ -1993,9 +2733,62 @@ def test_artifact_write_failure_after_completed_mutation_preserves_side_effect_s
     assert data["ok"] is False
     assert data["decision"]["status"] == data["run"]["status"] == data["mutating_run"]["status"] == "committed_release_failed"
     assert data["decision"]["reason"] == data["run"]["reason"] == data["steps"][0]["reason"] == "artifact_write_failed_after_side_effect"
-    assert data["run"]["artifact_write_error"] == "artifact disk full"
+    assert data["run"]["artifact_write_error"] == str(error)
     assert data["run"]["artifacts"] == []
-    assert data["mutating_run"]["artifact_write_error"] == "artifact disk full"
+    assert data["mutating_run"]["artifact_write_error"] == str(error)
+    # Printed, never written: the fallback bytes must not pass as a durable artifact.
+    assert ns["artifact_is_valid"](data, data["run"]["run_id"]) is False
+
+
+@pytest.mark.parametrize("error_kind", ARTIFACT_WRITE_ERROR_KINDS)
+def test_ordinary_artifact_write_failure_clears_blocked_mutating_run(error_kind, monkeypatch, capsys, tmp_path: Path):
+    # M-1 producer: a blocked mutation with no completed side effect falls back to the ORDINARY
+    # artifact-write failure, which is a non-mutating outcome. main() must drop the now-stale
+    # nested run so the bytes it produces still satisfy artifact_is_valid.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    globals_ = ns["main"].__globals__
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    delivery_status = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": str(repo)}, "markers": {"blocking": []},
+        "decision": {"status": "draft_changes_need_busdriver_finalization", "blockers": [], **false_flags},
+    }
+    args_ns = argparse.Namespace(run_id="ordinary-write-failure", pr=None)
+    authority = ns["mutating_authority"]("commit", False, "git_commit_failed", ["test"])
+    mutating_run = ns["mutating_run_envelope"](
+        args_ns, "commit", "blocked", "git_commit_failed", repo, authority,
+        [], {"acquired": True}, {"released": True},
+    )
+    mutation_result = {
+        "ok": False,
+        "decision": {"status": "blocked", "reason": "git_commit_failed", **false_flags},
+        "mutating_run": mutating_run,
+        "steps": [{"name": "git_commit", "status": "blocked", "reason": "git_commit_failed"}],
+    }
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "execute_mutating_operation", lambda _args, _status: (mutation_result, 2))
+    error = artifact_write_error(ns, error_kind)
+    monkeypatch.setitem(globals_, "write_artifact", lambda _result: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(sys, "argv", [
+        str(PRODUCTION_DELIVER), "--repo", str(repo),
+        "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+    ])
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert data["ok"] is False
+    assert data["decision"]["status"] == data["run"]["status"] == "blocked"
+    assert data["decision"]["reason"] == data["run"]["reason"] == "artifact_write_failed"
+    assert data["steps"][0] == {"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed"}
+    assert data["run"]["artifacts"] == []
+    assert data["mutating_run"] is None
+    # The stdout fallback is printed, never written: main() attempts write_artifact once and does
+    # not retry, so these bytes are not durable state and the validator must reject them.
+    assert ns["artifact_is_valid"](data, data["run"]["run_id"]) is False
 
 
 def test_delivery_executes_materialized_lock_bytes_after_source_replacement(monkeypatch, tmp_path: Path):
@@ -2459,16 +3252,16 @@ def test_artifact_validator_rejects_cross_envelope_outcome_and_phase_mismatches(
         "version": 1,
         "ok": True,
         "mode": "execute",
-        "operation": "verify",
-        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "operation": "pr-grind",
+        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
         "run": {
             "schema": "hermes-busdriver-delivery-run/v0",
             "version": 1,
             "run_id": run_id,
             "created_at": "2026-07-15T00:00:00Z",
-            "phase": "verify",
-            "status": "verified",
-            "reason": "verified",
+            "phase": "pr_grind",
+            "status": "pr_grind_clean",
+            "reason": "latest_pr_head_clean_read_only",
             "repo_root": str(tmp_path),
             "pr_number": None,
             "authority": false_flags,
@@ -2480,9 +3273,9 @@ def test_artifact_validator_rejects_cross_envelope_outcome_and_phase_mismatches(
 
     mutations = {
         "decision_status": lambda data: data["decision"].update(status="blocked"),
-        "decision_reason": lambda data: data["decision"].update(reason="verifier_failed"),
+        "decision_reason": lambda data: data["decision"].update(reason="pr_grind_wait"),
         "run_status": lambda data: data["run"].update(status="blocked"),
-        "run_reason": lambda data: data["run"].update(reason="verifier_failed"),
+        "run_reason": lambda data: data["run"].update(reason="pr_grind_wait"),
         "ok": lambda data: data.update(ok=False),
         "mode": lambda data: data.update(mode="status"),
         "operation": lambda data: data.update(operation="commit"),
@@ -2492,6 +3285,727 @@ def test_artifact_validator_rejects_cross_envelope_outcome_and_phase_mismatches(
         candidate = json.loads(json.dumps(valid))
         mutate(candidate)
         assert ns["artifact_is_valid"](candidate, run_id) is False, label
+
+
+def artifact_contract_payload(
+    ns: dict,
+    tmp_path: Path,
+    operation: str,
+    ok: bool,
+    status: str,
+    reason: str,
+    *,
+    phase: str | None = None,
+    mutating_reason: str | None = None,
+    mutating_authority_allowed: bool = False,
+) -> tuple[str, dict]:
+    run_id = f"artifact-contract-{operation}"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    mutating_run = None
+    if operation in {"pre-pr-review", "commit", "push", "pr-create", "merge"}:
+        inner_reason = mutating_reason or reason
+        args = argparse.Namespace(run_id=run_id, pr=None)
+        authority = ns["mutating_authority"](operation, mutating_authority_allowed, inner_reason, ["test"])
+        mutating_run = ns["mutating_run_envelope"](
+            args,
+            operation,
+            status,
+            inner_reason,
+            tmp_path,
+            authority,
+            [],
+            {"acquired": True},
+            {"released": True},
+        )
+    payload = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": ok,
+        "mode": "execute",
+        "operation": operation,
+        "decision": {"status": status, "reason": reason, **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": phase or operation.replace("-", "_"),
+            "status": status,
+            "reason": reason,
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": mutating_run,
+    }
+    return run_id, payload
+
+
+@pytest.mark.parametrize(
+    ("operation", "ok", "status", "reason", "phase"),
+    [
+        ("pr-grind", True, "pr_grind_clean", "latest_pr_head_clean_read_only", "pr_grind"),
+        ("pr-grind", False, "blocked", "pr_grind_needs_fix", "pr_grind"),
+        ("pr-grind", False, "blocked", "pr_grind_wait", "pr_grind"),
+        ("pr-grind", False, "blocked", "pr_grind_blocked", "pr_grind"),
+        ("pr-grind", False, "blocked", "pr_grind_loop_failed", "pr_grind"),
+        ("pr-grind", False, "blocked", "delivery_status_failed", "delivery_status"),
+        ("commit", True, "committed", "committed", "commit"),
+        ("commit", False, "blocked", "git_commit_failed", "commit"),
+        ("commit", False, "committed", "post_commit_concurrent_work_preserved", "commit"),
+        ("commit", False, "committed", "post_commit_external_dirty_drift", "commit"),
+        ("commit", False, "committed", "post_commit_untracked_dirty", "commit"),
+        ("commit", False, "committed", "post_commit_non_marker_dirty_remaining", "commit"),
+        ("commit", False, "committed", "post_commit_status_failed", "commit"),
+        ("commit", False, "committed", "post_commit_dirty_check_failed", "commit"),
+        ("commit", False, "committed", "post_commit_dirty_restore_failed", "commit"),
+        ("commit", False, "committed", "post_commit_reviewed_untracked_clean_failed", "commit"),
+        ("commit", False, "blocked", "delivery_status_failed", "delivery_status"),
+    ],
+)
+def test_artifact_validator_accepts_production_outcomes(
+    tmp_path: Path,
+    operation: str,
+    ok: bool,
+    status: str,
+    reason: str,
+    phase: str,
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns,
+        tmp_path,
+        operation,
+        ok,
+        status,
+        reason,
+        phase=phase,
+        # Only genuine normal-success outcomes carry an allowed=True mutating authority in
+        # production; every other outcome (including the ok=True already_up_to_date no-op) is
+        # authority allowed=False.
+        mutating_authority_allowed=(operation, status, reason) in _AUTHORITY_ALLOWED_SUCCESS,
+    )
+    if reason == "delivery_status_failed":
+        payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is True
+
+
+@pytest.mark.parametrize(
+    ("operation", "status"),
+    [
+        ("commit", "committed_release_failed"),
+    ],
+)
+def test_artifact_validator_accepts_finalization_lock_release_failures(tmp_path: Path, operation: str, status: str):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns,
+        tmp_path,
+        operation,
+        False,
+        status,
+        "finalization_lock_release_failed",
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is True
+
+
+@pytest.mark.parametrize(
+    ("operation", "ok", "status", "reason"),
+    [
+        ("commit", False, "committed", "committed"),
+        ("verify", True, "made_up_success", "made_up_success"),
+        ("commit", False, "blocked", "made_up_failure"),
+    ],
+)
+def test_artifact_validator_rejects_unknown_or_inconsistent_outcomes(
+    tmp_path: Path,
+    operation: str,
+    ok: bool,
+    status: str,
+    reason: str,
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(ns, tmp_path, operation, ok, status, reason)
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+# Authority-allowed mutating outcomes: the ONLY (operation, status, reason) tuples whose nested
+# mutating authority carries allowed=True in a reachable production artifact. Every other
+# mutating outcome (blockers, reconciliation, release-failed) is authority allowed=False.
+# Derived from scripts/hermes-busdriver-deliver mutating_authority() call sites that are not
+# behind a FIXED_EARLY_BLOCKED_OPERATIONS blocker.
+_AUTHORITY_ALLOWED_SUCCESS = {
+    ("commit", "committed", "committed"),
+}
+
+
+def _mutating_artifact_payload(
+    ns: dict,
+    tmp_path: Path,
+    *,
+    run_id: str,
+    operation: str,
+    phase: str,
+    ok: bool,
+    outer_status: str,
+    outer_reason: str,
+    mut_status: str,
+    mut_reason: str,
+    authority_allowed: bool,
+    authority_reason: str,
+    side_effects: list | None = None,
+) -> dict:
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    args = argparse.Namespace(run_id=run_id, pr=None)
+    authority = ns["mutating_authority"](operation, authority_allowed, authority_reason, ["test"])
+    mutating_run = ns["mutating_run_envelope"](
+        args,
+        operation,
+        mut_status,
+        mut_reason,
+        tmp_path,
+        authority,
+        side_effects or [],
+        {"acquired": True},
+        {"released": True},
+    )
+    return {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": ok,
+        "mode": "execute",
+        "operation": operation,
+        "decision": {"status": outer_status, "reason": outer_reason, **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": phase,
+            "status": outer_status,
+            "reason": outer_reason,
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": mutating_run,
+    }
+
+
+def _signed_lookup_rejects(ns: dict, monkeypatch, tmp_path: Path, run_id: str, payload: dict) -> None:
+    """Persist ``payload`` with the real process-scoped writer key and assert the authenticated
+    same-process lookup (direct and status mode) still fails closed."""
+    artifact_dir = tmp_path / "delivery-runs"
+    artifact_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    ns["write_artifact"](payload)
+    assert ns["artifact_for_run_id"](run_id) is None
+    status_args = argparse.Namespace(mode="status", operation="status", run_id=run_id, pr=None, pretty=False)
+    result, rc = ns["status_mode_result"](status_args)
+    assert result["status_lookup"]["found"] is False
+    assert rc != 0
+
+
+def _signed_lookup_accepts(ns: dict, monkeypatch, tmp_path: Path, run_id: str, payload: dict) -> None:
+    artifact_dir = tmp_path / "delivery-runs"
+    artifact_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    ns["write_artifact"](payload)
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None
+
+
+def test_artifact_validator_rejects_commit_success_missing_mutating_run(monkeypatch, tmp_path: Path):
+    # M-1: an authenticated commit success MUST carry its complete mutating run.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, "commit", True, "committed", "committed", mutating_authority_allowed=True
+    )
+    # Positive control: the exact envelope with its mutating run is accepted.
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def test_artifact_validator_rejects_blocked_commit_missing_mutating_run(tmp_path: Path):
+    # M-1: a blocked commit is still a mutating-phase outcome and MUST carry its mutating run.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(ns, tmp_path, "commit", False, "blocked", "git_commit_failed")
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+def test_artifact_validator_rejects_delivery_status_outcome_with_unexpected_mutating_run(monkeypatch, tmp_path: Path):
+    # M-1: a delivery_status blocker for a mutating operation never runs a mutation, so any
+    # attached mutating run is fabricated durable state.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = "artifact-ds-unexpected"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    payload = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": False,
+        "mode": "execute",
+        "operation": "commit",
+        "decision": {"status": "blocked", "reason": "delivery_status_failed", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": "delivery_status",
+            "status": "blocked",
+            "reason": "delivery_status_failed",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+    }
+    # Positive control: the genuine non-mutating delivery_status envelope is accepted.
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    args = argparse.Namespace(run_id=run_id, pr=None)
+    authority = ns["mutating_authority"]("commit", False, "delivery_status_failed", ["test"])
+    payload["mutating_run"] = ns["mutating_run_envelope"](
+        args, "commit", "blocked", "delivery_status_failed", tmp_path, authority, [], {"acquired": True}, {"released": True}
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def test_artifact_validator_rejects_blocked_outcome_with_positive_commit_authority(tmp_path: Path):
+    # M-2: a blocked outcome may not carry a positive (allowed) mutating authority.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = "artifact-blocked-positive-authority"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="commit", phase="commit", ok=False,
+        outer_status="blocked", outer_reason="git_commit_failed",
+        mut_status="blocked", mut_reason="git_commit_failed",
+        authority_allowed=True, authority_reason="git_commit_failed",
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+def test_artifact_validator_rejects_success_with_denied_authority(tmp_path: Path):
+    # M-2: a normal commit success must carry an allowed=True authority.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = "artifact-success-denied-authority"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="commit", phase="commit", ok=True,
+        outer_status="committed", outer_reason="committed",
+        mut_status="committed", mut_reason="committed",
+        authority_allowed=False, authority_reason="committed",
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+def test_artifact_validator_rejects_authority_reason_drift(monkeypatch, tmp_path: Path):
+    # M-2: the mutating authority reason must equal the mutating-run reason.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = "artifact-authority-reason-drift"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="commit", phase="commit", ok=True,
+        outer_status="committed", outer_reason="committed",
+        mut_status="committed", mut_reason="committed",
+        authority_allowed=True, authority_reason="made_up_authority_reason",
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+@pytest.mark.parametrize(
+    ("outer_status", "mut_reason"),
+    [
+        ("committed", "artifact_write_failed_after_side_effect"),
+        ("committed_release_failed", "artifact_write_failed_after_side_effect"),
+    ],
+)
+def test_artifact_validator_rejects_recursive_post_side_effect_write_failure(
+    monkeypatch, tmp_path: Path, outer_status: str, mut_reason: str
+):
+    # M-3: the nested mutating run must preserve a real original outcome, never the
+    # artifact-write-failure sentinel (outer and nested both recursive).
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = f"artifact-recursive-{outer_status}"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="commit", phase="commit", ok=False,
+        outer_status=outer_status, outer_reason="artifact_write_failed_after_side_effect",
+        mut_status=outer_status, mut_reason=mut_reason,
+        authority_allowed=False, authority_reason=mut_reason,
+        side_effects=[{"name": "git_commit", "ok": True}],
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+# main() calls write_artifact exactly once. When that write raises OSError, BOTH fallbacks only
+# mutate the dict main() then prints — run_artifact_path stays None, run.artifacts is emptied, and
+# no second write is attempted. So no write-failure fallback can ever produce durable bytes for
+# artifact_for_run_id to read, and every authenticated write-failure envelope is fabricated
+# durable state, however well-formed. The stdout fallbacks themselves are unchanged and still
+# covered by the direct main() tests above.
+@pytest.mark.parametrize(
+    ("operation", "phase"),
+    [
+        ("pr-grind", "pr_grind"),
+        ("commit", "commit"),
+    ],
+)
+def test_status_lookup_rejects_signed_ordinary_artifact_write_failure(
+    monkeypatch, tmp_path: Path, operation: str, phase: str
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, operation, False, "blocked", "artifact_write_failed", phase=phase
+    )
+    # The ordinary fallback is a pre-side-effect, non-mutating outcome: this is the exact shape
+    # main() prints, and it must still be undurable.
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path / operation, run_id, payload)
+
+
+@pytest.mark.parametrize(
+    ("outer_status", "mut_reason", "authority_allowed"),
+    [
+        ("committed", "committed", True),
+        ("committed_release_failed", "finalization_lock_release_failed", False),
+    ],
+)
+def test_status_lookup_rejects_signed_post_side_effect_artifact_write_failure(
+    monkeypatch, tmp_path: Path, outer_status: str, mut_reason: str, authority_allowed: bool
+):
+    # The completed-side-effect fallback preserves a real nested mutation, but it too is printed
+    # only — never written — so the durable validator must reject it.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = f"post-side-effect-write-failure-{outer_status}"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="commit", phase="commit", ok=False,
+        outer_status=outer_status, outer_reason="artifact_write_failed_after_side_effect",
+        mut_status=outer_status, mut_reason=mut_reason,
+        authority_allowed=authority_allowed, authority_reason=mut_reason,
+        side_effects=[{"name": "git_commit", "ok": True}],
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path / outer_status, run_id, payload)
+
+
+@pytest.mark.parametrize(
+    ("operation", "phase", "ok", "status", "reason"),
+    [
+        ("pr-grind", "pr_grind", True, "pr_grind_clean", "latest_pr_head_clean_read_only"),
+        ("commit", "commit", False, "blocked", "git_commit_failed"),
+    ],
+)
+def test_signed_lookup_accepts_reachable_envelope_control(
+    monkeypatch, tmp_path: Path, operation: str, phase: str, ok: bool, status: str, reason: str
+):
+    # Positive control for the write-failure rejections above: the same writer key, directory
+    # layout and authenticated lookup accept a reachable envelope, so those rejections cannot be
+    # passing because signing or lookup is broken.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(ns, tmp_path, operation, ok, status, reason, phase=phase)
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    _signed_lookup_accepts(ns, monkeypatch, tmp_path / operation, run_id, payload)
+
+
+def test_artifact_outcome_contract_admits_no_write_failure_fallback_reasons():
+    # Contract truth, not just the validator: neither write-failure sentinel may appear as an
+    # allowed durable outcome for any operation or phase.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    reasons = {
+        reason
+        for phases in ns["ARTIFACT_OUTCOME_CONTRACT"].values()
+        for outcomes in phases.values()
+        for _ok, _status, reason in outcomes
+    }
+    assert reasons & {"artifact_write_failed", "artifact_write_failed_after_side_effect"} == set()
+
+
+def test_artifact_validator_accepts_exact_non_mutating_envelopes(monkeypatch, tmp_path: Path):
+    # M-1 positive: reachable pr-grind / delivery-status envelopes with no mutating run, via the
+    # real same-process writer + authenticated lookup.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    for label, (operation, ok, status, reason, phase) in {
+        "pr_grind": ("pr-grind", True, "pr_grind_clean", "latest_pr_head_clean_read_only", "pr_grind"),
+        "delivery_status": ("commit", False, "blocked", "delivery_status_failed", "delivery_status"),
+    }.items():
+        run_id, payload = artifact_contract_payload(ns, tmp_path, operation, ok, status, reason, phase=phase)
+        payload["mutating_run"] = None
+        assert ns["artifact_is_valid"](payload, run_id) is True, label
+        _signed_lookup_accepts(ns, monkeypatch, tmp_path / label, run_id, payload)
+
+
+# Representative pre-r12 artifact outcomes for the four fixed-blocked operations, one row per
+# outcome class (normal success / reconciliation / release-failed). main() blocks each of these
+# operations before run identity, so no such artifact bytes can be produced in production.
+_FIXED_BLOCKED_IMPOSSIBLE_OUTCOMES = [
+    ("pre-pr-review", "pre_pr_review", True, "pre_pr_review_complete", "busdriver_pre_pr_review_marker_written", True),
+    ("pre-pr-review", "pre_pr_review", False, "pre_pr_review_complete_release_failed", "finalization_lock_release_failed", False),
+    ("push", "push", True, "pushed", "pushed", True),
+    ("push", "push", False, "pushed", "remote_head_post_push_mismatch", False),
+    ("push", "push", False, "pushed_release_failed", "finalization_lock_release_failed", False),
+    ("pr-create", "pr_create", True, "pr_created", "pr_created", True),
+    ("pr-create", "pr_create", False, "pr_created", "pr_created_after_failed_command_reconciled", False),
+    ("pr-create", "pr_create", False, "pr_created_release_failed", "finalization_lock_release_failed", False),
+    ("merge", "merge", True, "merged", "merged", True),
+    ("merge", "merge", False, "merged_release_failed", "finalization_lock_release_failed", False),
+]
+
+
+def test_fixed_early_blocked_operations_are_disjoint_from_artifact_truth():
+    # The validator must describe reachable production artifact bytes only. Fixed early policy
+    # results are printed and never persisted, so those operations own no artifact truth.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    fixed = set(ns["FIXED_EARLY_BLOCKED_OPERATIONS"])
+
+    assert fixed == {"pre-pr-review", "push", "pr-create", "merge"}
+    assert fixed & set(ns["ARTIFACT_OUTCOME_CONTRACT"]) == set()
+    assert fixed & set(ns["AUTHORITY_ALLOWED_MUTATING_OUTCOMES"]) == set()
+    # verify is absent for a sibling reason (its own fixed verifier blocker), so the exact key
+    # set is narrower than "everything not in FIXED_EARLY_BLOCKED_OPERATIONS".
+    assert set(ns["ARTIFACT_OUTCOME_CONTRACT"]) == {"pr-grind", "commit"}
+    assert ns["MUTATING_ARTIFACT_PHASES"] == {"commit"}
+    assert ns["AUTHORITY_ALLOWED_MUTATING_OUTCOMES"] == {"commit": {("committed", "committed")}}
+
+
+@pytest.mark.parametrize(
+    ("operation", "phase", "ok", "status", "reason", "authority_allowed"),
+    _FIXED_BLOCKED_IMPOSSIBLE_OUTCOMES,
+)
+def test_artifact_validator_rejects_fixed_blocked_operation_outcomes(
+    tmp_path: Path,
+    operation: str,
+    phase: str,
+    ok: bool,
+    status: str,
+    reason: str,
+    authority_allowed: bool,
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = f"fixed-blocked-{operation}-{reason}"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation=operation, phase=phase, ok=ok,
+        outer_status=status, outer_reason=reason,
+        mut_status=status, mut_reason=reason,
+        authority_allowed=authority_allowed, authority_reason=reason,
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+@pytest.mark.parametrize("operation", ["pre-pr-review", "push", "pr-create", "merge"])
+def test_artifact_validator_rejects_fixed_blocked_artifact_write_failures(tmp_path: Path, operation: str):
+    # Even the ordinary artifact-write failure is unreachable for a fixed-blocked operation.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, operation, False, "blocked", "artifact_write_failed"
+    )
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+def test_status_lookup_rejects_signed_impossible_fixed_blocked_envelope(monkeypatch, tmp_path: Path):
+    # Durable consumer boundary: a fully process-authenticated pr-create success is still an
+    # impossible producer outcome and must fail closed at artifact_for_run_id / status mode.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id = "fixed-blocked-signed-pr-create"
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=run_id, operation="pr-create", phase="pr_create", ok=True,
+        outer_status="pr_created", outer_reason="pr_created",
+        mut_status="pr_created", mut_reason="pr_created",
+        authority_allowed=True, authority_reason="pr_created",
+        side_effects=[{"name": "gh_pr_create", "ok": True}],
+    )
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def _production_deliver(repo: Path, plugin: Path, *extra: str, artifact_dir: Path) -> tuple[subprocess.CompletedProcess[str], dict]:
+    env = os.environ.copy()
+    env[ARTIFACT_ENV] = str(artifact_dir)
+    cp = run([sys.executable, str(PRODUCTION_DELIVER), "--repo", str(repo), "--plugin-root", str(plugin), *extra], env=env)
+    return cp, json.loads(cp.stdout)
+
+
+def test_production_verify_creates_no_run_identity_or_artifact(tmp_path: Path):
+    # main() fixed-blocks execute verify on verifier_dispatch_blocker() before run identity,
+    # delivery status and artifact handling, so no production verify artifact bytes exist.
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    verifier_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote('print(1)')}"
+    cp, data = _production_deliver(
+        repo, plugin, "--mode", "execute", "--operation", "verify", "--verifier", f"smoke={verifier_cmd}",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 2
+    assert data["ok"] is False
+    assert data["decision"]["reason"] == "verifier_containment_unavailable"
+    assert data["run"]["run_id"] is None
+    assert data["run"]["created_at"] is None
+    assert data["run"]["artifacts"] == []
+    assert data["run_artifact_path"] is None
+    assert data["mutating_run"] is None
+    assert data["verifiers"] == []
+    assert not artifact_dir.exists()
+
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert "verify" not in ns["ARTIFACT_OUTCOME_CONTRACT"]
+
+
+def test_production_pr_grind_without_pr_creates_no_run_artifact(tmp_path: Path):
+    # execute pr-grind without --pr sets pr_required but never sets write_run_artifact, so the
+    # outcome is printed only and owns no durable artifact truth.
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    artifact_dir = tmp_path / "delivery-runs"
+    cp, data = _production_deliver(
+        repo, plugin, "--mode", "execute", "--operation", "pr-grind", "--run-id", "pr-grind-no-pr",
+        artifact_dir=artifact_dir,
+    )
+
+    assert cp.returncode == 2
+    assert data["ok"] is False
+    assert data["decision"]["reason"] == "pr_required"
+    assert data["run_artifact_path"] is None
+    assert data["mutating_run"] is None
+    assert not artifact_dir.exists()
+
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert (False, "blocked", "pr_required") not in ns["ARTIFACT_OUTCOME_CONTRACT"]["pr-grind"]["pr_grind"]
+
+
+def test_status_lookup_rejects_signed_verify_envelope(monkeypatch, tmp_path: Path):
+    # A structurally complete, process-authenticated verify success is still impossible in
+    # production (the verifier blocker fires first) and must fail closed at durable lookup.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, "verify", True, "verified", "verified", phase="verify"
+    )
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def test_status_lookup_rejects_signed_pr_grind_pr_required_envelope(monkeypatch, tmp_path: Path):
+    # pr-grind without a PR never persists, so an authenticated pr_required artifact is
+    # fabricated durable state.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, "pr-grind", False, "blocked", "pr_required", phase="pr_grind"
+    )
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is False
+    _signed_lookup_rejects(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def test_status_lookup_accepts_signed_reachable_pr_grind_envelope(monkeypatch, tmp_path: Path):
+    # Positive control for the signed same-process lookup, on a currently reachable production
+    # shape (pr-grind with a PR), so the rejections above cannot pass vacuously.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, "pr-grind", True, "pr_grind_clean", "latest_pr_head_clean_read_only", phase="pr_grind"
+    )
+    payload["mutating_run"] = None
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    _signed_lookup_accepts(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+def test_status_lookup_accepts_signed_blocked_commit_reviewed_paths_unavailable(monkeypatch, tmp_path: Path):
+    # commit_staged_index() returns error="reviewed_paths_unavailable" before any ref write;
+    # execute_mutating_operation turns it into a blocked commit that production main persists.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    run_id, payload = artifact_contract_payload(
+        ns, tmp_path, "commit", False, "blocked", "reviewed_paths_unavailable"
+    )
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    _signed_lookup_accepts(ns, monkeypatch, tmp_path, run_id, payload)
+
+
+# commit_staged_index produces a reason literal two ways: a direct `return {"error": "literal"}`,
+# and `return fail_and_restore_reviewed_tree("literal")`. The nested helper itself returns
+# {"error": error} — an ast.Name — so a collector that only walks direct dict returns is blind to
+# every literal that reaches the wire through the helper.
+_COMMIT_ERROR_HELPER = "fail_and_restore_reviewed_tree"
+
+
+def _commit_error_literals(source: str) -> tuple[set[str], set[str]]:
+    """Return (direct, helper) reason literals commit_staged_index can emit as its "error"."""
+    fn = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "commit_staged_index"
+    )
+    direct = {
+        value.value
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+        for key, value in zip(node.value.keys, node.value.values)
+        if isinstance(key, ast.Constant)
+        and key.value == "error"
+        and isinstance(value, ast.Constant)
+        and isinstance(value.value, str)
+    }
+    helper = {
+        arg.value
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _COMMIT_ERROR_HELPER
+        for arg in node.args
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+    }
+    return direct, helper
+
+
+def test_commit_staged_index_error_literals_are_covered_by_contract_truth():
+    # Source-closure test: every string literal the producer can put on the "error" key must
+    # already carry contract truth, whether it is returned directly or handed to the restore
+    # helper. Derived from the AST, not from the constant, so adding a new producer error without
+    # extending the contract fails here.
+    direct, helper = _commit_error_literals(PRODUCTION_DELIVER.read_text())
+
+    # Guards against either AST shape silently drifting to zero matches.
+    assert len(direct) >= 15
+    assert "reviewed_paths_unavailable" in direct
+    assert helper == {
+        "committed_tree_or_parent_mismatch_after_hooks",
+        "committed_message_mismatch_after_hooks",
+        "git_commit_failed_or_hook_drift",
+    }
+
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    # No-side-effect producer errors become blocked commit artifacts; the post-publish ones are
+    # the explicitly documented completed/reconciliation reasons.
+    covered = ns["_COMMIT_FAILURE_REASONS"] | ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert (direct | helper) - covered == set()
+
+
+def test_commit_error_literal_closure_catches_a_new_helper_call_reason():
+    # Semantic guard for the closure above: a reason that reaches the wire ONLY through the
+    # restore helper must be collected and must fail the contract comparison while it is absent
+    # from contract truth. A direct-returns-only collector reports an empty diff here and the
+    # blind spot reopens.
+    source = PRODUCTION_DELIVER.read_text()
+    injected = source.replace(
+        f'return {_COMMIT_ERROR_HELPER}("git_commit_failed_or_hook_drift")',
+        f'return {_COMMIT_ERROR_HELPER}("uncontracted_helper_reason")',
+        1,
+    )
+    assert injected != source
+
+    direct, helper = _commit_error_literals(injected)
+    assert "uncontracted_helper_reason" in helper
+    assert "uncontracted_helper_reason" not in direct
+
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    covered = ns["_COMMIT_FAILURE_REASONS"] | ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert (direct | helper) - covered == {"uncontracted_helper_reason"}
 
 
 def test_process_external_artifact_requires_complete_authentication_shape(monkeypatch, tmp_path: Path):
@@ -2506,16 +4020,16 @@ def test_process_external_artifact_requires_complete_authentication_shape(monkey
         "version": 1,
         "ok": True,
         "mode": "execute",
-        "operation": "verify",
-        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "operation": "pr-grind",
+        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
         "run": {
             "schema": "hermes-busdriver-delivery-run/v0",
             "version": 1,
             "run_id": run_id,
             "created_at": "2026-07-15T00:00:00Z",
-            "phase": "verify",
-            "status": "verified",
-            "reason": "verified",
+            "phase": "pr_grind",
+            "status": "pr_grind_clean",
+            "reason": "latest_pr_head_clean_read_only",
             "repo_root": str(tmp_path),
             "pr_number": None,
             "authority": false_flags,
@@ -2534,15 +4048,26 @@ def test_process_external_artifact_requires_complete_authentication_shape(monkey
     artifact.chmod(0o600)
     assert ns["has_process_external_artifact"](run_id) is True
 
-    for invalid_mac in (None, "short", "z" * 64):
+    for field in ("schema", "algorithm", "key_id", "mac"):
         malformed = json.loads(json.dumps(payload))
-        if invalid_mac is None:
-            malformed["writer_authentication"].pop("mac")
-        else:
-            malformed["writer_authentication"]["mac"] = invalid_mac
+        malformed["writer_authentication"].pop(field)
         artifact.write_text(json.dumps(malformed))
         artifact.chmod(0o600)
-        assert ns["has_process_external_artifact"](run_id) is False
+        assert ns["has_process_external_artifact"](run_id) is False, f"missing {field}"
+
+    invalid_values = {
+        "schema": [1, "hermes-busdriver-delivery-artifact-auth/v0"],
+        "algorithm": [[], "sha256"],
+        "key_id": [1, "a" * 31, "z" * 32],
+        "mac": [1, "b" * 63, "z" * 64],
+    }
+    for field, values in invalid_values.items():
+        for value in values:
+            malformed = json.loads(json.dumps(payload))
+            malformed["writer_authentication"][field] = value
+            artifact.write_text(json.dumps(malformed))
+            artifact.chmod(0o600)
+            assert ns["has_process_external_artifact"](run_id) is False, f"invalid {field}: {value!r}"
 
 
 def test_status_lookup_rejects_schema_valid_unsigned_forged_artifact(monkeypatch, tmp_path: Path):
@@ -2557,16 +4082,16 @@ def test_status_lookup_rejects_schema_valid_unsigned_forged_artifact(monkeypatch
         "version": 1,
         "ok": True,
         "mode": "execute",
-        "operation": "verify",
-        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "operation": "pr-grind",
+        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
         "run": {
             "schema": "hermes-busdriver-delivery-run/v0",
             "version": 1,
             "run_id": run_id,
             "created_at": "2026-07-13T00:00:00Z",
-            "phase": "verify",
-            "status": "verified",
-            "reason": "verified",
+            "phase": "pr_grind",
+            "status": "pr_grind_clean",
+            "reason": "latest_pr_head_clean_read_only",
             "repo_root": str(tmp_path),
             "pr_number": None,
             "authority": false_flags,
@@ -2592,16 +4117,16 @@ def test_artifact_signing_capability_is_parent_memory_only(monkeypatch, tmp_path
         "version": 1,
         "ok": True,
         "mode": "execute",
-        "operation": "verify",
-        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "operation": "pr-grind",
+        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
         "run": {
             "schema": "hermes-busdriver-delivery-run/v0",
             "version": 1,
             "run_id": run_id,
             "created_at": "2026-07-14T00:00:00Z",
-            "phase": "verify",
-            "status": "verified",
-            "reason": "verified",
+            "phase": "pr_grind",
+            "status": "pr_grind_clean",
+            "reason": "latest_pr_head_clean_read_only",
             "repo_root": str(tmp_path),
             "pr_number": None,
             "authority": false_flags,

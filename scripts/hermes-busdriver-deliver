@@ -2023,14 +2023,119 @@ def delivery_run(
     }
 
 
+class ArtifactDirectoryInvalid(RuntimeError):
+    """The configured artifact directory is not a safe, no-follow-reachable directory.
+
+    A distinct type so main() can route this expected writer failure to the fail-closed stdout
+    fallback without swallowing unrelated RuntimeErrors raised elsewhere in the run.
+    """
+
+
+class ArtifactTooLarge(RuntimeError):
+    """The serialized result exceeds ARTIFACT_MAX_BYTES and must not be persisted.
+
+    Distinct from ArtifactDirectoryInvalid for the same reason that one is distinct from a bare
+    RuntimeError: main() routes it to the truthful write-failure fallback, and nothing else.
+    """
+
+
+# The single artifact byte ceiling, shared by the producer and the reader so neither can admit
+# what the other refuses. The reader's bound is what keeps a same-UID 0600 *.json file from
+# being read into memory unbounded; the producer's keeps this process from creating one.
+ARTIFACT_MAX_BYTES = 1024 * 1024
+
+
 def artifact_base() -> Path:
-    return Path(os.environ.get(ARTIFACT_ENV, "~/.hermes/busdriver-relay/delivery-runs")).expanduser()
+    """The configured artifact directory as an absolute LEXICAL path.
+
+    abspath normalizes without resolving symlinks, which is the point: resolution is what the
+    descriptor-relative traversal below refuses to do. Every component is checked by the kernel
+    under O_NOFOLLOW instead of being trusted from a resolved string.
+    """
+    raw = os.path.expanduser(os.environ.get(ARTIFACT_ENV, "~/.hermes/busdriver-relay/delivery-runs"))
+    return Path(os.path.abspath(raw))
 
 
-def artifact_path(run_id: str) -> Path:
-    base = artifact_base()
+def artifact_name(run_id: str) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return base / f"{stamp}-{artifact_token(run_id)}-{os.getpid()}.json"
+    return f"{stamp}-{artifact_token(run_id)}-{os.getpid()}.json"
+
+
+# O_CLOEXEC is an optimization (it keeps these fds out of exec'd children); O_NOFOLLOW and
+# O_DIRECTORY plus dir_fd support ARE the proof, so their absence fails closed rather than
+# silently degrading to a followable path-based write.
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_NOFOLLOW_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | _O_CLOEXEC
+# O_NONBLOCK is what makes the entry open itself safe: without it, opening a FIFO parked in the
+# artifact directory blocks until a writer appears, so the fstat that would reject it as
+# non-regular is never reached. On a regular file the flag is inert.
+_NOFOLLOW_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | _O_CLOEXEC
+
+
+def require_nofollow_primitives() -> None:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ArtifactDirectoryInvalid("delivery_artifact_nofollow_unavailable")
+    # Every POSIX platform has O_NONBLOCK; its absence means the entry open could block on a FIFO,
+    # which is a fail-closed condition rather than a degradation to accept silently.
+    if os.name == "posix" and not hasattr(os, "O_NONBLOCK"):
+        raise ArtifactDirectoryInvalid("delivery_artifact_nonblock_unavailable")
+    # os.replace is deliberately gated on os.rename: both are the same renameat syscall, but
+    # os.supports_dir_fd lists only os.rename, so probing for os.replace would always fail
+    # closed on platforms (macOS, Linux) that do support the descriptor-relative replace.
+    if not {os.open, os.mkdir, os.unlink, os.rename} <= os.supports_dir_fd:
+        raise ArtifactDirectoryInvalid("delivery_artifact_dir_fd_unavailable")
+    if os.listdir not in os.supports_fd:
+        raise ArtifactDirectoryInvalid("delivery_artifact_dir_fd_unavailable")
+
+
+def artifact_dir_fd(*, create: bool) -> int:
+    """Open the configured artifact directory without following a symlink at ANY component.
+
+    Walks from the filesystem root opening one component at a time relative to its parent's
+    descriptor. A symlink, a non-directory, a permission error, or a race at any existing
+    component fails closed as ArtifactDirectoryInvalid. When create is true a MISSING component
+    may be created with os.mkdir(dir_fd=...) at 0700 and then reopened no-follow — an existing
+    component is never replaced. The caller owns the returned fd and must close it.
+    """
+    require_nofollow_primitives()
+    base = artifact_base()
+    parts = base.parts
+    if not parts or parts[0] != os.sep:
+        raise ArtifactDirectoryInvalid("delivery_artifact_directory_invalid")
+    try:
+        fd = os.open(os.sep, _NOFOLLOW_DIR_FLAGS)
+    except OSError as e:
+        raise ArtifactDirectoryInvalid("delivery_artifact_directory_invalid") from e
+    try:
+        for component in parts[1:]:
+            try:
+                child = os.open(component, _NOFOLLOW_DIR_FLAGS, dir_fd=fd)
+            except OSError as e:
+                if not create or not isinstance(e, FileNotFoundError):
+                    # ELOOP (symlink), ENOTDIR (regular file), EACCES, and every other existing
+                    # component failure is terminal: creation must never step over it.
+                    raise ArtifactDirectoryInvalid("delivery_artifact_directory_invalid") from e
+                try:
+                    os.mkdir(component, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass  # Lost a create race; the no-follow reopen below is the arbiter.
+                except OSError as mkdir_error:
+                    raise ArtifactDirectoryInvalid("delivery_artifact_directory_invalid") from mkdir_error
+                try:
+                    child = os.open(component, _NOFOLLOW_DIR_FLAGS, dir_fd=fd)
+                except OSError as reopen_error:
+                    raise ArtifactDirectoryInvalid("delivery_artifact_directory_invalid") from reopen_error
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def dir_identity(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return st.st_dev, st.st_ino
 
 
 def blocked_flag_value(value: dict[str, Any], key: str) -> Any:
@@ -2165,41 +2270,313 @@ def mutating_run_metadata_safe(value: Any, run_id: str) -> bool:
     )
 
 
+_DELIVERY_STATUS_ARTIFACT_OUTCOME = {(False, "blocked", "delivery_status_failed")}
+_COMMON_MUTATION_FAILURE_REASONS = {
+    "repo_unavailable",
+    "delivery_status_repo_mismatch",
+    "expected_repository_mismatch",
+    "finalization_lock_not_acquired",
+    "finalization_lock_token_missing",
+    "delivery_status_invalid",
+    "delivery_status_schema_invalid",
+    "delivery_status_read_only_invalid",
+    "delivery_status_not_ok",
+    "delivery_status_decision_unsafe",
+    "delivery_status_blockers_invalid",
+    "delivery_status_blockers_present",
+    "blocking_busdriver_marker_present",
+    "delivery_status_not_clean_for_operation",
+    "delivery_status_repo_mismatch_after_lock",
+    "delivery_status_after_lock_failed",
+    "expected_repository_changed_after_lock",
+    "git_local_config_unsafe_for_mutation",
+    "local_git_config_unreadable_for_mutation",
+    "local_hooks_path_blocked_for_mutation",
+    "local_credential_config_blocked_for_mutation",
+    "local_network_command_config_blocked_for_mutation",
+    "local_git_hooks_unreadable_for_mutation",
+    "local_git_hooks_blocked_for_mutation",
+}
+_LITMUS_MUTATION_FAILURE_REASONS = {
+    "litmus_status_missing",
+    "litmus_status_unavailable",
+    "litmus_status_not_ok",
+    "litmus_status_summary_missing",
+    "litmus_status_schema_invalid",
+    "litmus_status_not_fresh",
+    "litmus_status_authority_flags_unsafe",
+    "litmus_status_decision_unrecognized",
+    "litmus_status_decision_unsafe",
+    "litmus_status_decision_missing",
+    "fresh_litmus_required",
+}
+_PRE_PR_REVIEW_FAILURE_REASONS = {
+    "clean_worktree_required_for_pre_pr_review",
+    "isolated_review_runtime_unavailable",
+    "plugin_root_required",
+    "busdriver_state_dir_name_unsafe",
+    "busdriver_state_dir_symlink_unsafe",
+    "busdriver_state_dir_unsafe",
+    "plugin_root_missing",
+    "plugin_root_not_git_worktree",
+    "plugin_root_untrusted",
+    "plugin_root_dirty",
+    "plugin_root_integrity_failed",
+    "plugin_snapshot_authentication_failed",
+    "busdriver_litmus_scripts_missing",
+    "busdriver_init_review_loop_failed",
+    "busdriver_codex_lead_failed",
+    "backstop_verdict_writer_payload_invalid",
+    "busdriver_write_backstop_verdict_failed",
+    "busdriver_write_pr_marker_failed",
+    "pre_pr_review_failed",
+    "backstop_verdict_file_required",
+    "backstop_verdict_file_unreadable",
+    "backstop_verdict_file_outside_repo",
+    "backstop_verdict_file_not_regular",
+    "backstop_verdict_file_symlink",
+    "backstop_verdict_file_too_large",
+    "backstop_verdict_invalid_json",
+    "backstop_verdict_not_object",
+    "backstop_verdict_schema_required",
+    "backstop_verdict_read_only_required",
+    "backstop_verdict_independent_backstop_required",
+    "backstop_verdict_summary_required",
+    "backstop_verdict_not_pass",
+    "backstop_verdict_repo_mismatch",
+    "backstop_verdict_head_mismatch",
+    "backstop_verdict_base_mismatch",
+    "backstop_verdict_diff_hash_required",
+    "backstop_verdict_current_diff_unavailable",
+    "backstop_verdict_diff_hash_mismatch",
+}
+_COMMIT_FAILURE_REASONS = {
+    "commit_message_required",
+    "staged_diff_status_failed",
+    "staged_changes_required",
+    "staged_busdriver_marker_files_blocked_for_commit",
+    "clean_unstaged_untracked_required_for_commit",
+    "commit_status_snapshot_failed",
+    "commit_candidate_snapshot_failed",
+    "commit_litmus_staged_diff_hash_missing",
+    "staged_diff_hash_unavailable",
+    "commit_litmus_staged_diff_mismatch",
+    "pre_commit_status_failed",
+    "head_lookup_failed",
+    "branch_ref_lookup_failed",
+    "write_tree_failed",
+    "commit_index_changed_after_review",
+    "commit_parent_changed_after_review",
+    "pre_commit_status_changed_after_review",
+    "pre_commit_non_marker_dirty_worktree",
+    "pre_commit_reviewed_untracked_worktree",
+    "git_commit_tree_failed",
+    "commit_parent_changed_during_publish",
+    "post_publish_ref_advanced",
+    "committed_tree_or_parent_mismatch_after_hooks",
+    "committed_message_mismatch_after_hooks",
+    "git_commit_failed_or_hook_drift",
+    "git_commit_failed",
+    "reviewed_paths_unavailable",
+}
+_PUSH_FAILURE_REASONS = {
+    "clean_worktree_required_for_push",
+    "branch_required_for_push",
+    "push_branch_invalid",
+    "current_branch_invalid_for_push",
+    "push_branch_must_match_current_branch",
+    "push_remote_must_be_origin",
+    "push_remote_safety_required",
+    "github_origin_remote_required_for_push",
+    "remote_pushurl_blocked_for_push",
+    "remote_pushurl_check_failed_for_push",
+    "url_rewrite_blocked_for_push",
+    "url_rewrite_check_failed_for_push",
+    "remote_mirror_blocked_for_push",
+    "remote_mirror_blocked_for_push_check_failed",
+    "remote_push_refspec_blocked_for_push",
+    "remote_push_refspec_blocked_for_push_check_failed",
+    "push_follow_tags_blocked_for_push",
+    "push_follow_tags_blocked_for_push_check_failed",
+    "push_option_blocked_for_push",
+    "push_option_blocked_for_push_check_failed",
+    "protected_branch_push_blocked",
+    "fresh_pre_pr_dual_review_required",
+    "push_head_lookup_failed",
+    "pr_review_base_mismatch",
+    "remote_head_verification_required_for_push",
+    "remote_branch_lookup_timeout",
+    "remote_branch_lookup_failed",
+    "remote_branch_not_found",
+    "remote_branch_lookup_ambiguous",
+    "remote_head_ancestor_required_for_push",
+    "remote_head_ancestor_check_timeout",
+    "remote_head_ancestor_check_failed",
+    "remote_head_not_ancestor_for_push",
+    "remote_head_ancestor_unavailable_for_push",
+    "local_head_changed_after_review",
+    "pre_push_status_failed",
+    "pre_push_dirty_worktree",
+    "push_destination_changed_before_side_effect",
+    "atomic_push_base_binding_unavailable",
+    "git_push_failed",
+    "remote_branch_changed_before_push",
+    "post_push_local_drift_after_failed_push_unverified",
+}
+_PR_CREATE_FAILURE_REASONS = {
+    "atomic_pr_create_binding_unavailable",
+    "current_branch_required_for_pr_create",
+    "github_origin_owner_required_for_pr_create",
+    "pr_head_must_match_origin_current_branch",
+    "pr_head_must_match_current_branch",
+}
+_MERGE_FAILURE_REASONS = {
+    "pr_required",
+    "clean_pr_grind_required",
+    "pr_grind_latest_head_required",
+    "github_origin_remote_required_for_merge",
+    "pr_grind_repository_binding_mismatch",
+    "merge_precondition_query_required",
+    "merge_pr_identity_or_state_mismatch",
+    "atomic_merge_base_binding_unavailable",
+}
+_COMMIT_RECONCILIATION_REASONS = {
+    "post_commit_concurrent_work_preserved",
+    "post_commit_external_dirty_drift",
+    "post_commit_untracked_dirty",
+    "post_commit_non_marker_dirty_remaining",
+    "post_commit_status_failed",
+    "post_commit_dirty_check_failed",
+    "post_commit_dirty_restore_failed",
+    "post_commit_reviewed_untracked_clean_failed",
+}
+_PUSH_RECONCILIATION_REASONS = {
+    "remote_head_post_push_mismatch",
+    "pushed_with_post_push_dirty_worktree",
+    "post_push_status_failed",
+    "local_head_post_push_mismatch",
+    "post_push_local_drift_after_failed_push",
+    "pushed_after_failed_push_remote_verified",
+}
+_PR_CREATE_RECONCILIATION_REASONS = {
+    "pr_created_after_failed_command_reconciled",
+    "pr_created_non_open_postcondition",
+}
+
+
+def _blocked_artifact_outcomes(reasons: set[str]) -> set[tuple[bool, str, str]]:
+    return {(False, "blocked", reason) for reason in reasons}
+
+
+# Operations whose fixed early policy blocker fires in main() before run identity, delivery
+# status, mutation execution, or artifact handling. Their results are printed only and never
+# persisted, so none of them may appear in ARTIFACT_OUTCOME_CONTRACT, MUTATING_ARTIFACT_PHASES,
+# or AUTHORITY_ALLOWED_MUTATING_OUTCOMES: the validator describes reachable artifact bytes, not
+# the dormant executor code behind these blockers. Lifting a blocker and admitting its outcomes
+# into the artifact contract must happen as one reviewed change.
+FIXED_EARLY_BLOCKED_OPERATIONS = {
+    "pre-pr-review": "isolated_review_runtime_unavailable",
+    "push": "atomic_push_base_binding_unavailable",
+    "pr-create": "atomic_pr_create_binding_unavailable",
+    "merge": "atomic_merge_base_binding_unavailable",
+}
+
+
+# Currently artifact-producing operations only: pr-grind and commit (plus the delivery_status
+# subphase). See FIXED_EARLY_BLOCKED_OPERATIONS for the rest. execute verify is absent for the
+# same reason: main() fixed-blocks it on verifier_dispatch_blocker() before run identity,
+# delivery status or artifact handling, so no verify artifact bytes reach production. The
+# non-installed test harness patches that blocker out, but its verify files are harness state,
+# never production-valid durable artifacts. execute pr-grind without --pr is absent for a
+# narrower reason: it sets pr_required but never sets write_run_artifact.
+#
+# Both artifact-write-failure fallbacks are absent for a third reason: main() calls
+# write_artifact exactly once, and each fallback only rewrites the dict main() then prints
+# (run_artifact_path stays None, run.artifacts is emptied) without attempting a second write.
+# Neither "artifact_write_failed" nor "artifact_write_failed_after_side_effect" can therefore
+# reach a durable artifact byte, so admitting them here would authenticate state that no
+# producer can create. The stdout fallbacks themselves are unaffected by this contract.
+ARTIFACT_OUTCOME_CONTRACT = {
+    "pr-grind": {
+        "pr_grind": {
+            (True, "pr_grind_clean", "latest_pr_head_clean_read_only"),
+            (False, "blocked", "pr_grind_needs_fix"),
+            (False, "blocked", "pr_grind_wait"),
+            (False, "blocked", "pr_grind_blocked"),
+            (False, "blocked", "pr_grind_loop_failed"),
+        },
+        "delivery_status": _DELIVERY_STATUS_ARTIFACT_OUTCOME,
+    },
+    "commit": {
+        "commit": {
+            (True, "committed", "committed"),
+            *((False, "committed", reason) for reason in _COMMIT_RECONCILIATION_REASONS),
+            (False, "committed_release_failed", "finalization_lock_release_failed"),
+            *_blocked_artifact_outcomes(_COMMON_MUTATION_FAILURE_REASONS | _LITMUS_MUTATION_FAILURE_REASONS | _COMMIT_FAILURE_REASONS),
+        },
+        "delivery_status": _DELIVERY_STATUS_ARTIFACT_OUTCOME,
+    },
+}
+
+
+# Mutating-envelope cardinality contract (M-1). Only these run phases execute an actual
+# mutation and therefore require a complete mutating run; verify/pr_grind/delivery_status
+# never mutate and must carry mutating_run == None.
+MUTATING_ARTIFACT_PHASES = {"commit"}
+
+# The ONLY (status, reason) mutating outcomes whose nested authority carries allowed=True in
+# production (mutating_authority(operation, True, reason)). Every other outcome — blockers,
+# reconciliation and release-failed — is authority allowed=False. Derived from the reachable
+# mutating_authority() call sites in execute_mutating_operation.
+AUTHORITY_ALLOWED_MUTATING_OUTCOMES = {
+    "commit": {("committed", "committed")},
+}
+
+
 def artifact_is_valid(data: dict[str, Any], run_id: str) -> bool:
     run = data.get("run")
     decision_data = data.get("decision")
     mutating_run = data.get("mutating_run")
     operation = data.get("operation")
-    expected_phase = {
-        "verify": "verify",
-        "pr-grind": "pr_grind",
-        "pre-pr-review": "pre_pr_review",
-        "commit": "commit",
-        "push": "push",
-        "pr-create": "pr_create",
-        "merge": "merge",
-    }.get(operation)
-    if isinstance(run, dict) and run.get("reason") == "delivery_status_failed":
-        expected_phase = "delivery_status"
+    phase = run.get("phase") if isinstance(run, dict) else None
+    run_status = run.get("status") if isinstance(run, dict) else None
+    run_reason = run.get("reason") if isinstance(run, dict) else None
+    outcome = (data.get("ok"), run_status, run_reason) if isinstance(run, dict) else None
+    allowed_outcomes = ARTIFACT_OUTCOME_CONTRACT.get(operation, {}).get(phase, set())
+
+    # M-1: every mutating-phase outcome requires a complete mutating run; all other phases
+    # require mutating_run == None. No write-failure fallback is durable (see
+    # ARTIFACT_OUTCOME_CONTRACT), so there is no non-mutating exception to carve out here.
+    requires_mutating_run = phase in MUTATING_ARTIFACT_PHASES
+
+    if isinstance(mutating_run, dict):
+        authority = mutating_run.get("authority")
+        mutating_outcome = (mutating_run.get("status"), mutating_run.get("reason"))
+        # M-2: nested authority truth is keyed off the mutating run's OWN outcome, so it holds
+        # for success/reconciliation/release-failed alike.
+        expected_authority_allowed = mutating_outcome in AUTHORITY_ALLOWED_MUTATING_OUTCOMES.get(operation, set())
+        mutating_run_correlated = (
+            mutating_run.get("operation") == operation
+            and mutating_run.get("status") == run_status
+            # M-3: a durable nested run always shares its outer run's reason; no preserved
+            # original-outcome class survives into durable bytes.
+            and mutating_run.get("reason") == run_reason
+            and isinstance(authority, dict)
+            and authority.get("reason") == mutating_run.get("reason")
+            and (authority.get("allowed") is True) == expected_authority_allowed
+        )
+    else:
+        mutating_run_correlated = True
+
     outcome_consistent = (
         isinstance(run, dict)
         and isinstance(decision_data, dict)
         and data.get("mode") == "execute"
-        and expected_phase is not None
-        and run.get("phase") == expected_phase
-        and decision_data.get("status") == run.get("status")
-        and decision_data.get("reason") == run.get("reason")
-        and not (data.get("ok") is True and (run.get("status") == "blocked" or str(run.get("status")).endswith("_failed") or run.get("status") == "observed_target_unattributed"))
-        and not (data.get("ok") is False and run.get("status") in {"verified", "pr_grind_clean"})
-        and (
-            mutating_run is None
-            or (
-                isinstance(mutating_run, dict)
-                and mutating_run.get("operation") == operation
-                and mutating_run.get("status") == run.get("status")
-                and mutating_run.get("reason") == run.get("reason")
-            )
-        )
+        and outcome in allowed_outcomes
+        and decision_data.get("status") == run_status
+        and decision_data.get("reason") == run_reason
+        and (mutating_run is not None) == requires_mutating_run
+        and mutating_run_correlated
     )
     return (
         data.get("schema") == SCHEMA
@@ -2221,10 +2598,40 @@ def new_artifact_auth_key() -> tuple[str, bytes]:
 
 
 def artifact_auth_message(data: dict[str, Any], path: Path) -> bytes:
+    """Bind the MAC to the FULL absolute lexical path the artifact was discovered at.
+
+    Binding only path.name let a byte-for-byte copy of a valid artifact authenticate under any
+    other safe artifact base sharing the filename, while the writer key was live in-process. The
+    writer signs artifact_base()/name and the lookup verifies the same base/name it discovered —
+    both from artifact_base(), which is abspath-normalized and never symlink-resolved, so the
+    string is deterministic between the two without depending on the filesystem's current shape.
+    """
     unsigned = dict(data)
     unsigned.pop("writer_authentication", None)
     canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return b"hermes-busdriver-delivery-artifact-v1\0" + path.name.encode() + b"\0" + canonical
+    return b"hermes-busdriver-delivery-artifact-v1\0" + str(path).encode() + b"\0" + canonical
+
+
+def artifact_path_claims_bind(data: dict[str, Any], path: Path) -> bool:
+    """The body's own path claims must name exactly the path the artifact was discovered at.
+
+    The MAC already covers these fields, so this is not the only thing standing between a
+    relocated copy and acceptance — it is the check that keeps a body signed by THIS process from
+    being accepted somewhere it does not claim to live. Exactly one result entry: a duplicate,
+    missing, or otherwise-shaped artifacts list is not the schema the writer produces.
+    """
+    target = str(path)
+    run = data.get("run")
+    if data.get("run_artifact_path") != target or not isinstance(run, dict):
+        return False
+    artifacts = run.get("artifacts")
+    return (
+        isinstance(artifacts, list)
+        and len(artifacts) == 1
+        and isinstance(artifacts[0], dict)
+        and artifacts[0].get("kind") == "result"
+        and artifacts[0].get("path") == target
+    )
 
 
 def artifact_auth_shape_valid(auth: Any) -> bool:
@@ -2241,7 +2648,7 @@ def artifact_auth_shape_valid(auth: Any) -> bool:
 
 def authenticate_artifact(data: dict[str, Any], path: Path) -> bool:
     auth = data.get("writer_authentication")
-    if not artifact_auth_shape_valid(auth):
+    if not artifact_auth_shape_valid(auth) or not artifact_path_claims_bind(data, path):
         return False
     assert isinstance(auth, dict)
     key = _ARTIFACT_AUTH_KEYS.get(auth["key_id"])
@@ -2251,50 +2658,107 @@ def authenticate_artifact(data: dict[str, Any], path: Path) -> bool:
     return hmac.compare_digest(expected, auth["mac"])
 
 
-def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
+def read_fd_bounded(fd: int, limit: int) -> bytes:
+    """At most `limit` bytes from fd, however many reads that takes.
+
+    os.read is not obliged to return everything at once, and a short read is not EOF; only an
+    empty return is. Nothing here trusts a size the caller learned from fstat.
+    """
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_artifact_entry(dir_fd: int, name: str) -> tuple[dict[str, Any], float] | None:
+    """Open one artifact entry no-follow RELATIVE to dir_fd and validate it via fstat.
+
+    Returns (data, mtime) only for a regular, owner-only 0600, single-link JSON object of at most
+    ARTIFACT_MAX_BYTES. The file is never reached by path, so no component of the configured tree
+    is traversed a second time.
+
+    Order is the point. The open is non-blocking, so a FIFO cannot wedge it; the fstat then
+    rejects every non-regular entry before a byte is read. The size verdict comes from that same
+    fstat, so an oversized regular file never reaches a read or the parser. fstat is only a
+    snapshot, though, so the read is INDEPENDENTLY bounded at limit + 1: a file that grew after
+    the stat is rejected by the second bound rather than trusted from the stale one.
+    """
+    try:
+        fd = os.open(name, _NOFOLLOW_FILE_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.getuid()
+            or st.st_nlink != 1
+            or stat.S_IMODE(st.st_mode) != 0o600
+            or not 0 <= st.st_size <= ARTIFACT_MAX_BYTES
+        ):
+            return None
+        raw = read_fd_bounded(fd, ARTIFACT_MAX_BYTES + 1)
+        if len(raw) > ARTIFACT_MAX_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    finally:
+        os.close(fd)
+    return (data, st.st_mtime) if isinstance(data, dict) else None
+
+
+def artifact_entries(run_id: str) -> list[tuple[float, str, Path, dict[str, Any]]]:
+    """Every no-follow-readable artifact entry structurally valid for run_id, newest last.
+
+    An unsafe, unreadable, or symlinked artifact directory yields no entries: it is not evidence
+    of anything, so callers fall back to their existing missing-directory behavior rather than
+    accepting bytes reached through a followed component.
+    """
     base = artifact_base()
-    if not base.is_dir():
-        return None
-    matches: list[tuple[float, str, Path, dict[str, Any]]] = []
-    for path in base.glob("*.json"):
+    try:
+        dir_fd = artifact_dir_fd(create=False)
+    except ArtifactDirectoryInvalid:
+        return []
+    entries: list[tuple[float, str, Path, dict[str, Any]]] = []
+    try:
         try:
-            st = path.lstat()
-            if path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o600:
-                continue
-            data = json.loads(path.read_text())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict) or not artifact_is_valid(data, run_id) or not authenticate_artifact(data, path):
-            continue
-        try:
-            mtime = path.stat().st_mtime
+            names = [name for name in os.listdir(dir_fd) if name.endswith(".json")]
         except OSError:
-            continue
-        matches.append((mtime, path.name, path, data))
-    if not matches:
-        return None
-    _mtime, _name, path, data = sorted(matches)[-1]
-    return path, data
+            return []
+        for name in names:
+            entry = read_artifact_entry(dir_fd, name)
+            if entry is None:
+                continue
+            data, mtime = entry
+            if not artifact_is_valid(data, run_id):
+                continue
+            entries.append((mtime, name, base / name, data))
+    finally:
+        os.close(dir_fd)
+    return sorted(entries)
+
+
+def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
+    matches = [
+        (path, data)
+        for _mtime, _name, path, data in artifact_entries(run_id)
+        if authenticate_artifact(data, path)
+    ]
+    return matches[-1] if matches else None
 
 
 def has_process_external_artifact(run_id: str) -> bool:
     """Return true only for structurally valid artifacts whose process-scoped writer key is unavailable."""
-    base = artifact_base()
-    if not base.is_dir():
-        return False
-    for path in base.glob("*.json"):
-        try:
-            st = path.lstat()
-            if path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o600:
-                continue
-            data = json.loads(path.read_text())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        auth = data.get("writer_authentication") if isinstance(data, dict) else None
+    for _mtime, _name, _path, data in artifact_entries(run_id):
+        auth = data.get("writer_authentication")
         if (
-            isinstance(data, dict)
-            and artifact_is_valid(data, run_id)
-            and artifact_auth_shape_valid(auth)
+            artifact_auth_shape_valid(auth)
             and isinstance(auth, dict)
             and auth["key_id"] not in _ARTIFACT_AUTH_KEYS
         ):
@@ -2303,47 +2767,101 @@ def has_process_external_artifact(run_id: str) -> bool:
 
 
 def write_artifact(result: dict[str, Any]) -> None:
+    """Serialize result into the artifact directory without following any symlink component.
+
+    The directory fd obtained by the no-follow traversal stays open across the whole write, so
+    the temp create, the fsync, the atomic replace, and any cleanup all address the directory
+    the traversal actually proved safe — not a path that could be re-pointed underneath us.
+    """
     run = result.get("run") if isinstance(result.get("run"), dict) else {}
     run_id = str(run.get("run_id") or new_run_id())
-    path = artifact_path(run_id)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.parent.is_symlink() or not path.parent.is_dir():
-        raise RuntimeError("delivery_artifact_directory_invalid")
-    path.parent.chmod(0o700)
-    result["run_artifact_path"] = str(path)
-    if isinstance(result.get("run"), dict):
-        result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
-    key_id, key = new_artifact_auth_key()
-    result["writer_authentication"] = {
-        "schema": ARTIFACT_AUTH_SCHEMA,
-        "algorithm": "hmac-sha256-process-scoped",
-        "key_id": key_id,
-        "mac": hmac.new(key, artifact_auth_message(result, path), hashlib.sha256).hexdigest(),
-    }
-    tmp_path: Path | None = None
+    name = artifact_name(run_id)
+    path = artifact_base() / name
+    dir_fd = artifact_dir_fd(create=True)
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            json.dump(result, tmp, indent=2, sort_keys=True)
-            tmp.write("\n")
-        os.replace(tmp_path, path)
-    except OSError:
-        result["run_artifact_path"] = None
+        os.fchmod(dir_fd, 0o700)
+        result["run_artifact_path"] = str(path)
         if isinstance(result.get("run"), dict):
-            result["run"]["artifacts"] = []
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+            result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
+        key_id, key = new_artifact_auth_key()
+        result["writer_authentication"] = {
+            "schema": ARTIFACT_AUTH_SCHEMA,
+            "algorithm": "hmac-sha256-process-scoped",
+            "key_id": key_id,
+            "mac": hmac.new(key, artifact_auth_message(result, path), hashlib.sha256).hexdigest(),
+        }
+        # Serialized once, after every signed field is final, so the bytes measured are exactly
+        # the bytes written. The limit is enforced here — before the O_EXCL temp file exists — so
+        # an oversized result leaves no residue to clean up.
+        payload = (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
+        if len(payload) > ARTIFACT_MAX_BYTES:
+            raise ArtifactTooLarge("delivery_artifact_too_large")
+        tmp_name = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        write_artifact_bytes(payload, dir_fd, tmp_name, name)
+        confirm_artifact_directory_identity(dir_fd, name)
+    except (OSError, ArtifactDirectoryInvalid, ArtifactTooLarge):
+        clear_artifact_result_fields(result)
         raise
+    finally:
+        os.close(dir_fd)
+
+
+def write_artifact_bytes(payload: bytes, dir_fd: int, tmp_name: str, name: str) -> None:
+    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except OSError:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+
+
+def confirm_artifact_directory_identity(dir_fd: int, name: str) -> None:
+    """Fail closed unless the configured path still names the directory just written into.
+
+    Without this, a component swapped between the traversal and the write would leave the run
+    reporting a path that resolves somewhere the bytes are not — a lie the stdout fallback would
+    then repeat. On drift the artifact is removed through the ORIGINAL fd, not by path.
+
+    A re-open that FAILS is drift too, not an excuse to skip the removal: an ancestor swapped to a
+    symlink is the likeliest way this fires, and the bytes are still reachable through the original
+    fd. Both outcomes converge on the same unlink and the same stable reason.
+    """
+    try:
+        check_fd = artifact_dir_fd(create=False)
+        try:
+            drifted = dir_identity(check_fd) != dir_identity(dir_fd)
+        finally:
+            os.close(check_fd)
+    except (OSError, ArtifactDirectoryInvalid) as e:
+        cause: Exception | None = e
+    else:
+        if not drifted:
+            return
+        cause = None
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except OSError:
+        pass
+    raise ArtifactDirectoryInvalid("delivery_artifact_directory_identity_drift") from cause
+
+
+def clear_artifact_result_fields(result: dict[str, Any]) -> None:
+    result["run_artifact_path"] = None
+    result.pop("writer_authentication", None)
+    if isinstance(result.get("run"), dict):
+        result["run"]["artifacts"] = []
 
 
 def status_lookup_run(args: argparse.Namespace, result_decision: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -3927,17 +4445,8 @@ def main() -> int:
         result = early_policy_result(args, "unsupported_operation")
         print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
         return 2
-    if args.mode == "execute" and args.operation == "pre-pr-review":
-        result = early_policy_result(args, "isolated_review_runtime_unavailable")
-        print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
-        return 2
-    if args.mode == "execute" and args.operation in {"push", "pr-create", "merge"}:
-        blocker = {
-            "push": "atomic_push_base_binding_unavailable",
-            "pr-create": "atomic_pr_create_binding_unavailable",
-            "merge": "atomic_merge_base_binding_unavailable",
-        }[args.operation]
-        result = early_policy_result(args, blocker)
+    if args.mode == "execute" and args.operation in FIXED_EARLY_BLOCKED_OPERATIONS:
+        result = early_policy_result(args, FIXED_EARLY_BLOCKED_OPERATIONS[args.operation])
         print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
         return 2
     if args.mode == "execute" and args.operation == "verify":
@@ -4110,8 +4619,14 @@ def main() -> int:
     if write_run_artifact:
         try:
             write_artifact(result)
-        except OSError as e:
+        except (OSError, ArtifactDirectoryInvalid, ArtifactTooLarge) as e:
             artifact_error = redact_text(str(e))
+            # Deliberately a superset of the reachable-commit completed statuses: any status that
+            # could carry a real side effect must take the preserving branch, so a future
+            # unblocked executor cannot silently report a completed mutation as "no side effect".
+            # This governs the stdout fallback only — neither fallback writes an artifact (the
+            # single write_artifact call above already failed), so no write-failure outcome is
+            # durable and ARTIFACT_OUTCOME_CONTRACT admits none of them.
             completed_statuses = {
                 "pre_pr_review_complete", "committed", "pushed", "pr_created", "merged",
                 "pre_pr_review_complete_release_failed", "committed_release_failed", "pushed_release_failed",
@@ -4134,6 +4649,10 @@ def main() -> int:
                 result["ok"] = False
                 result["run_artifact_error"] = artifact_error
                 result["decision"] = decision("blocked", "artifact_write_failed")
+                # M-1: the ordinary write failure is a pre-side-effect, NON-mutating outcome. A
+                # blocked mutating operation may already have populated a nested run; it is stale
+                # once the outer run becomes an ordinary write failure and must not persist.
+                result["mutating_run"] = None
                 if isinstance(result.get("run"), dict):
                     result["run"]["status"] = "blocked"
                     result["run"]["reason"] = "artifact_write_failed"
