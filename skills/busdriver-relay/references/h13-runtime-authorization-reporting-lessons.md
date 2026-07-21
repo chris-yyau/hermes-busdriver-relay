@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # H13 Runtime Authorization Reporting Lessons
 
 Context: Hermes Delivery Mode run for `hermes-busdriver-relay` PR #16 (`feat: report runtime authorization sources`). The slice hardened `scripts/hermes-busdriver-runtime-check` without adding any finalization authority.

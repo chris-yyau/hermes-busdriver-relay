@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR108 Pi authority-sync delivery lessons
 
 Use this note for Busdriver relay delivery slices that combine skill-source sync, target-state agent-routing docs, PR-grind reviewer fixes, and helper worktree cleanup.

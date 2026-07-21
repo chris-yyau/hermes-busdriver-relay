@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR109 Pi adapter final PR-grind lessons
 
 Use this when finishing Pi adapter / constrained tool-harness PRs through the relay delivery loop.

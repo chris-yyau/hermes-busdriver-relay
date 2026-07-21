@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Agent-draft readiness evidence lessons
 
 Session context: while continuing the Hermes Busdriver Relay after the balanced-agent work-plan slice, the user said “繼續” and then “go”. The slice embedded `hermes-busdriver-agent-balance-plan/v0` into `hermes-busdriver-finalization-readiness` as validated advisory handoff evidence, then proceeded through Delivery Mode to PR #43 and merge.

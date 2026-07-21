@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR109 Pi adapter review/rebase lessons
 
 Use this when delivering a Hermes relay slice that adds or changes a constrained agent adapter, especially Pi or any other Busdriver-shaped tool harness.

@@ -4,6 +4,10 @@
 
 Use this note when discussing whether Pi should be added to, replace, or compete with OpenCode/Codex in Hermes↔Busdriver relay work.
 
+## Current production status
+
+This document preserves **historical, non-installed harness evidence**, not an executable procedure. Pi is preferred route metadata but production dispatch remains non-programmatic with `agent_containment_and_credential_broker_unavailable`. The adapter fixture proves tool/schema behavior only; it does not prove process containment or credential brokering. Commands and successful-smoke transcripts below are provenance from throwaway fixtures and must not be run as production launch instructions.
+
 ## User correction captured
 
 When the user proposes a role/pipeline change as a question, do **not** immediately write memory or answer from stale policy. First verify the concrete capability claim when it is checkable. In this session, the user asked about adding Pi because it can adjust its own tools; Hermes first saved memory and answered hypothetically, then the user corrected that Hermes should have checked.
@@ -54,7 +58,7 @@ Do not frame Pi as an immediate Busdriver authority or direct replacement for Co
 Pi = Busdriver-compatible tool-harness / adapter candidate
 ```
 
-Treat Pi as the current constrained default draft lane only through the proven `bd_*` adapter. OpenCode is configured as fallback/comparison route metadata but remains non-programmatic because the user deleted the OpenCode Busdriver plugin; do not describe it as Busdriver-compatible or dispatchable unless a new adapter/plugin is installed and verified. Codex is PR lead / review / backstop-focused by default and implements only by explicit exception.
+Treat Pi as the preferred draft **route metadata**, while keeping production dispatch disabled. The proven `bd_*` adapter exists only as a non-installed harness. OpenCode is fallback/comparison route metadata; its historical generic wrapper proof likewise does not provide production containment or finalization authority. Codex is PR lead / review / backstop-focused by default and implements only by explicit exception through an independently authorized path.
 
 Recommended authority map:
 
@@ -199,25 +203,25 @@ Use `pi --mode json` when verifying wrappers so Hermes can parse the actual tool
    - Require structured artifact output ending in `needs_busdriver_review`.
    - Hermes reconciles actual git diff/status against Pi's claims.
 
-3. **In-repo Pi adapter proof**
-   - Since the user has confirmed Pi as the chosen tool-harness direction, do not require a fresh OpenCode parity contest before the Pi adapter proof.
-   - Add a real in-repo Pi adapter schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation.
-   - Before that proof passes, keep Pi target-state; after the proof passes, allow Pi only as the constrained `bd_*` draft adapter lane.
-   - Treat OpenCode comparison as optional future evidence: if requested, label it either generic OpenCode-under-Hermes-gate containment or rebuild a Busdriver-compatible OpenCode adapter first.
+3. **In-repo Pi adapter fixture proof**
+   - Since the user confirmed Pi as the chosen tool-harness direction, do not require a fresh OpenCode parity contest before maintaining the Pi fixture proof.
+   - Keep the schema, non-installed launcher fixture, postflight contract tests, historical smoke provenance, and authority-flag validation.
+   - Even after schema/wrapper/smoke contracts pass, production Pi dispatch remains false until containment and credential brokering are independently proven.
+   - Treat OpenCode comparison as optional historical evidence, not production authority.
 
-Only after the in-repo schema/wrapper/smoke/contract tests pass should Pi be treated as an enabled mutating draft lane. In that enabled lane, Pi remains constrained to the relay-owned `bd_*` adapter and still cannot commit, push, open PRs, merge, deploy, release, publish, or write trusted markers.
+Only after the in-repo schema/wrapper/smoke/contract tests pass may the fixture be described as an adapter-shape proof. It must not be described as an enabled production mutating lane. Pi production dispatch remains blocked with `agent_containment_and_credential_broker_unavailable` and cannot commit, push, open PRs, merge, deploy, release, publish, or write trusted markers.
 
 ## Verdict from the initial smoke
 
-Validated:
+Historical non-installed harness evidence validated:
 
-- Pi can be launched with built-in tools disabled and only extension-provided tools enabled.
-- Pi can use Busdriver-shaped read/status/write/bash wrappers.
-- Read-only mode can remain clean.
-- Draft mode can produce allowlisted dirty-tree changes only.
-- Finalization/destructive commands can be blocked inside the custom bash wrapper.
+- Pi can be configured with built-in tools disabled and only extension-provided tools exposed.
+- The fixture can use Busdriver-shaped read/status/write/bash wrappers.
+- Read-only fixture mode can remain clean.
+- Draft fixture mode can produce allowlisted dirty-tree changes only.
+- Finalization/destructive commands can be blocked inside the custom harness wrapper.
 - Tool results can carry fail-closed authority metadata and `needs_busdriver_review`.
-- The formal `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` gated draft launcher has now passed for scoped fake-Pi contract runs and optional real Pi smoke.
+- The historical `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` fixture passed scoped fake-Pi contracts and optional throwaway smoke; it did not prove production containment or credential brokering.
 
 Still not validated:
 
@@ -227,9 +231,9 @@ Still not validated:
 - OpenCode comparison remains optional future evidence; the live Busdriver OpenCode plugin path is currently absent/degraded.
 - Multi-step reliability under longer tasks.
 
-## Follow-up gated draft smoke
+## Historical follow-up fixture smoke
 
-A follow-up Hermes relay smoke validated Pi inside the actual draft gate pattern:
+A throwaway, non-installed relay fixture exercised Pi inside the target-state gate pattern. This transcript is provenance, not a current production procedure:
 
 ```text
 hermes-busdriver-agent-draft
@@ -255,7 +259,7 @@ lock status after run: count=0
 commit history: still initial fixture only
 ```
 
-This validates Pi as a **gated draft runtime candidate**. It still does not make Pi a Busdriver authority.
+This historical fixture validates Pi as a **gated draft runtime candidate** only. Production launch remains blocked with `agent_containment_and_credential_broker_unavailable`, and Pi is not a Busdriver authority.
 
 ## OpenCode comparison caveat
 
@@ -269,31 +273,32 @@ visible primary agents from opencode agent list: compaction, summary, title
 plain opencode run without --agent: failed with "no primary visible agent found"
 ```
 
-A generic OpenCode gated draft smoke did pass under the Hermes gate by using `hermes-busdriver-agent-draft --agent custom` with an `--agent-cmd` that invoked `opencode run --agent summary`: OpenCode wrote the scoped file, attempted `git commit -m should-not-run`, and the relay launcher's PATH guard blocked it with exit 126. That demonstrates Hermes outer-gate containment of OpenCode, but **not** Busdriver-shaped tool parity inside OpenCode, because the live Busdriver OpenCode plugin was absent.
+A historical generic OpenCode fixture used `hermes-busdriver-agent-draft --agent custom` with an `--agent-cmd` that invoked `opencode run --agent summary`: OpenCode wrote the scoped file, attempted `git commit -m should-not-run`, and the fixture PATH guard blocked it with exit 126. That records target-state wrapper behavior but does **not** demonstrate production containment, credential brokering, or Busdriver-shaped tool parity. The custom production route has since been removed.
 
-## Recommended next slice
+## Recommended next architecture slice
 
-The next safe implementation slice is no longer the first Pi gate smoke; that has passed. Since the user has confirmed Pi as the chosen tool-harness direction, the next promotion gate is an in-repo Pi adapter proof: schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation while all finalization flags remain false.
+The adapter-shape proof is complete in the non-installed harness. The only production promotion path is now a separately reviewed containment and credential-broker architecture with descendant control, ambient-secret isolation, side-effect policy, teardown/reconciliation, and mutation-resistant negative sentinels. Until that architecture exists, keep `programmatic_dispatch_allowed=false`, `adapter_verified=false`, and `dispatch_allowed=false`.
 
-Before implementing that slice in `hermes-busdriver-relay`, create/select a separate git worktree and branch when the relay repo has existing WIP. Do not start Pi adapter implementation in the dirty primary relay worktree unless the user explicitly accepts that scope. Record the selected worktree path in the run artifact/brief so later verification knows which worktree owns the draft.
+If that future work begins in `hermes-busdriver-relay`, create/select a separate git worktree and branch when the relay repo has existing WIP. Record the worktree path in Hermes-owned evidence; do not start in a dirty primary relay worktree without explicit scope acceptance.
 
-OpenCode comparison remains optional future evidence, not a prerequisite for choosing Pi. If the user explicitly asks for it, first state whether the comparison is generic OpenCode-under-Hermes-gate containment or true Busdriver-compatible OpenCode parity. True parity requires the intended OpenCode Busdriver plugin lane to be present and enabled again, with `BUSDRIVER_PLUGIN_ROOT` and `BUSDRIVER_STATE_DIR=.opencode` preserved.
+OpenCode comparison remains optional historical evidence, not a prerequisite for Pi route preference and not a production unlock. True parity would require the intended OpenCode Busdriver plugin lane to be present again, but even parity would not remove `agent_containment_and_credential_broker_unavailable` without the separate safety architecture.
 
-Until then, Pi is the confirmed tool-harness direction, while OpenCode should be described as configured-but-non-programmatic for Busdriver-plugin fallback/comparison in this environment.
+Pi is the confirmed tool-harness direction and OpenCode is fallback/comparison route metadata; both remain configured-but-non-programmatic for production dispatch.
 
-## Continuation discipline during comparison work
+## Continuation discipline during architecture work
 
-When the user's active goal is to compare OpenCode and Pi, treat skill-source hygiene as a prerequisite, not as the destination. If a live check reveals installed↔repo skill drift, complete the tiny sync slice first and end on a clean brief. Then immediately frame the next comparison slice in terms of the user's actual comparison goal:
+When the user's active goal is to compare OpenCode and Pi, treat skill-source hygiene as a prerequisite, not the destination. Adapter-shape comparison is already historical evidence and must not be confused with a production unlock. The next meaningful slice is safety architecture:
 
 ```text
 clean skill-source loop
-→ implement the in-repo Pi adapter proof with schema, launcher wrapper, postflight contracts, real-agent smoke, and authority-flag validation
-→ keep OpenCode comparison optional and explicitly scoped if requested
-→ compare only after labeling generic OpenCode containment vs true Busdriver-plugin parity
-→ preserve tool controllability, gate parity, state-dir handling, artifact quality, finalization containment, and data-egress boundaries
+→ keep Pi/OpenCode route metadata non-programmatic
+→ design enforceable descendant containment and a parent-held credential broker
+→ add filesystem/network policy, teardown, reconciliation, and negative sentinels
+→ compare adapters only inside non-installed fixtures
+→ require independent review before any production metadata changes from false
 ```
 
-Do not let repeated skill-sync/final-audit work obscure the comparison question. Preserve the distinction between (a) Pi's gated draft-runtime evidence, (b) generic OpenCode containment under Hermes' outer gate, and (c) true OpenCode Busdriver-plugin parity.
+Do not let repeated skill-sync or adapter-quality comparisons obscure the governing blocker. Preserve the distinction between (a) historical Pi fixture evidence, (b) historical generic OpenCode wrapper evidence, and (c) a future production containment and credential-broker proof that does not yet exist.
 
 ## Hermes responsibility in this workflow
 

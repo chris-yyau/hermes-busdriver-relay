@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Pi adapter async-review fix lessons
 
 Use this when a late async reviewer/subagent reports blockers against a Busdriver relay adapter proof or PR branch, especially Pi/tool-harness work.

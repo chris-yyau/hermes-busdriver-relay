@@ -1,6 +1,8 @@
 # Pi Adapter Implementation Lessons
 
-Use this reference when continuing or reviewing the Pi Busdriver-shaped adapter work in `hermes-busdriver-relay`.
+**Superseded for production execution.** This reference preserves target-state adapter-hardening and historical non-installed fixture lessons. Production Pi/OpenCode dispatch is blocked before repository, HOME/state, credential, lock, prompt, or worker handling by `agent_containment_and_credential_broker_unavailable`.
+
+Use this reference only when reviewing fixture provenance or designing a separately reviewed future containment and parent-held credential-broker slice in `hermes-busdriver-relay`; it is not a current production procedure.
 
 ## Worktree and ownership
 
@@ -21,15 +23,15 @@ Do not patch Pi itself unless a later task explicitly scopes an upstream Pi SDK/
 
 ## Target-state vs current-state wording
 
-Avoid writing docs that make `--agent pi` look production-trusted before the in-repo proof passes. Use wording like:
+Avoid wording that makes `--agent pi` look production-trusted. Current wording must be:
 
 ```text
-Pi lane    = current implemented constrained default draft lane after schema + wrapper + smoke + contract proof.
-Codex lane = explicit fallback draft lane when Pi is blocked or unsuited.
-OpenCode   = generic/opencode-go lane unless a Busdriver-compatible plugin/adapter is rebuilt and verified.
+Pi lane    = preferred route metadata; contract proven only in non-installed fixtures; production dispatch blocked.
+OpenCode   = fallback/comparison route metadata; contract proven only in non-installed fixtures; production dispatch blocked.
+Codex lane = PR lead/review/backstop by default; implementation only by explicit exception.
 ```
 
-A successful Pi draft result should be `needs_busdriver_review`, never `done`, `complete`, `merged`, or `ready_to_merge`.
+Only a future independently reviewed OS-containment and parent-held credential-broker implementation could change those dispatchability fields. A future successful Pi draft result would still be `needs_busdriver_review`, never `done`, `complete`, `merged`, or `ready_to_merge`.
 
 ## Adapter hardening pattern
 
@@ -51,15 +53,15 @@ publish_allowed=false
 finalization_allowed=false
 ```
 
-## Useful contract-test pattern
+## Historical non-installed contract-test pattern
 
-Add fake-Pi tests before real Pi smoke. A fake Pi executable can read `BD_REPO_ROOT`, write the scoped draft file, emit `PI_BD_ARTIFACT_PATH`, and let the wrapper/agent-draft tests validate:
+Fake-Pi tests remain useful only as fixture provenance. A fake Pi executable can read `BD_REPO_ROOT`, write the scoped draft file, emit `PI_BD_ARTIFACT_PATH`, and let a non-installed runpy harness validate:
 
 - schema/status parsing;
 - authority flags false;
 - postflight changed files in scope;
 - commit history unchanged;
-- `hermes-busdriver-agent-draft --agent pi` works through lock/preflight/postflight;
-- `hermes-busdriver-agent-smoke --agent pi` accepts the adapter path.
+- the fixture-only wrapper/lock/preflight/postflight shape;
+- parser and authority-negative production responses.
 
-Run targeted tests first, then broader relay contract tests. Real Pi smoke is optional/opt-in because it can consume provider/runtime quota; failure due to provider setup should be reported as a smoke blocker, not treated as contract failure.
+These tests do not prove production descendant containment, credential brokering, or dispatch authority. Real-model smoke is historical/optional fixture evidence and must not be represented as a production command or production capability.
