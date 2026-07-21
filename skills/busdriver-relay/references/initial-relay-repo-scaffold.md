@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Busdriver Relay Session Notes — Initial Repo Scaffold
 
 Use this reference when continuing Hermes-side Busdriver integration work.

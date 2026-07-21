@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Full role-map resolver slice lessons
 
 Use when a live `~/.hermes/busdriver-relay/config.json` role map has drifted ahead of repo resolver/status support, or when the user says the relay config is only partially set.

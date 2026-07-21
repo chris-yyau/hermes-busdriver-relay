@@ -26,8 +26,8 @@ Workers produce draft evidence; Hermes verifies evidence; ClaudeCode/Busdriver o
 authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
-implementation.primary.current            = Pi
-implementation.fallback.candidate          = OpenCode route metadata; non-programmatic until adapter/smoke/tests pass
+implementation.primary.current            = Pi adapter contract verified in non-installed harnesses; production dispatch blocked by agent_containment_and_credential_broker_unavailable
+implementation.fallback.current            = OpenCode adapter contract verified in non-installed harnesses; production dispatch blocked by agent_containment_and_credential_broker_unavailable
 implementation.exception.explicit           = Codex only by explicit exception when Pi/OpenCode are blocked or unsuited
 review.pr_lead_and_backstop                 = Codex / Claude Code per relay role config
 read_only.fast_review                     = Grok
@@ -40,8 +40,8 @@ finalization.authority_path               = ClaudeCode / Busdriver
 Short form:
 
 ```text
-Pi writes constrained default drafts through the proven `bd_*` adapter.
-OpenCode is the configured fallback / China-model comparison route, but resolver output must keep it non-programmatic until adapter/plugin proof exists.
+Pi is the default target adapter; its draft contract is verified only in non-installed harnesses and production launch is blocked.
+OpenCode is the fallback/comparison target adapter; its contract is likewise verified only in non-installed harnesses and production launch is blocked.
 Codex is PR lead / review / backstop-focused by default, with implementation only by explicit exception.
 Grok/Gemini critique.
 Zed is human/manual editing surface.
@@ -54,12 +54,12 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Pi lane      = current implemented constrained default draft lane; still not Busdriver/Claude authority and still cannot finalize.
-OpenCode lane = configured fallback/comparison route, but non-programmatic until a Busdriver-compatible adapter/plugin is rebuilt and verified.
+Pi lane      = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
+OpenCode lane = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
 Codex lane    = PR lead / review / backstop-focused by default; implementation only by explicit exception.
 ```
 
-If a doc contains `hermes-busdriver-agent-draft --agent pi`, require the same proof bundle: in-repo schema, wrapper, contract tests, fake-Pi smoke, optional real Pi smoke, and final authority flags false.
+A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, wrapper, contract tests, and fake-adapter smoke prove the non-installed adapter contract; they do not prove production dispatch.
 
 ## Trusted evidence
 
@@ -201,7 +201,7 @@ Long-context review is powerful but should not become a reason to dump whole rep
 
 ## OpenCode lane
 
-OpenCode can be used for generic draft experiments or explicitly user-requested comparison work. It is not part of the trusted Busdriver-compatible mutating pipeline unless a new adapter/plugin, result schema, launcher wrapper, postflight contract tests, real-agent smoke, and authority-flag validation exist.
+OpenCode is the fallback/comparison adapter contract proven in non-installed harnesses. Production dispatch is blocked by `agent_containment_and_credential_broker_unavailable`; no current route launches OpenCode or copies credentials. Commit/push/PR/merge/marker/deploy/release/publish flags remain false.
 
 ## Clockwork wording
 

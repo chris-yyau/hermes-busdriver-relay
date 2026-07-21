@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Relay Completion Sweep Lessons
 
 Use when the user says to continue/finish the relay and complete all remaining safe slices after a recent merge.

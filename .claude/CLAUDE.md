@@ -1,5 +1,10 @@
 # Hermes Busdriver Relay — Project Guide
 
+> **CURRENT PRODUCTION POLICY:** agent dispatch is fixed `policy_blocked` by
+> `agent_containment_and_credential_broker_unavailable`. Production draft and smoke
+> commands stop immediately after argument parsing; runnable adapter/smoke behavior
+> exists only in non-installed test fixtures. No CLI flag or environment variable unlocks it.
+
 **Hermes-side** relay for the user's Busdriver / Claude Code workflow.
 This repo holds **Hermes-owned integration artifacts only** — it is not a Busdriver
 clone and must not vendor Claude plugins, MCP configs, runtime markers, credentials,
@@ -41,7 +46,7 @@ Busdriver / Claude Code = workflow authority, gates, reviews, MCP/plugin routing
 ```text
 .claude/CLAUDE.md                           This guide (tracked via gitignore exception)
 README.md                                   Full command reference + boundary
-ADRs/                                        Architecture decisions (0001–0004)
+ADRs/                                        Architecture decisions (0001–0008)
 docs/CURRENT_STATUS.md                       Completion / verification state (source of truth)
 docs/hermes-busdriver-integration-contract-v2.md
 docs/settling-checks-v1.md, -v2.md           H1–H13 status maps
@@ -59,10 +64,10 @@ tests/contract/test_*.py                     Contract tests (invoke scripts as s
 | `hermes-busdriver-lock` | Hermes-owned single-flight lock (`~/.hermes/busdriver-relay/locks`) | lock state only |
 | `hermes-busdriver-runtime-check` | H13 hook-runtime equivalence checker | read-only |
 | `hermes-busdriver-gate` | Equivalent `preflight`/`postflight` gate runner (baseline diff, scope, verifiers) | baseline file only |
-| `hermes-busdriver-agent-draft` | Generic draft agent launcher (Codex only today) | working-tree diff, no commit |
-| `hermes-busdriver-agent-smoke` | Optional real-agent adapter smoke (consumes quota) | throwaway temp repo |
+| `hermes-busdriver-agent-draft` | Production parser/authority-negative envelope; runnable behavior is fixture-only | none; fixed blocker |
+| `hermes-busdriver-agent-smoke` | Production parser/authority-negative smoke; runnable smoke is fixture-only | none; fixed blocker |
 | `hermes-busdriver-delivery-status` | Read-only Delivery Mode status envelope | read-only |
-| `hermes-busdriver-deliver` | Fail-closed Delivery Mode dispatcher skeleton (plan/status only) | read-only |
+| `hermes-busdriver-deliver` | Fail-closed Delivery Mode dispatcher; pre-PR/push/PR-create/merge are policy-blocked | commit only, after its runtime gates; pre-PR fixed-blocked by `isolated_review_runtime_unavailable` |
 | `hermes-busdriver-pr-grind-check` | Read-only PR-grind readiness checker (`clean`/`wait`/`needs_fix`/`blocked`) | read-only |
 | `hermes-busdriver-smoke` | Safe smoke runner | read-only |
 
@@ -71,7 +76,7 @@ See `README.md` for the full invocation flags for each.
 ## Testing
 
 ```bash
-# Active Python here lacks pytest; use uvx (the smoke runner does this fallback too):
+# Active Python here lacks pytest; use uvx for this direct suite. The smoke runner has no uvx/PATH fallback and reports pytest_unavailable unless its active interpreter can import pytest:
 uvx --from pytest pytest tests/contract -q
 
 # If pytest is on PATH / in a venv:
@@ -82,7 +87,7 @@ pytest -q
   on JSON output + exit codes. Because the code under test runs in a subprocess, ordinary
   `pytest-cov` line coverage does **not** trace it — meaningful coverage would need
   `coverage` subprocess plumbing. Treat the contract assertions, not a coverage %, as the
-  signal. (Last verified: 110 passed.)
+  signal. (Current isolated/full-smoke verification on 2026-07-13: 904 passed.)
 - `tests/contract/test_gate.py` is the gold-standard pattern (tmp git repo + fake busdriver
   plugin fixtures). Copy its structure for new script tests.
 
@@ -90,13 +95,15 @@ pytest -q
 
 - **Fail-closed, read-only by default.** Probes and checkers never write `.claude/`,
   `.opencode/`, the Busdriver source, or the target repo.
-- Draft launchers stop at `status=needs_busdriver_review`. They may leave a working-tree
-  diff but keep `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`,
-  `deploy_allowed` **false**.
-- **Delivery Mode finalization** (branch/commit/PR/merge) happens only on explicit user
-  request, and only through a litmus/pre-PR-equivalent check before commit/PR plus a
-  pr-grind-equivalent loop before merge (status rollup, bounded wait for reviewer bots,
-  address actionable comments, merge only when clean).
+- Production draft launchers never dispatch. Non-installed contract fixtures may leave a
+  working-tree diff ending at `status=needs_busdriver_review`, with every finalization
+  authority flag false.
+- **Delivery Mode** never bypasses a policy blocker. Push, PR creation, and merge return
+  `atomic_push_base_binding_unavailable`, `atomic_pr_create_binding_unavailable`, and
+  `atomic_merge_base_binding_unavailable` immediately after parsing/pure syntax validation.
+  Explicit user intent does not unlock them. Commit is the only currently dispatchable mutating
+  operation and remains runtime-gated; pre-PR is fixed-blocked by
+  `isolated_review_runtime_unavailable`.
 - After merge, **sync the PR base branch discovered from PR status** — do not hardcode `main`.
 - Hermes-owned state (locks, gate baselines, agent runs) lives under `~/.hermes/busdriver-relay/`,
   never inside `.claude/` or the target repo.
@@ -104,7 +111,8 @@ pytest -q
 
 ## Still intentionally deferred (blocked by design, not missing work)
 
-`hermes-busdriver-deliver` execute mode · repo-mutating Codex launcher finalization ·
+blocked production agent dispatch · blocked executable push/PR-create/merge delivery operations ·
+repo-mutating Codex launcher finalization ·
 `hermes-busdriver-codex-goal` with commit authority · `.claude/hermes/jobs` queue ·
 commit/PR/merge automation inside draft launchers · deploy/release/publish automation ·
 direct MCP/plugin routing · any claim that Hermes bare-shell execution is gate-safe.

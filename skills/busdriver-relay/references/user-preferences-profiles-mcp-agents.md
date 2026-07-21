@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # User Preferences for busdriver-relay Coding Tasks
 
 ## Hermes Profile vs Relay Skill Boundary

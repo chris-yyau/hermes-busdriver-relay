@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Relay router role policy — July 2026
 
 Session outcome: the user refined Hermes/Busdriver relay role assignment after comparing Pi, OpenCode+Go, Codex, Claude Code, Grok, Gemini, Zed, and UltraOracle. This is a durable policy note for current relay-router/status/config work.

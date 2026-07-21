@@ -1,6 +1,14 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Relay v1 Session Lessons
 
-Use this reference when maintaining Hermes-side Busdriver relay/status tooling.
+> **HISTORICAL / SUPERSEDED / NON-PRODUCTION.** This v1 session record is context only,
+> not current operating guidance or dispatch proof. Current production agent dispatch is
+> fixed `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; runnable
+> agent-draft and agent-smoke behavior exists only in non-installed test fixtures.
+
+Use current project guidance and policy tests when maintaining Hermes-side Busdriver
+relay/status tooling. The statements below describe the historical v1 design session.
 
 ## Naming
 
@@ -88,7 +96,7 @@ That is a PASS for the relay boundary: Hermes can see Busdriver hooks but is not
 
 ## Equivalent gate-runner lesson
 
-When the user wants Hermes to continue implementation without Claude Code quota, do not wait for Claude hooks. Add explicit Hermes-side equivalent gates instead. The first generic seam is:
+The v1 design proposed this generic gate sequence:
 
 ```text
 hermes-busdriver-gate preflight
@@ -96,8 +104,15 @@ hermes-busdriver-gate preflight
   → hermes-busdriver-gate postflight
 ```
 
-The generic gate shape is agent-agnostic in design, but current active relay policy enables Codex only; other agents remain deferred until explicit validation and user approval. It allows draft working-tree changes only. `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` stay false until stronger finalization gates exist.
+That sequence is historical design context, not a production capability. Current production
+dispatch does not enable Codex or any other agent and cannot be unlocked by user approval,
+CLI flags, or environment variables.
 
-`hermes-busdriver-agent-draft` is the first executable wrapper for this pattern. It acquires a Hermes `agent-draft` lock, runs gate preflight, runs the selected agent/custom command under a best-effort PATH guard, runs gate postflight, releases the lock, and returns `status=needs_busdriver_review` on success. The PATH guard blocks common `git`/`gh` finalization commands, but it is not a full sandbox; postflight still needs to catch local commits, scope violations, hooks tamper, and ignored-file tamper.
+The old runnable `hermes-busdriver-agent-draft` sequence survived only as a non-installed
+contract fixture for schema/scope/cleanup tests. The installed production entrypoint stops
+after parsing with `agent_containment_and_credential_broker_unavailable` before repository,
+HOME, credential, lock, gate, run-directory, or worker handling.
 
-`hermes-busdriver-agent-smoke` is the opt-in real-adapter smoke. It creates a throwaway repo and may consume provider quota/tokens. Codex was verified this way: it added `src/codex_smoke.txt`, postflight saw only that scoped file, verifier passed, HEAD was unchanged, and status remained `needs_busdriver_review`. 
+Historical real-adapter smoke results were fixture evidence only and never proved production
+containment or dispatchability. The installed `hermes-busdriver-agent-smoke` now returns the
+same fixed blocker immediately after parsing and never creates a repository or invokes Git.

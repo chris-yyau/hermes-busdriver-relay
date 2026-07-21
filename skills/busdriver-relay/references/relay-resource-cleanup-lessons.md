@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Relay resource cleanup lessons
 
 Use this when a Busdriver-relay / Hermes Delivery Mode session has finished and the user reports high resource use or asks to clean up system resources.

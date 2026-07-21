@@ -1,5 +1,7 @@
 # Relay router agent role split — July 2026
 
+**Current production status:** the role map below is resolver/routing metadata, not a production launcher. Pi and OpenCode remain non-programmatic with `programmatic_dispatch_allowed=false`, `adapter_verified=false`, and `dispatch_allowed=false` under `agent_containment_and_credential_broker_unavailable`. Adapter behavior exists only in non-installed fixture provenance.
+
 ## Durable decision
 
 For Busdriver/Hermes relay work, do **not** add Pi, OpenCode, Grok, Gemini, Zed, or UltraOracle as competing workflow authorities. The stable split is:
@@ -84,8 +86,8 @@ Copyable config example:
 }
 ```
 
-Authority constraints remain false for all router/status roles. Only the separately gated Pi adapter draft launcher may mutate the draft working tree by default; OpenCode requires separate adapter/plugin proof before fallback mutation; Codex remains a review/backstop lane by default. All paths still return draft/review evidence and require Busdriver/Claude finalization.
+Authority constraints remain false for all router/status roles. Pi is preferred implementation route metadata and OpenCode is fallback/comparison route metadata, but neither may mutate a production draft tree while the containment/credential-broker blocker is active. Historical non-installed harnesses may exercise fixture-only mutation contracts; Codex remains a review/backstop lane by default. All paths return only routing or fixture evidence and require Busdriver/Claude finalization.
 
 ## Purchasing / tool-selection implication
 
-Do not solve Claude quota pressure by adding another primary-controller agent. Use Pi as the primary implementation draft worker; if Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Zed as a pipeline dependency. Zed can remain a manual IDE sidecar.
+Do not solve Claude quota pressure by adding another primary-controller agent. Pi remains the preferred future implementation route, but production dispatch is currently blocked; implementation must route through Busdriver/Claude or an explicitly approved bootstrap path. If Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Zed as a pipeline dependency. Zed can remain a manual IDE sidecar.

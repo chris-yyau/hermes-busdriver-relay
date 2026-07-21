@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Blueprint-review arbiter route simplification (subscription fable / inline fallback removal)
 
 When the user asks to simplify Busdriver blueprint-review arbiter routing around “subscription fable”, “inline opus”, “ZenMux fable”, or “subscription fresh opus”, interpret the desired route as:

@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Skill-Sync PR75 Router Role Lessons
 
 Use when syncing installed Hermes `busdriver-relay` skill references back into the repo and the drift includes relay-router / role-policy guidance.
