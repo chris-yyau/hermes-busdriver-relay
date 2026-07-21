@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Non-installed runpy seam for OpenCode adapter contract tests only."""
+from pathlib import Path
+import runpy
+
+ROOT = Path(__file__).resolve().parents[3]
+PRODUCTION = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
+_production_ns = runpy.run_path(str(PRODUCTION))
+_production_ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
+_production_ns["main"].__globals__["trusted_opencode_executable"] = lambda value: Path(value).expanduser().resolve()
+globals().update({key: value for key, value in _production_ns.items() if not key.startswith("__")})
+
+if __name__ == "__main__":
+    raise SystemExit(main())

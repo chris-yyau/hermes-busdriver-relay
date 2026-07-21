@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousresearch.local/hermes-busdriver-relay/opencode-result.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "worker",
+    "status",
+    "ok",
+    "authority",
+    "not_busdriver_native_claude_runtime",
+    "finalization_allowed",
+    "commit_allowed",
+    "push_allowed",
+    "pr_allowed",
+    "merge_allowed",
+    "marker_write_allowed",
+    "deploy_allowed",
+    "release_allowed",
+    "publish_allowed",
+    "files_changed"
+  ],
+  "properties": {
+    "schema": { "const": "opencode-busdriver-result/v0" },
+    "worker": { "const": "opencode" },
+    "mode": { "enum": ["mutating_draft", "generic_gated_draft", "read_only_review"] },
+    "ok": { "type": "boolean" },
+    "status": { "enum": ["needs_busdriver_review", "blocked"] },
+    "not_busdriver_native_claude_runtime": { "const": true },
+    "finalization_allowed": { "const": false },
+    "commit_allowed": { "const": false },
+    "push_allowed": { "const": false },
+    "pr_allowed": { "const": false },
+    "merge_allowed": { "const": false },
+    "marker_write_allowed": { "const": false },
+    "deploy_allowed": { "const": false },
+    "release_allowed": { "const": false },
+    "publish_allowed": { "const": false },
+    "authority": {
+      "type": "object",
+      "required": [
+        "commit_allowed",
+        "push_allowed",
+        "pr_allowed",
+        "merge_allowed",
+        "marker_write_allowed",
+        "deploy_allowed",
+        "release_allowed",
+        "publish_allowed",
+        "finalization_allowed"
+      ],
+      "properties": {
+        "commit_allowed": { "const": false },
+        "push_allowed": { "const": false },
+        "pr_allowed": { "const": false },
+        "merge_allowed": { "const": false },
+        "marker_write_allowed": { "const": false },
+        "deploy_allowed": { "const": false },
+        "release_allowed": { "const": false },
+        "publish_allowed": { "const": false },
+        "finalization_allowed": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "repo": { "type": "string" },
+    "branch": { "type": "string" },
+    "base_head": { "type": "string" },
+    "post_head": { "type": "string" },
+    "summary": { "type": "string", "maxLength": 4000 },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "command", "ok"],
+        "properties": {
+          "name": { "type": "string" },
+          "command": { "type": "string" },
+          "ok": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "review_findings": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "blocked_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action", "reason"],
+        "properties": {
+          "action": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "event_log": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "stdout_tail": { "type": "string", "maxLength": 8000 },
+    "stderr_tail": { "type": "string", "maxLength": 8000 },
+    "returncode": { "type": "integer" },
+    "parse_error": { "type": "string", "maxLength": 1000 },
+    "observed_result_keys": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 50
+    }
+  },
+  "additionalProperties": false
+}
