@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only Busdriver litmus/pre-PR marker freshness status."""
 
 from __future__ import annotations
@@ -9,12 +9,327 @@ import hashlib
 import json
 import os
 import re
+import select
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# The bound for children whose whole output is legitimately consumed — a `gh api` JSON body, a diff
+# that gets hashed, an archive. `MAX_CAPTURED_BYTES` is for the 4000-char tails and would refuse a
+# real PR. Both are enforced AT THE PIPE; the difference is only which number is right for the site.
+# 2MB preserves the ceiling the post-hoc `len(stdout) > 2_000_000` check already imposed, moved to
+# the one place that can enforce it before the memory is spent.
+MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
 
 
 SCHEMA = "hermes-busdriver-litmus-status/v0"
@@ -35,30 +350,429 @@ COMMIT_EXTERNAL_PASS = re.compile(r"^(external-review-pass|PASS-[0-9]+|PASS-MERG
 MAX_MARKER_BYTES = 65536
 GIT_TIMEOUT_SECONDS = 30.0
 GIT_TIMEOUT_ENV = "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS"
+TRUSTED_EXECUTABLE_DIGESTS = {
+    # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
+    # inode). A supply-chain pin, not an identity check — the path is the identity.
+    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
+    "sandbox-exec": "2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a",
+}
+# Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
+# symlinked name is what this contract refuses. See _validated_root_owned_source().
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+    "git-real": Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+    "sandbox-exec": Path("/usr/bin/sandbox-exec"),
+}
+
+
+REDACTION = "[REDACTED]"
+# Kept byte-identical to the sibling relays (deliver, delivery-status, pr-grind-check,
+# pr-grind-loop, litmus-status, finalization-readiness). These are standalone executables with no
+# shared import path, so the block is restated rather than shared; a contract test asserts they
+# agree, which is what keeps one copy from drifting into a leak.
+SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
+def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input — including a URL-userinfo class with no length bound — so
+# a hostile subprocess returning 500MB of stderr, or a remote URL of the same size, costs that much
+# CPU and memory inside a helper whose entire job is to emit a few KB. Bounding after redaction, as
+# r25 did, means the bound never applies to the expensive step it exists to protect.
+#
+# 8192, not a tight bound: every shape pattern above matches far less than this, so the span exists
+# to keep a long-but-real match (a `token: <value>` with a verbose value, a long URL) whole inside
+# the budget. It costs 8KB of regex work and buys the guarantee below.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED — not sliced to its last `budget` bytes, which is what r26 did and
+# what leaked. The value classes for `token:`, `--token`, `"token":` and `Bearer` are unbounded, so
+# a long enough value has the very prefix that IDENTIFIES it as a secret cut away by that slice;
+# the remainder matches no shape pattern and the tail is emitted raw. No window size fixes it —
+# the prefix sits arbitrarily far from the tail. An unmatched fragment of a secret is still a
+# secret, and no diagnostic from an attacker-controlled 12KB+ of output is worth emitting one.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value or ""
+    if limit <= 0:
+        return ""
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
+def tail(value: str | bytes | None, limit: int = 4000) -> str:
+    """Redact, then bound — over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(value, limit)
+
+
+def private_runtime_error(error: str, executable: "str | None" = None, detail: "str | None" = None) -> SystemExit:
+    payload: "dict[str, Any]" = {"ok": False, "error": error}
+    if executable:
+        payload["executable"] = executable
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def write_private_authenticated(target: Path, content: bytes, mode: int) -> None:
+    """Write authenticated bytes through a descriptor, then prove that descriptor still holds them.
+
+    `Path.write_bytes()` looks like one operation and is three unproven claims. `os.write` may write
+    fewer bytes than it was handed, and a partial write that nobody checks is a silent truncation.
+    Nothing is flushed, so the bytes may not be on disk when the child is launched to read them.
+    And nothing re-reads what landed, so "we wrote the authenticated content" and "the file holds
+    the authenticated content" are separate facts — only the first was ever established.
+
+    That gap is not academic here: these bytes are about to be EXECUTED as a private runtime, and
+    the caller's pin check authenticated the bytes in MEMORY, not the file. The closing re-digest is
+    what carries that authentication onto disk, and it reads the descriptor rather than the name,
+    because a name resolves a second time and a second resolution is a second chance to hand us a
+    different file. The identity check then proves the other direction — that the name still reaches
+    the inode the digest just cleared — which is the half a descriptor alone cannot see.
+    `sha256(content)` is the expected value rather than a pin the caller passes in: the caller
+    already proved content matches its pin, so the two are the same number, and a parameter that can
+    only ever hold one value is a parameter that can be passed the wrong one.
+
+    O_EXCL: the name must not already exist, so this cannot land in something prepared for it.
+    O_NOFOLLOW: and it cannot be a symlink pointing somewhere the containment never authorized.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
+        # write-only one cannot be read (EBADF). Re-opening the name to read it instead would
+        # resolve the name a second time, which is the very thing the descriptor is here to avoid.
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(target.name, flags, mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    # Not merely "unusual": consuming the result only as a slice index makes a 0 an
+                    # infinite loop, so this is what keeps the loop terminating as well as honest.
+                    raise OSError("private_copy_short_write")
+                view = view[written:]
+            os.fsync(fd)
+            # fchmod, not chmod: the mode lands on the inode we wrote, not on whatever the name
+            # means by now. The requested mode is also masked by the caller's umask at open.
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(content)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("private_copy_metadata_invalid")
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < st.st_size:
+                # pread: neither moves the offset nor rides it, so the digest cannot race the writer.
+                chunk = os.pread(fd, min(1 << 16, st.st_size - offset), offset)
+                if not chunk:
+                    raise OSError("private_copy_truncated")
+                digest.update(chunk)
+                offset += len(chunk)
+            if digest.hexdigest() != hashlib.sha256(content).hexdigest():
+                raise OSError("private_copy_integrity_failed")
+            if not _names_created_inode(parent_fd, target.name, created):
+                # The digest proved OUR inode is intact; this proves `target` still reaches it. A
+                # rename over the name publishes someone else's bytes under the name the caller is
+                # about to execute.
+                raise OSError("private_copy_integrity_failed")
+        except BaseException:
+            # A half-written private executable must never be left behind for the next step to run.
+            # But by now the name may belong to something else — the case the identity check above
+            # fails on — and deleting THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, target.name, created):
+                try:
+                    os.unlink(target.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+# =============================================================================================
+# Fixed root-owned source execution contract. Copy of the primitive in hermes-busdriver-deliver;
+# these are standalone executables with no shared import path, so a contract test asserts the
+# copies agree. The full rationale lives in the deliver copy; the short version:
+#
+# executing a private copy relocated the substitutable name instead of removing it. macOS has no
+# fexecve and will not exec /dev/fd/N, so the kernel re-resolves a *pathname* at exec time, and any
+# pathname we can write is one a same-UID adversary can rename first (r34's two-rename ABA leaves
+# st_nlink at 1 and every descriptor-visible field intact). The source therefore has to live where
+# the adversary cannot write at all: root-owned, non-group/world-writable, root to leaf. The walk
+# proves there is no race rather than trying to win one.
+#
+# /usr/bin/git is the CommandLineTools shim — same inode as /usr/bin/python3, nlink 78 — so nlink==1
+# is waived for it and SF_RESTRICTED (SIP; denies even root) required instead. That shim also
+# honours $DEVELOPER_DIR through xcrun, which no ancestry walk can see, so the child environment is
+# owned here too: see ENV_DENIED_FOR_TRUSTED_DISPATCH.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"git"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: "str | None" = None) -> SystemExit:
+    """gh gets its own top-level reason: a missing credential-bearing binary is an operational
+    state an administrator resolves by provisioning /usr/local/bin/gh, not an integrity failure."""
+    if reason == "unavailable" and name == "gh":
+        return private_runtime_error("trusted_root_owned_gh_unavailable", name, detail)
+    return private_runtime_error(f"trusted_root_owned_source_{reason}", name, detail)
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd, not the path: the leaf must be opened relative to the directory just validated.
+    Re-opening by full pathname would re-traverse every component and restore the TOCTOU.
+    """
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: "list[bytes]" = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Pure seam: production reaches this only via trusted_executable_path(), which supplies the
+    path from a frozen table. Tests pass harmless already-root-owned system binaries."""
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _trusted_source_refusal(name, "metadata_invalid", "symlink") from exc
+            raise _trusted_source_refusal(name, "unavailable", type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _identity(os.fstat(fd)) != _identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
+def _refusal_reason(exc: SystemExit) -> str:
+    """Lift the machine-readable token back out of the primitive's JSON payload."""
+    try:
+        payload = json.loads(str(exc))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "trusted_root_owned_source_unavailable"
+    if not isinstance(payload, dict):
+        return "trusted_root_owned_source_unavailable"
+    reason = str(payload.get("error") or "trusted_root_owned_source_unavailable")
+    detail = payload.get("detail")
+    return f"{reason}:{detail}" if detail else reason
+
+
+def trusted_git_path() -> Path:
+    """The digest-pinned git, validated root-to-leaf immediately before this probe dispatches it.
+
+    r26 hashed the pinned pathname and then handed THAT PATHNAME to subprocess, so what ran was
+    whatever occupied the path at exec time — not the bytes that were verified. r34 answered that
+    with a private copy, which only relocated the substitutable name: the copy lives somewhere this
+    UID can write, and the repository under `--repo` runs its git hooks as this same UID. The source
+    is now fixed, root-owned and non-user-writable root-to-leaf, so there is no name in the chain
+    this UID can rename and no window to lose.
+
+    OSError, not SystemExit: git() and the diff probe already catch OSError and fold the reason into
+    their envelope, because a read-only status probe reports a broken git rather than dying on it.
+    The shared primitive raises SystemExit for parity with every other copy, so the token is lifted
+    out of its payload here and the envelope still names the exact refusal.
+    """
+    try:
+        return trusted_executable_path("git")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+
+
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# The only ambient variables a git child here legitimately consumes. Everything outside this set
+# is rebuilt rather than inherited.
+GIT_CHILD_ENV_ALLOWLIST = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
 
 
 def sanitized_git_env(extra_remove: set[str] | None = None) -> dict[str, str]:
-    remove = {
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_LITERAL_PATHSPECS",
-        "GIT_GLOB_PATHSPECS",
-        "GIT_NOGLOB_PATHSPECS",
-        "GIT_ICASE_PATHSPECS",
-        "GIT_TRACE",
-        "GIT_TRACE2",
+    """Explicit allowlist for every git child of this probe.
+
+    r24 was a DENYLIST: it copied os.environ minus a hand-listed set of GIT_* names, so anything
+    not thought of survived — LD_PRELOAD and DYLD_INSERT_LIBRARIES (loader injection),
+    PYTHONPATH/BASH_ENV/ENV/ZDOTDIR (startup injection), and above all the
+    GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n trio, which injects arbitrary git config
+    — including core.fsmonitor — straight past GIT_CONFIG_GLOBAL=/dev/null. A denylist forwards
+    whatever it forgot; an allowlist cannot, so new injection vectors do not silently apply.
+
+    `extra_remove` is still honored for callers that must drop an allowlisted name as well.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in GIT_CHILD_ENV_ALLOWLIST or key.startswith("LC_")
     }
     if extra_remove:
-        remove |= extra_remove
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k not in remove and not k.startswith("GIT_TRACE_") and not k.startswith("GIT_TRACE2_")
-    }
+        env = {key: value for key, value in env.items() if key not in extra_remove}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["PATH"] = CONTAINED_PATH
+    return git_observation_env(env)
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -95,20 +809,75 @@ def git_timeout_stderr(args: list[str], timeout: float) -> str:
     return f"git command timed out after {timeout:g}s: {cmd}"
 
 
+GIT_OBSERVATION_INERT_CONFIG = (
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "log.showSignature=false",
+    "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
+    "diff.external=", "core.pager=cat", "core.sshCommand=false", "core.editor=false",
+    "core.askPass=", "credential.helper=",
+    "protocol.allow=never", "protocol.file.allow=never", "protocol.ext.allow=never",
+    "submodule.recurse=false", "fetch.recurseSubmodules=false", "status.showUntrackedFiles=all",
+    "core.fileMode=true",
+)
+GIT_OBSERVATION_SANDBOX_PROFILE = (
+    '(version 1) (allow default) (deny network*) (deny file-write*) '
+    '(allow file-write* (literal "/dev/null")) (deny process-exec) '
+    '(allow process-exec (literal "/Library/Developer/CommandLineTools/usr/bin/git"))'
+)
+
+
+def git_observation_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    ambient = os.environ if source is None else source
+    env = {key: value for key, value in ambient.items() if key in GIT_CHILD_ENV_ALLOWLIST or key.startswith("LC_")}
+    env.update({
+        "PATH": CONTAINED_PATH, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    })
+    return env
+
+
+def git_observation_argv(*args: str) -> list[str]:
+    safe_args = list(args)
+    if "status" in safe_args:
+        safe_args = [
+            arg for arg in safe_args
+            if not arg.startswith("--untracked-files") and not arg.startswith("--ignore-submodules")
+        ]
+        at = safe_args.index("status") + 1
+        safe_args[at:at] = ["--untracked-files=all", "--ignore-submodules=none"]
+    if "diff" in safe_args:
+        at = safe_args.index("diff") + 1
+        for flag in reversed(("--no-ext-diff", "--no-textconv")):
+            if flag not in safe_args:
+                safe_args.insert(at, flag)
+    try:
+        sandbox = trusted_executable_path("sandbox-exec")
+        git_real = trusted_executable_path("git-real")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+    global_options = ["--no-pager"]
+    for pin in GIT_OBSERVATION_INERT_CONFIG:
+        global_options.extend(("-c", pin))
+    return [str(sandbox), "-p", GIT_OBSERVATION_SANDBOX_PROFILE, str(git_real), *global_options, *safe_args]
+
+
 def git(repo: Path, *args: str, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    cmd = ["git", "-C", str(repo), *args]
+    display_cmd = ["git-observe", "-C", str(repo), *args]
     timeout = git_timeout_seconds()
     try:
-        return subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True,
-            check=False,
-            env=env if env is not None else sanitized_git_env(),
-            timeout=timeout,
-        )
+        cmd = git_observation_argv("-C", str(repo), *args)
+        p = run_bounded(cmd, env=git_observation_env(env), timeout=timeout)
+        if p.overflowed:
+            return subprocess.CompletedProcess(display_cmd, 125, stdout="", stderr="git_output_too_large")
+        if p.timed_out:
+            return subprocess.CompletedProcess(display_cmd, 124, stdout="", stderr=git_timeout_stderr(display_cmd, timeout))
+        if p.stderr:
+            return subprocess.CompletedProcess(display_cmd, 126, stdout="", stderr="git_observation_stderr")
+        return subprocess.CompletedProcess(display_cmd, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=git_timeout_stderr(cmd, timeout))
+        return subprocess.CompletedProcess(display_cmd, 124, stdout="", stderr=git_timeout_stderr(display_cmd, timeout))
+    except OSError as exc:
+        return subprocess.CompletedProcess(display_cmd, 126, stdout="", stderr=str(exc))
 
 
 def decision(status: str, blockers: list[str] | None = None, warnings: list[str] | None = None) -> dict[str, Any]:
@@ -209,6 +978,8 @@ def commit_marker(path: Path, head_timestamp: int | None, *, state_dir_unsafe: b
         marker["recognized_format"] = "builtin"
     elif COMMIT_EXTERNAL_PASS.match(text):
         marker["recognized_format"] = "external_review_pass"
+        if HEX64.match(text):
+            marker["diff_hash"] = text
     else:
         marker["recognized_format"] = "unrecognized"
         return marker
@@ -310,7 +1081,7 @@ def safety_probe_error(cp: subprocess.CompletedProcess[str], label: str, *, miss
         return None
     if missing_ok and cp.returncode == 1 and not cp.stdout.strip() and not cp.stderr.strip():
         return None
-    detail = (cp.stderr or cp.stdout).strip()
+    detail = tail(cp.stderr or cp.stdout).strip()
     return detail or f"{label} failed with exit {cp.returncode}"
 
 
@@ -410,7 +1181,7 @@ def diff_attributes_configured(repo: Path) -> tuple[bool, str | None]:
 def branch_diff_hash(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
     merge_base = git(repo, "merge-base", base_ref, "HEAD")
     if merge_base.returncode != 0:
-        return None, (merge_base.stderr or merge_base.stdout).strip() or "merge-base failed"
+        return None, tail(merge_base.stderr or merge_base.stdout).strip() or "merge-base failed"
     if os.environ.get("GIT_DIFF_OPTS"):
         return None, "GIT_DIFF_OPTS configured"
     unsafe_diff_driver, safety_error = unsafe_diff_driver_configured(repo)
@@ -423,29 +1194,34 @@ def branch_diff_hash(repo: Path, base_ref: str) -> tuple[str | None, str | None]
         return None, f"safety probe unavailable: {safety_error}"
     if diff_attributes:
         return None, "diff attributes configured"
-    diff_env = sanitized_git_env({"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"})
-    diff_cmd = [
-        "git",
-        "-C",
-        str(repo),
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        f"{merge_base.stdout.strip()}...HEAD",
-    ]
+    diff_env = git_observation_env(sanitized_git_env({"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"}))
+    try:
+        diff_cmd = git_observation_argv(
+            "-C",
+            str(repo),
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            f"{merge_base.stdout.strip()}...HEAD",
+        )
+    except OSError as exc:
+        return None, str(exc)
     timeout = git_timeout_seconds()
     try:
-        diff = subprocess.run(
-            diff_cmd,
-            capture_output=True,
-            check=False,
-            env=diff_env,
-            timeout=timeout,
-        )
+        # MAX_PAYLOAD_BYTES: the whole diff is sha256'd, so the tail bound would refuse a real PR.
+        # Unbounded is not the alternative — a diff is as large as the tree the worker just wrote.
+        bounded = run_bounded(diff_cmd, env=diff_env, timeout=timeout, text=False, limit=MAX_PAYLOAD_BYTES)
+        if bounded.overflowed:
+            return None, "diff_too_large"
+        if bounded.timed_out:
+            return None, tail(git_timeout_stderr(diff_cmd, timeout))
+        if bounded.stderr:
+            return None, "git_observation_stderr"
+        diff = subprocess.CompletedProcess(diff_cmd, bounded.returncode, bounded.stdout, bounded.stderr)
     except subprocess.TimeoutExpired:
-        return None, git_timeout_stderr(diff_cmd, timeout)
+        return None, tail(git_timeout_stderr(diff_cmd, timeout))
     if diff.returncode != 0:
-        error = (diff.stderr or diff.stdout).decode(errors="replace").strip()
+        error = tail(diff.stderr or diff.stdout).strip()
         return None, error or "git diff failed"
     # Match Busdriver pre-pr-gate/run-review-loop shell semantics:
     # DIFF_OUTPUT=$(git diff ...) strips trailing newlines before printf '%s'.
@@ -455,17 +1231,50 @@ def branch_diff_hash(repo: Path, base_ref: str) -> tuple[str | None, str | None]
     return hashlib.sha256(diff_bytes).hexdigest(), None
 
 
-def resolve_default_base_ref(repo: Path) -> str:
-    origin_head = git(repo, "symbolic-ref", "refs/remotes/origin/HEAD")
+def resolve_default_base_ref(repo: Path) -> tuple[str | None, str | None]:
+    """Resolve the default base ref, distinguishing "no origin/HEAD" from "could not ask".
+
+    r25 mapped every non-zero exit to `origin/main`. A repo with no origin/HEAD configured
+    legitimately exits 1 with nothing on stderr, and defaulting there is correct — that is an
+    OBSERVED absence. But a timeout (124) or a git that could not run (126) exits non-zero too,
+    and silently calling those `origin/main` invents the base ref that every downstream diff hash
+    and marker-freshness verdict is then computed against.
+    """
+    origin_head = git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     if origin_head.returncode == 0:
         ref = origin_head.stdout.strip()
         prefix = "refs/remotes/"
         if ref.startswith(prefix) and len(ref) > len(prefix):
-            return ref[len(prefix):]
-    return "origin/main"
+            return ref[len(prefix):], None
+        return None, f"origin_head_unrecognized: {tail(ref, 256)}"
+    if origin_head.returncode == 1 and not origin_head.stderr.strip():
+        return "origin/main", None
+    return None, tail(origin_head.stderr or origin_head.stdout, 256).strip() or f"symbolic_ref_failed_rc_{origin_head.returncode}"
+
+
+def unobserved_repo(root: str, base_ref: str | None, label: str, cp: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    return {
+        "root": root,
+        "branch": None,
+        "head": None,
+        "head_timestamp": None,
+        "base_ref": base_ref,
+        "branch_diff_hash": None,
+        "observed": False,
+        "observation_failed": label,
+        "returncode": cp.returncode,
+        "stderr": tail(cp.stderr, 512),
+    }
 
 
 def repo_status(repo_arg: str, base_ref: str | None) -> tuple[dict[str, Any], str | None]:
+    """Observe repo identity, or say which observation failed.
+
+    r25 let branch and head_timestamp fail silently to None. `branch: None` is indistinguishable
+    from a detached HEAD, and `head_timestamp: None` quietly forces every commit marker's
+    `fresh_for_head` to False — a "not fresh" verdict derived from a clock that was never read,
+    not from a marker that was actually stale.
+    """
     repo = Path(repo_arg).expanduser()
     root_cp = git(repo, "rev-parse", "--show-toplevel")
     if root_cp.returncode != 0:
@@ -476,32 +1285,46 @@ def repo_status(repo_arg: str, base_ref: str | None) -> tuple[dict[str, Any], st
             "head_timestamp": None,
             "base_ref": base_ref,
             "branch_diff_hash": None,
-        }, (root_cp.stderr or root_cp.stdout).strip() or "not a git repo"
+            "observed": False,
+        }, tail(root_cp.stderr or root_cp.stdout).strip() or "not a git repo"
     root = Path(root_cp.stdout.strip()).resolve()
-    resolved_base_ref = base_ref or resolve_default_base_ref(root)
+    if base_ref:
+        resolved_base_ref = base_ref
+    else:
+        resolved_base_ref, base_error = resolve_default_base_ref(root)
+        if base_error is not None:
+            state = unobserved_repo(str(root), None, "default_base_ref", subprocess.CompletedProcess([], 1, "", base_error))
+            return state, base_error
+
     branch_cp = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch_cp.returncode != 0:
+        return unobserved_repo(str(root), resolved_base_ref, "branch", branch_cp), tail(branch_cp.stderr or branch_cp.stdout).strip() or "branch unavailable"
+
     head_cp = git(root, "rev-parse", "HEAD")
     if head_cp.returncode != 0 or not head_cp.stdout.strip():
         return {
             "root": str(root),
-            "branch": branch_cp.stdout.strip() if branch_cp.returncode == 0 else None,
+            "branch": branch_cp.stdout.strip(),
             "head": None,
             "head_timestamp": None,
             "base_ref": resolved_base_ref,
             "branch_diff_hash": None,
-        }, (head_cp.stderr or head_cp.stdout).strip() or "HEAD unavailable"
-    branch = branch_cp.stdout.strip() if branch_cp.returncode == 0 else None
-    head = head_cp.stdout.strip()
+            "observed": False,
+        }, tail(head_cp.stderr or head_cp.stdout).strip() or "HEAD unavailable"
+
     head_ts_cp = git(root, "log", "-1", "--format=%ct")
-    head_timestamp = int(head_ts_cp.stdout.strip()) if head_ts_cp.returncode == 0 and head_ts_cp.stdout.strip().isdigit() else None
+    if head_ts_cp.returncode != 0 or not head_ts_cp.stdout.strip().isdigit():
+        return unobserved_repo(str(root), resolved_base_ref, "head_timestamp", head_ts_cp), tail(head_ts_cp.stderr or head_ts_cp.stdout).strip() or "HEAD timestamp unavailable"
+
     diff_hash, diff_error = branch_diff_hash(root, resolved_base_ref)
     return {
         "root": str(root),
-        "branch": branch,
-        "head": head,
-        "head_timestamp": head_timestamp,
+        "branch": branch_cp.stdout.strip(),
+        "head": head_cp.stdout.strip(),
+        "head_timestamp": int(head_ts_cp.stdout.strip()),
         "base_ref": resolved_base_ref,
         "branch_diff_hash": diff_hash,
+        "observed": True,
     }, diff_error
 
 
@@ -580,6 +1403,10 @@ def build_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     warnings: list[str] = []
     if repo["head"] is None:
         blockers.append("not_git_repo")
+    # An identity observation that failed is not evidence of anything, least of all freshness:
+    # every marker verdict above is computed against head_timestamp / branch_diff_hash.
+    if repo.get("observation_failed"):
+        blockers.append(f"repo_observation_failed: {repo['observation_failed']}")
     if diff_error and pr_state_present(markers):
         blockers.append(f"branch_diff_hash_unavailable: {diff_error}")
     elif diff_error:
@@ -639,7 +1466,7 @@ def main() -> int:
             "repo": {"root": args.repo, "branch": None, "head": None, "head_timestamp": None, "base_ref": args.base_ref, "branch_diff_hash": None},
             "state_dir": {"path": args.state_dir_name, "exists": False, "is_symlink": False},
             "markers": {},
-            "decision": decision("blocked", [f"internal_error: {e}"]),
+            "decision": decision("blocked", [f"internal_error: {tail(str(e), 512)}"]),
         }, 1
     json.dump(data, sys.stdout, indent=2 if args.pretty else None, sort_keys=args.pretty)
     sys.stdout.write("\n")

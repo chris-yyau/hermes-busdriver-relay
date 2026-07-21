@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,7 +21,12 @@ def load_litmus_status_module():
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
@@ -132,22 +138,25 @@ def test_git_probe_timeout_returns_json_fail_closed_envelope(tmp_path: Path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_git = fake_bin / "git"
-    fake_git.write_text("#!/bin/sh\nsleep 2\nexit 0\n")
+    fake_git.write_text("#!/bin/sh\nsleep 30\nexit 0\n")
     fake_git.chmod(0o755)
+    # Success here IS the assertion: a PATH-resolved git would sleep past the budget and fail
+    # closed, so only the trusted pinned git can produce this envelope. The margin is wide on both
+    # sides on purpose — the retained private copy pays a one-time ~0.4s signature validation on
+    # its first exec (macOS re-validates freshly written bytes), and 30s ≫ 5s ≫ that.
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "0.2",
+        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "5",
     }
 
     cp = invoke_raw(repo, env=env)
 
-    assert cp.returncode == 2
+    assert cp.returncode == 0
     data = json.loads(cp.stdout)
-    assert data["ok"] is False
-    assert data["repo"]["head"] is None
-    assert data["decision"]["status"] == "blocked"
-    assert any("git command timed out" in blocker for blocker in data["decision"]["blockers"])
+    assert data["ok"] is True
+    assert data["repo"]["head"] is not None
+    assert data["decision"]["status"] == "stale_or_missing"
     assert_no_authority(data["decision"])
 
 
@@ -164,7 +173,7 @@ def test_branch_diff_subprocess_timeout_fails_closed_when_pr_state_exists(tmp_pa
     fake_git.write_text(
         "#!/bin/sh\n"
         "if [ \"$3\" = diff ]; then\n"
-        "    sleep 2\n"
+        "    sleep 30\n"
         "    exit 0\n"
         "fi\n"
         f"exec {real_git!r} \"$@\"\n"
@@ -173,7 +182,7 @@ def test_branch_diff_subprocess_timeout_fails_closed_when_pr_state_exists(tmp_pa
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "0.2",
+        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "5",
     }
     assert subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
@@ -187,10 +196,9 @@ def test_branch_diff_subprocess_timeout_fails_closed_when_pr_state_exists(tmp_pa
 
     assert cp.returncode == 0
     data = json.loads(cp.stdout)
-    assert data["ok"] is False
-    assert data["repo"]["branch_diff_hash"] is None
-    assert data["decision"]["status"] == "blocked"
-    assert any("git command timed out" in blocker for blocker in data["decision"]["blockers"])
+    assert data["ok"] is True
+    assert data["repo"]["branch_diff_hash"] is not None
+    assert data["decision"]["status"] == "stale_or_missing"
     assert_no_authority(data["decision"])
 
 
@@ -207,7 +215,7 @@ def test_safety_probe_timeout_fails_closed_when_pr_state_exists(tmp_path: Path):
     fake_git.write_text(
         "#!/bin/sh\n"
         "if [ \"$3\" = config ] && [ \"$4\" = --get ] && [ \"$5\" = diff.external ]; then\n"
-        "    sleep 2\n"
+        "    sleep 30\n"
         "    exit 0\n"
         "fi\n"
         f"exec {real_git!r} \"$@\"\n"
@@ -216,7 +224,7 @@ def test_safety_probe_timeout_fails_closed_when_pr_state_exists(tmp_path: Path):
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "0.2",
+        "HERMES_BUSDRIVER_LITMUS_GIT_TIMEOUT_SECONDS": "5",
     }
     assert subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
@@ -230,10 +238,9 @@ def test_safety_probe_timeout_fails_closed_when_pr_state_exists(tmp_path: Path):
 
     assert cp.returncode == 0
     data = json.loads(cp.stdout)
-    assert data["ok"] is False
-    assert data["repo"]["branch_diff_hash"] is None
-    assert data["decision"]["status"] == "blocked"
-    assert any("git command timed out" in blocker for blocker in data["decision"]["blockers"])
+    assert data["ok"] is True
+    assert data["repo"]["branch_diff_hash"] is not None
+    assert data["decision"]["status"] == "stale_or_missing"
     assert_no_authority(data["decision"])
 
 
@@ -628,7 +635,7 @@ def test_branch_diff_hash_blocks_external_diff_driver_command(tmp_path: Path):
     assert_no_authority(data["decision"])
 
 
-def test_branch_diff_hash_blocks_global_external_diff_config(tmp_path: Path):
+def test_branch_diff_hash_ignores_ambient_global_external_diff_config(tmp_path: Path):
     repo = init_repo(tmp_path / "repo", branch=True)
     (repo / ".claude").mkdir()
     (repo / ".claude" / "pr-review-passed.local").write_text("stale\n")
@@ -638,10 +645,9 @@ def test_branch_diff_hash_blocks_global_external_diff_config(tmp_path: Path):
 
     data = invoke(repo, env=env)
 
-    assert data["ok"] is False
-    assert data["repo"]["branch_diff_hash"] is None
-    assert any("external diff configured" in blocker for blocker in data["decision"]["blockers"])
-    assert data["decision"]["status"] == "blocked"
+    assert data["ok"] is True
+    assert data["repo"]["branch_diff_hash"] is not None
+    assert data["decision"]["status"] == "stale_or_missing"
     assert_no_authority(data["decision"])
 
 
@@ -791,7 +797,18 @@ def test_branch_diff_hash_blocks_default_home_git_attributes_when_core_attribute
     assert_no_authority(data["decision"])
 
 
-def test_branch_diff_hash_blocks_default_xdg_git_attributes_when_core_attributes_unset(tmp_path: Path):
+def test_ambient_xdg_config_home_cannot_point_git_at_an_attributes_file(tmp_path: Path):
+    """v16-r25 B7: XDG_CONFIG_HOME is no longer forwarded, so the vector is CONTAINED, not detected.
+
+    r24 forwarded the caller's XDG_CONFIG_HOME to git, so `$XDG_CONFIG_HOME/git/attributes` became
+    git's default global attributes file and could select a diff driver; litmus detected that and
+    blocked. sanitized_git_env is now an allowlist, so git never reads the caller's chosen
+    directory at all (`git check-attr` reports the attribute unspecified) and there is nothing
+    left to block on. Containment beats detection: the file is not consulted rather than
+    consulted-and-caught. The HOME-based file is still honored and still blocks — see
+    test_branch_diff_hash_blocks_default_home_git_attributes_when_core_attributes_unset, which is
+    what keeps this from silently becoming "attributes are never checked".
+    """
     repo = init_repo(tmp_path / "repo", branch=True)
     (repo / ".claude").mkdir()
     (repo / ".claude" / "pr-review-passed.local").write_text("stale\n")
@@ -811,12 +828,10 @@ def test_branch_diff_hash_blocks_default_xdg_git_attributes_when_core_attributes
     data = invoke(repo, env=env)
 
     payload = json.dumps(data)
-    assert data["ok"] is False
-    assert data["repo"]["branch_diff_hash"] is None
-    assert any("diff attributes configured" in blocker for blocker in data["decision"]["blockers"])
+    assert data["repo"]["branch_diff_hash"] is not None
+    assert not any("diff attributes configured" in blocker for blocker in data["decision"]["blockers"])
     assert payload_text not in payload
     assert str(attrs) not in payload
-    assert data["decision"]["status"] == "blocked"
     assert_no_authority(data["decision"])
 
 
@@ -1018,3 +1033,241 @@ def test_empty_branch_diff_blocks_without_empty_hash(tmp_path: Path):
     assert data["decision"]["status"] == "blocked"
     assert any("empty diff" in blocker for blocker in data["decision"]["blockers"])
     assert_no_authority(data["decision"])
+
+
+# --- v16-r25 B5: litmus git failure details reach the envelope bounded and redacted ---
+
+
+def test_litmus_tail_redacts_and_bounds():
+    ns = load_litmus_status_module()
+    secret = "ghp_" + "t" * 36
+
+    out = ns.tail("git failed: " + secret + " " + "x" * 9000)
+
+    assert secret not in out
+    assert len(out) <= 4000
+
+
+@pytest.mark.parametrize("prefix_len", [0, 3990, 3999, 4000, 4200])
+def test_litmus_secrets_redacted_across_truncation_boundary(prefix_len: int):
+    ns = load_litmus_status_module()
+    secret = "ghp_" + "u" * 36
+
+    out = ns.tail("p" * prefix_len + " " + secret + " " + "s" * 50)
+
+    assert "ghp_" not in out
+
+
+def test_litmus_tail_redacts_credential_env_values(monkeypatch):
+    ns = load_litmus_status_module()
+    monkeypatch.setenv("GH_TOKEN", "opaque-litmus-credential-value")
+
+    assert "opaque-litmus-credential-value" not in ns.tail("boom: opaque-litmus-credential-value")
+
+
+def test_safety_probe_error_is_bounded_and_redacted():
+    """This detail string is interpolated into a blocker the envelope prints verbatim."""
+    ns = load_litmus_status_module()
+    secret = "ghp_" + "v" * 36
+    cp = subprocess.CompletedProcess(["git"], 1, "", f"{secret} " + "e" * 9000)
+
+    detail = ns.safety_probe_error(cp, "diff.external")
+
+    assert secret not in detail
+    assert len(detail) <= 4000
+
+
+# --- v16-r26A item 4: identity observations fail closed, no silent origin/main fallback ---
+
+
+def _git_failing(module, label: str, returncode: int, stderr: str):
+    real_git = module.git
+
+    def fake_git(repo, *args, env=None):
+        if label in args:
+            return subprocess.CompletedProcess(["git", *args], returncode, "", stderr)
+        return real_git(repo, *args, env=env)
+
+    return fake_git
+
+
+def test_litmus_default_base_ref_timeout_does_not_silently_fall_back_to_origin_main(tmp_path, monkeypatch):
+    """A timed-out symbolic-ref is not evidence that origin/main is the default base."""
+    repo = init_repo(tmp_path / "repo")
+    module = load_litmus_status_module()
+    monkeypatch.setattr(
+        module, "git", _git_failing(module, "refs/remotes/origin/HEAD", 124, "timed out after 20s")
+    )
+
+    resolved, error = module.resolve_default_base_ref(repo)
+
+    assert error is not None, "failed observation silently resolved a default base"
+    assert resolved != "origin/main"
+
+
+def test_litmus_default_base_ref_absent_ref_still_defaults_to_origin_main(tmp_path):
+    """rc 1 with no stderr is authoritative absence — a repo with no origin/HEAD. Keep the default."""
+    repo = init_repo(tmp_path / "repo")
+    module = load_litmus_status_module()
+
+    resolved, error = module.resolve_default_base_ref(repo)
+
+    assert error is None
+    assert resolved == "origin/main"
+
+
+def test_litmus_branch_observation_failure_fails_closed(tmp_path, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    module = load_litmus_status_module()
+    monkeypatch.setattr(module, "git", _git_failing(module, "--abbrev-ref", 124, "timed out after 20s"))
+
+    state, _diff_error = module.repo_status(str(repo), "main")
+
+    assert state.get("observed") is not True
+    assert state.get("observation_failed") == "branch"
+
+
+def test_litmus_head_timestamp_observation_failure_fails_closed(tmp_path, monkeypatch):
+    """head_timestamp=None silently made every marker 'not fresh' — an unobserved clock, not a fact."""
+    repo = init_repo(tmp_path / "repo")
+    module = load_litmus_status_module()
+    monkeypatch.setattr(module, "git", _git_failing(module, "-1", 124, "timed out after 20s"))
+
+    state, _diff_error = module.repo_status(str(repo), "main")
+
+    assert state.get("observed") is not True
+    assert state.get("observation_failed") == "head_timestamp"
+
+
+def test_litmus_status_blocks_when_repo_identity_unobserved(tmp_path, monkeypatch):
+    import argparse
+
+    repo = init_repo(tmp_path / "repo")
+    module = load_litmus_status_module()
+    monkeypatch.setattr(module, "git", _git_failing(module, "--abbrev-ref", 124, "timed out after 20s"))
+    args = argparse.Namespace(
+        repo=str(repo),
+        base_ref="main",
+        state_dir_name=".claude",
+        pr_artifact_max_age_seconds=3600,
+        pretty=False,
+    )
+
+    data, code = module.build_status(args)
+
+    assert data["decision"]["status"] == "blocked"
+    assert any("repo_observation_failed" in str(b) for b in data["decision"]["blockers"])
+    assert code != 0
+
+
+# --- v16-r34c: git is a fixed root-owned source, validated root-to-leaf and executed in place ---
+#
+# What this block replaced was five tests built on a `pin_source_git()` helper that pointed a
+# `TRUSTED_GIT` global at a tmp_path file and patched `TRUSTED_GIT_SHA256` to match. They asserted
+# the probe ran a private 0500 copy, that replacing the source afterwards did not change what ran,
+# and that tampering with the copy failed closed. Those were real properties of the r27..r34 design,
+# and the design is gone: all three defended a *name this UID owns*. None of the globals they pinned
+# exist any more, so `pin_source_git` had quietly become a no-op that created dead keys — which is
+# why `test_retained_git_is_reused_rather_than_recopied` still passed while proving nothing at all.
+#
+# The replacement race is not won here, it is *unavailable*: see
+# test_no_replacement_race_exists_against_the_root_owned_source.
+
+
+def fake_git(path: Path, marker: str) -> Path:
+    path.write_text(f"#!/usr/bin/env python3\nprint({marker!r})\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_trusted_git_is_the_root_owned_source_executed_in_place():
+    module = load_litmus_status_module()
+
+    resolved = module.trusted_git_path()
+
+    assert resolved == module.TRUSTED_EXECUTABLE_SOURCES["git"] == Path("/usr/bin/git")
+    st = os.lstat(resolved)
+    assert st.st_uid == 0, "a same-UID adversary must not own the bytes this probe dispatches"
+    assert not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    assert not stat.S_ISLNK(st.st_mode), "the name that execs must not be a symlink"
+
+
+def test_litmus_has_no_caller_selected_git_source():
+    module = load_litmus_status_module()
+
+    for dead in ("TRUSTED_GIT", "TRUSTED_GIT_SHA256", "_TRUSTED_GIT_RUNTIME", "PRIVATE_TRUSTED_BIN"):
+        assert not hasattr(module, dead), f"the redirectable {dead} is back"
+    assert set(module.TRUSTED_EXECUTABLE_SOURCES) == {"git", "git-real", "sandbox-exec"}
+    assert module.TRUSTED_EXECUTABLE_SOURCES["git-real"] == Path("/Library/Developer/CommandLineTools/usr/bin/git")
+    assert module.TRUSTED_EXECUTABLE_SOURCES["sandbox-exec"] == Path("/usr/bin/sandbox-exec")
+    assert not str(module.TRUSTED_EXECUTABLE_SOURCES["git"]).startswith("/opt/homebrew")
+
+
+def test_no_replacement_race_exists_against_the_root_owned_source():
+    """What the old 'replace the source after verification' test was defending against.
+
+    The point is not that the race is now won — a detector does not always win a race. It is that a
+    same-UID, non-root process has no write access anywhere on /usr/bin, so the rename primitive
+    that ABA needs does not exist. Asserted against the kernel rather than argued in a comment.
+    """
+    assert os.getuid() != 0, "this test is meaningless as root"
+    with pytest.raises(PermissionError):
+        os.rename("/usr/bin/git", "/usr/bin/git.litmus-aba-aside")
+    with pytest.raises(PermissionError):
+        open("/usr/bin/hermes-litmus-aba-probe", "wb").close()
+
+
+def test_user_writable_source_is_refused(tmp_path):
+    """The pure seam, handed a source shaped exactly like the one the old tests used to pin."""
+    module = load_litmus_status_module()
+    impostor = fake_git(tmp_path / "git", "attacker-payload")
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._validated_root_owned_source(impostor, "git")
+    assert "ancestry_untrusted" in str(excinfo.value)
+
+
+def test_source_digest_mismatch_fails_closed(monkeypatch):
+    module = load_litmus_status_module()
+    monkeypatch.setitem(module.TRUSTED_EXECUTABLE_DIGESTS, "git", "0" * 64)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._validated_root_owned_source(Path("/usr/bin/git"), "git")
+    assert "integrity_failed" in str(excinfo.value)
+
+
+def test_trusted_git_refusal_is_reported_rather_than_fatal(monkeypatch):
+    """A read-only probe reports a broken git in its envelope rather than dying on it.
+
+    The shared primitive raises SystemExit for parity with every other copy of the contract, so the
+    machine-readable token is lifted out of its payload and re-raised as the OSError that git() and
+    the diff probe already catch. Patched at the resolver rather than at the source table: the table
+    is frozen, and a test that could redirect it would be re-blessing the surface this migration removed.
+    """
+    module = load_litmus_status_module()
+
+    def refuse(name: str):
+        raise SystemExit(json.dumps({"error": "trusted_root_owned_source_metadata_invalid", "detail": "symlink"}))
+
+    monkeypatch.setattr(module, "trusted_executable_path", refuse)
+
+    with pytest.raises(OSError) as excinfo:
+        module.trusted_git_path()
+    assert "trusted_root_owned_source_metadata_invalid:symlink" in str(excinfo.value)
+
+
+def test_trusted_git_is_revalidated_on_every_call_rather_than_cached(monkeypatch):
+    """The old test asserted the private copy was REUSED. The contract is now the opposite: a cache
+    is a promise about the past, and this one must be validated immediately before each dispatch."""
+    module = load_litmus_status_module()
+    calls: list[str] = []
+    real = module._validated_root_owned_source
+
+    def counting(path: Path, name: str) -> Path:
+        calls.append(name)
+        return real(path, name)
+
+    monkeypatch.setattr(module, "_validated_root_owned_source", counting)
+
+    assert module.trusted_git_path() == module.trusted_git_path() == Path("/usr/bin/git")
+    assert calls == ["git", "git"], "the second dispatch was served from a cache"
