@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Pushing Hermes Work to claude-mem
 
 Use when the user wants Hermes coding / tool actions visible inside Claude Code sessions (claude-mem observations).

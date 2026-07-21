@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR68 Late Async Test Follow-up Lessons
 
 Use when a background read-only reviewer/subagent result arrives after the PR it reviewed has already been fixed or merged.

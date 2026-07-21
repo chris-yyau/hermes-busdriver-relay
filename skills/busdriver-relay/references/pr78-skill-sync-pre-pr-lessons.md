@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR78 Skill-Sync / Pre-PR Delivery Lessons
 
 Use when continuing relay completion through a small skill-sync/reference slice after subagents have produced a dirty-tree draft and main Hermes must verify/finalize.

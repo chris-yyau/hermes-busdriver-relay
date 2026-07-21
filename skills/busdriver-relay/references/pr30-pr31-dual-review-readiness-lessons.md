@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR #30/#31 guardrails + dual-review readiness lessons
 
 Use when continuing `hermes-busdriver-relay` after the finalization-status / dual-review readiness slices, especially when the user says to keep using subagents until relay work is complete.

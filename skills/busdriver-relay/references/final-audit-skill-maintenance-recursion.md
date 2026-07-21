@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Final-Audit Skill-Maintenance Recursion Lessons
 
 Use when a Busdriver-relay delivery is in the convergence/final-audit phase and skill maintenance itself keeps creating repo-vs-installed skill drift.

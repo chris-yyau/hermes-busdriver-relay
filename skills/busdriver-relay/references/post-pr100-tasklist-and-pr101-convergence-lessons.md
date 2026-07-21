@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Post-PR100 Tasklist and PR101 Convergence Lessons
 
 Use when a relay delivery has already been reported complete and the user asks for the follow-up work as a task list, or when a final audit after a skill-source PR reveals newly-created installed↔repo skill drift.

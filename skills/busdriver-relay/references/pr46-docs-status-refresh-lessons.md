@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR46 Docs/Status Refresh Lessons
 
 Context: after PR44/PR45 strict helper-evidence fixes and post-merge verification, the relay repo code was clean but status docs still reflected stale PR42-era evidence (`368 passed`, old branch names). The safe continuation slice was a docs/status refresh, not another capability expansion.

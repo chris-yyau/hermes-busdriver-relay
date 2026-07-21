@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR67 Skill-Sync Review Fix Lessons
 
 Use when continuing a relay skill-source sync PR after reviewer feedback lands post-PR creation, especially when the PR branch has already been pushed and checks/reviewer bots are running.

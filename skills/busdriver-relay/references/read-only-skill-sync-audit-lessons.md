@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Read-Only Skill-Sync Audit Lessons
 
 Use when the user asks for a read-only audit/planning lane around syncing installed `busdriver-relay` skill references back into the repo source, especially after recent PR merges.

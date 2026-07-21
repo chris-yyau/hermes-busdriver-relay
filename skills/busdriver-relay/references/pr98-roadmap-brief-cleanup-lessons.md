@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR98 Roadmap Brief + Cleanup Lessons
 
 Context: finishing a relay Status/UX slice that added `hermes-busdriver-relay-brief`, synced roadmap/cleanup skill references, and created a Hermes-only script cron cleanup job while PR reviewer bots drove several fix rounds.

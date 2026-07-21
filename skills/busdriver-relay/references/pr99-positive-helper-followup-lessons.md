@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR99 Positive Requested-Repo Helper Follow-up Lessons
 
 Context: after PR98 merged, a late independent reviewer suggested adding a non-blocking positive regression test for `hermes-busdriver-relay-brief` contract-status evidence. The follow-up also surfaced installed-skill drift caused by skill-library updates made during the PR98 finalization.

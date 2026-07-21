@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Balanced Agent Work Planning Lessons
 
 Session lesson from adding a read-only balanced-agent planning surface to `hermes-busdriver-relay`.

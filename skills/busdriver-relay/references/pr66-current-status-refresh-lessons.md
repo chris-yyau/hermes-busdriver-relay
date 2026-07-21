@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR66 CURRENT_STATUS Refresh Delivery Lessons
 
 Use when continuing relay completion after a merged skill/docs slice and the only stale surface is `docs/CURRENT_STATUS.md` verification evidence.

@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Post-Merge Skill Drift Before CURRENT_STATUS Refresh
 
 Use when a relay skill-sync PR has just merged and the next intended slice is the final `docs/CURRENT_STATUS.md` refresh.

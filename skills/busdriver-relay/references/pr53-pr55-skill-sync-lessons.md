@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR53–PR55 Skill-Sync Continuation Lessons
 
 Session context: after PR52 merged, a late async reviewer result arrived with a non-blocking test-hardening suggestion. The user then said “繼續”, and Hermes continued through small follow-up slices PR53–PR55.

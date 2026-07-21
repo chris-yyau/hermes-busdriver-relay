@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Roadmap Read-only Audit Lessons
 
 Context: a read-only audit of relay roadmap tasks (ADR0005 finalization contract, mutating PR-grind fix-loop design, marker interop contract, Pi adapter proof, and Status/UX/Telegram brief) while a separate WIP branch already contained a compact `hermes-busdriver-relay-brief` helper.

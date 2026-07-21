@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR61–PR62 Continuation Lessons
 
 Use when a relay continuation has just merged a skill-sync PR and then needs to refresh `docs/CURRENT_STATUS.md` with the new merged-main evidence.

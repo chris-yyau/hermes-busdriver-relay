@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Continuation + PR-Grind Reviewer Fix Lessons (PR #25 pattern)
 
 Use when the user says to continue relay work with subagents and the work is already inside an open PR branch.

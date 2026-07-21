@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR48 Skill Source Sync Lessons
 
 Use when continuing `hermes-busdriver-relay` and the repo copy of `skills/busdriver-relay` drifts from the installed Hermes skill.

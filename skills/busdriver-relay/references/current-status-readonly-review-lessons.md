@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # CURRENT_STATUS Read-Only Review Lessons
 
 Use when the user asks for a read-only review of `docs/CURRENT_STATUS.md` refresh requirements for the next relay slice, especially when another worker already has a docs/status branch or dirty file.

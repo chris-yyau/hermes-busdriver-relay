@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR #30–#32 relay completion-loop lessons
 
 Use when continuing `hermes-busdriver-relay` after a clean/merged slice, especially when adding read-only finalization evidence, running latest-head PR-grind, or proving no safe non-mutating work remains.

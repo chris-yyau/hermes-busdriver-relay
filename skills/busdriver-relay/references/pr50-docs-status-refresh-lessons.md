@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR50 Docs/Status Refresh Lessons
 
 Use when continuing `hermes-busdriver-relay` after a merged docs/skill-reference PR and live docs still report stale verification evidence.

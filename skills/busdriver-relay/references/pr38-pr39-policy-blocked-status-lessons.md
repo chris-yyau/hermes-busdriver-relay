@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR38/PR39 Policy-Blocked Guardrail Status Lessons
 
 Context: continuation after PR #36/#37. The next balanced relay slices were (1) code/test semantics: align finalization-readiness guardrail remaining-work rows with ADR 0005 `policy_blocked` contract-status semantics, and (2) docs/status refresh after merge.

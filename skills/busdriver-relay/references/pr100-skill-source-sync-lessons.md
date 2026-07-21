@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR100 Skill-Source Sync Delivery Lessons
 
 Use when continuing a tiny installed↔repo skill-source drift slice after `hermes-busdriver-relay-brief` reports `next_safe_slice=reconcile_skill_source_drift` and the only drift is `skills/busdriver-relay/SKILL.md`.

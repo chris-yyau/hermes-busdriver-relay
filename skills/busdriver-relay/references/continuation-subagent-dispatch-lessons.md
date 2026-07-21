@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Continuation + Subagent Dispatch Lessons
 
 Use when the user says variants of “繼續”, “接下來呢”, “繼續 subagent 完成 relay”, “完成整個 relay”, or complains that Hermes is not delegating enough.

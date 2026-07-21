@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Skill-Sync / CURRENT_STATUS Convergence Lessons
 
 Use when a relay continuation alternates between installed-skill drift fixes and `docs/CURRENT_STATUS.md` evidence refreshes.

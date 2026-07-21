@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Periodic Hermes-only disk cleanup cron lessons
 
 Use when the user asks Busdriver/Hermes relay work to keep disk clean periodically after delivery or while relay work continues.

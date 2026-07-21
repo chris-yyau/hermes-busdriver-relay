@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # H7 Drift Schema + PR Gate Lessons (2026-06-28)
 
 ## Context

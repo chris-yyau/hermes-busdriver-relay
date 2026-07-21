@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR63–PR64 Skill-Sync Redaction and Docs-Refresh Lessons
 
 Use when a relay continuation discovers installed-skill drift after a docs/status merge, especially when syncing a newly created installed reference back into the repo source.

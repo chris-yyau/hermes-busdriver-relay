@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # ADR0005 authority-source status slice lessons
 
 Session context: continuing `hermes-busdriver-relay` after a skill-source drift sync, the next safe big slice was a read-only ADR0005 follow-up: expose ADR authority sources as machine-readable rows in `scripts/hermes-busdriver-finalization-contract-status` while keeping every authority/finalization/mutation flag false.

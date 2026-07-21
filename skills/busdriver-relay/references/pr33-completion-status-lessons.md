@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR33 Completion Status Lessons
 
 Session context: after PR #30–#32 added finalization guardrails, dual-review readiness, advisory pre-PR evidence, and recursive authority hardening, PR #33 was a docs/status-only completion pass for `hermes-busdriver-relay`.
