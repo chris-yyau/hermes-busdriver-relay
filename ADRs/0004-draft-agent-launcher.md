@@ -2,15 +2,21 @@
 
 ## Status
 
-Accepted as the first executable Hermes-side agent runner.
+**Superseded for production agent execution.** Retained as historical target-state launcher design and fixture provenance.
 
-## Context
+## Current production truth
 
-The user wants Hermes to keep implementation moving when Claude Code quota is unavailable. The previous ADR introduced `hermes-busdriver-gate` as the equivalent preflight/postflight layer, but a human still had to manually run an agent between the two gate commands.
+`scripts/hermes-busdriver-agent-draft` is a fail-closed production launcher/parser surface. For Pi and OpenCode it returns, before worker, repository, HOME, or credential handling:
 
-## Decision
+```text
+agent_containment_and_credential_broker_unavailable
+```
 
-Add `scripts/hermes-busdriver-agent-draft` as the first generic executable wrapper:
+It has no Codex or custom production mutation route. Therefore production dispatch, mutation, and all finalization authority remain false. `scripts/hermes-busdriver-agent-smoke` is a parser/authority-negative smoke surface; it does not provide a production real-agent launch path.
+
+## Historical target-state design
+
+The original proposal described this sequence:
 
 ```text
 hermes-busdriver-lock acquire --operation agent-draft
@@ -21,49 +27,43 @@ hermes-busdriver-lock acquire --operation agent-draft
   → JSON report
 ```
 
-Temporarily focused on Codex only. The launcher supports `codex` + `noop`/`custom` (for tests). Other agents (opencode, droid, agy, grok) are deferred.
+That sequence survives only in non-installed test fixtures used to test schema, scope, process-tree, and authority-negative behavior. A successful fixture run ends in `status=needs_busdriver_review`; it never authorizes a production run.
 
-## Safety Contract
+## Authority contract
 
-A successful run returns `status=needs_busdriver_review`, not `done`.
-
-The launcher may leave working-tree changes, but it does not finalize them. The postflight decision continues to keep these false:
+All production and fixture envelopes must keep these flags false:
 
 ```json
 {
+  "programmatic_dispatch_allowed": false,
+  "adapter_verified": false,
   "commit_allowed": false,
   "push_allowed": false,
   "pr_allowed": false,
   "merge_allowed": false,
-  "deploy_allowed": false
+  "deploy_allowed": false,
+  "release_allowed": false,
+  "publish_allowed": false,
+  "marker_write_allowed": false,
+  "finalization_allowed": false
 }
 ```
 
-## Guards
+Fixture adapter tests may validate a working-tree diff and `needs_busdriver_review` artifact, but they are not installed routes and are not proof of production containment or credential brokering.
 
-The launcher layers the following controls:
+## Why the historical PATH guard was insufficient
 
-1. Hermes-owned single-flight lock under `~/.hermes/busdriver-relay/locks`.
-2. Gate preflight before the agent starts.
-3. A best-effort PATH guard that shadows common finalization commands:
-   - blocks `git commit`, `git push`, `git merge`, `git rebase`, `git reset`, `git tag`;
-   - blocks `gh pr create`, `gh pr merge`, `gh pr close`, release mutations, repo delete, and issue create/comment.
-4. Gate postflight after the agent exits.
-5. JSON report and saved run artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
+The historical target relied on a best-effort PATH shadow for finalization commands. An absolute binary path, alternate interpreter, inherited credential, descendant process, or external side effect can bypass a PATH-only guard. Postflight detects some local effects after the fact but cannot prevent or roll back every external effect.
 
-## Known Limits
+Production therefore remains blocked with `agent_containment_and_credential_broker_unavailable` until an enforceable containment and credential-broker architecture exists.
 
-The PATH guard is defense in depth, not a complete sandbox. An agent that deliberately calls an absolute binary path may bypass it. The postflight gate still detects local commit changes through `same_head_as_baseline`, scope violations, `.git/hooks` tampering, and ignored-file tampering. External side effects remain prohibited by policy and must not be requested in prompts.
+## Future promotion requirements
 
-## Future Work
+Any future executable launcher must add and independently verify:
 
-- Stronger sandboxing / command broker if finalization authority is ever added.
-- Structured per-agent adapters if the deferred non-Codex scope is explicitly reopened.
-- Commit-capable finalization gates after litmus/review/secret/CI policies are modeled.
-
-## Real-Agent Smoke
-
-`hermes-busdriver-agent-smoke` is an opt-in smoke runner for real model-backed adapters. It creates a throwaway git repo and calls `hermes-busdriver-agent-draft` with the selected agent. It is not part of the default contract suite because it can consume provider quota/tokens.
-
-The Codex adapter has been verified with real smoke. Other agents remain deferred.
-
+1. process/container containment that covers descendants;
+2. least-privilege credential brokering;
+3. filesystem and network controls;
+4. atomic ownership and reconciliation;
+5. no production test-fixture or caller-command unlock seam;
+6. docs, status, and role metadata that remain default-deny until every proof passes.

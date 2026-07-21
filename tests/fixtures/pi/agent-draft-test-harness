@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Contract-test-only agent-draft dependency injection.
+
+Production has no flag or environment variable that can select this adapter.
+This harness translates the historical custom-shell contract into a fake Pi
+worker so gate/lock/scope regressions still exercise the production path.
+"""
+from pathlib import Path
+import hashlib
+import os
+import runpy
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[3]
+argv = list(sys.argv[1:])
+custom_cmd = None
+if "--agent-cmd" in argv:
+    index = argv.index("--agent-cmd")
+    custom_cmd = argv[index + 1]
+    del argv[index:index + 2]
+# v16-r34c: --pi-bin is THIS harness's flag now, and is consumed here rather than forwarded.
+# Production refuses any --pi-bin that is not the pinned anchor (`pi_executable_override_rejected`,
+# symmetric with the opencode lane), because a flag that names the program the launcher executes is
+# caller-selected dispatch — with a private HOME and live provider credentials mounted. The double
+# these tests need reaches production through the trusted_agent_executable() global below, which
+# only a source-separated, never-installed file can reach. The seam moved; the coverage did not.
+injected_pi = None
+if "--pi-bin" in argv:
+    index = argv.index("--pi-bin")
+    injected_pi = Path(argv[index + 1])
+    del argv[index:index + 2]
+if "--unsafe-adapter-test-only" in argv:
+    argv.remove("--unsafe-adapter-test-only")
+if "--agent" in argv:
+    index = argv.index("--agent")
+    agent = argv[index + 1]
+    if agent == "custom":
+        argv[index + 1] = "pi"
+elif custom_cmd is not None:
+    argv += ["--agent", "pi"]
+
+with tempfile.TemporaryDirectory(prefix="hermes-agent-test-harness-") as td:
+    if custom_cmd is not None:
+        fake_pi = Path(td) / "fake-pi"
+        fake_pi.write_text("""#!/usr/bin/env python3
+import json, os, subprocess, sys
+from pathlib import Path
+repo = Path(os.environ['BD_REPO_ROOT'])
+command_env = os.environ.copy()
+command_env['PATH'] = os.environ['HERMES_AGENT_DRAFT_GUARD_BIN'] + os.pathsep + command_env.get('PATH', '')
+cp = subprocess.run(os.environ['HERMES_TEST_AGENT_CMD'], cwd=repo, env=command_env, shell=True, text=True, capture_output=True)
+status = subprocess.run(['git', 'status', '--porcelain=v1', '-z'], cwd=repo, capture_output=True).stdout.split(b'\\0')
+changed = []
+for row in status:
+    if not row: continue
+    value = row[3:].decode('utf-8', 'surrogateescape')
+    if ' -> ' in value: value = value.split(' -> ', 1)[1]
+    changed.append(value)
+artifact_path = Path(os.environ['PI_BD_ARTIFACT_PATH'])
+authority = {key: False for key in ['commit_allowed','push_allowed','pr_allowed','merge_allowed','marker_write_allowed','deploy_allowed','release_allowed','publish_allowed','finalization_allowed']}
+artifact = {
+  'schema':'pi-busdriver-result/v0','worker':'pi','mode':'mutating_draft',
+  'ok':cp.returncode == 0,'status':'needs_busdriver_review' if cp.returncode == 0 else 'blocked',
+  'repo':str(repo),'branch':'','base_head':'','post_head':'','changed_files':changed,'files_changed':changed,
+  'tests_run':[],'review_findings':[],'blockers':[] if cp.returncode == 0 else ['test_agent_command_failed'],
+  'blocked_actions':[],'artifacts':[],'event_log':[os.environ.get('PI_BD_EVENT_LOG','')],
+  'summary':'test-only custom command','limitations':[],'not_busdriver_native_claude_runtime':True,
+  'authority':authority, **authority,
+}
+artifact_path.write_text(json.dumps(artifact, sort_keys=True) + '\\n')
+Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool':'test-only-fake-pi','returncode':cp.returncode}) + '\\n')
+sys.stdout.write(cp.stdout); sys.stderr.write(cp.stderr)
+raise SystemExit(cp.returncode)
+""")
+        fake_pi.chmod(0o700)
+        os.environ["HERMES_TEST_AGENT_CMD"] = custom_cmd
+        injected_pi = fake_pi
+
+    sys.argv = [sys.argv[0], *argv]
+    ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-agent-draft"))
+    globals_ = ns["main"].__globals__
+    globals_["production_dispatch_blocker"] = lambda: ""
+    # The fake Pi arrives through this global — see the --pi-bin note at the top of this file.
+    if injected_pi is not None:
+        production_trusted_agent_executable = globals_["trusted_agent_executable"]
+
+        def test_trusted_agent_executable(name):
+            if name == "pi":
+                return injected_pi
+            return production_trusted_agent_executable(name)
+
+        globals_["trusted_agent_executable"] = test_trusted_agent_executable
+    test_gate = ROOT / "tests" / "fixtures" / "verifier" / "hermes-busdriver-gate-test-harness"
+    globals_["materialize_trusted_gate"] = lambda _run_dir: test_gate
+    # The harness substitutes its own Pi wrapper, so it must also carry that wrapper's pin:
+    # production authenticates and privately retains whatever `PI_WRAPPER` names, and injecting
+    # the fixture path while leaving the production digest behind fails retention, not dispatch.
+    # Derived from the fixture bytes rather than restated as a literal, so refreshing the
+    # production pins never leaves this copy stale again.
+    test_pi_wrapper = ROOT / "tests" / "fixtures" / "pi" / "run-pi-test-harness"
+    globals_["PI_WRAPPER"] = test_pi_wrapper
+    globals_["TRUSTED_PI_WRAPPER_SHA256"] = hashlib.sha256(test_pi_wrapper.read_bytes()).hexdigest()
+    production_scrub = globals_["scrub_agent_startup_env"]
+    # The gate-test private bin is gone. It existed to hand the gate a copy of git through
+    # HERMES_TEST_PRIVATE_TRUSTED_BIN, and the gate has no PRIVATE_TRUSTED_BIN to point at any
+    # more. Copying git here would also have been actively wrong now that the source is the
+    # CommandLineTools shim: outside /usr/bin the copy loses SF_RESTRICTED, so the test would be
+    # exercising bytes the kernel may refuse to exec — a fixture that fails for a reason production
+    # never has. The gate resolves /usr/bin/git for itself.
+
+    def test_scrub_agent_startup_env():
+        env = production_scrub()
+        # The retained wrapper copy runs outside the repo; tell the fixture where it came from.
+        # Production's allowlist does not carry this key, so only this harness can hand it over.
+        env["HERMES_TEST_REPO_ROOT"] = str(ROOT)
+        if custom_cmd is not None:
+            env["HERMES_TEST_AGENT_CMD"] = custom_cmd
+        return env
+
+    globals_["scrub_agent_startup_env"] = test_scrub_agent_startup_env
+    raise SystemExit(ns["main"]())
