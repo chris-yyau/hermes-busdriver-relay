@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Contract-test-only verifier dependency injection for delivery.
+
+Production has no parser flag or environment variable that enables verifier
+execution. This non-installed harness preserves lower-level verifier contracts
+without exposing the unsafe production dispatch surface.
+"""
+from pathlib import Path
+import runpy
+
+IS_MAIN = __name__ == "__main__"
+ROOT = Path(__file__).resolve().parents[3]
+ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-deliver"))
+ns["main"].__globals__["verifier_dispatch_blocker"] = lambda: None
+globals().update(ns)
+if IS_MAIN:
+    raise SystemExit(ns["main"]())

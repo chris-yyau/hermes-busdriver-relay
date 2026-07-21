@@ -5,15 +5,19 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import hmac
+import io
 import json
 import os
 import re
+import secrets
 import shlex
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import uuid
 from pathlib import Path
@@ -23,11 +27,46 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
 PR_GRIND_LOOP = ROOT / "scripts" / "hermes-busdriver-pr-grind-loop"
+PR_GRIND_CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
 SCHEMA = "hermes-busdriver-deliver/v0"
 RUN_SCHEMA = "hermes-busdriver-delivery-run/v0"
 MUTATING_RUN_SCHEMA = "hermes-busdriver-mutating-delivery-run/v0"
 FINALIZATION_AUTHORITY_SCHEMA = "hermes-busdriver-finalization-authority/v0"
 PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
+TRUSTED_BUSDRIVER_PLUGIN_COMMIT = "835dc1784a7ae5c34a5f8f58d6731a482f64df0a"
+TRUSTED_BUSDRIVER_PLUGIN_VERSION = "1.90.0"
+TRUSTED_PR_GRIND_LOOP_SHA256 = "7a5a1c1ca803d639603e4090c771657af0d776e78bcb83142387671a154f1515"
+TRUSTED_PR_GRIND_CHECK_SHA256 = "af549d313336205136e376d6ad35622ca504ba1e4f7d4d7d88ace2b134036b49"
+TRUSTED_LOCK_SHA256 = "7b6ee2464dbf52db35270021dba853a14f44e6fb81474597e2e1136e32a398f0"
+LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
+TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {
+    "scripts/hermes-busdriver-status": "24934065ab9433c2dbfd2b5198d257155cc1c1bc9b284f23d2d4fc62e70aee93",
+    "scripts/hermes-busdriver-relay-role": "6c5355d57fd186f13741ad1038ca9a559a335bd21b63da865556afffa0dbe01d",
+    "scripts/hermes-busdriver-runtime-check": "981dd22f3b164d1ccd90076eb735f0be735dfe3f431ce6cf9db2c4d556e503a6",
+    "scripts/hermes-busdriver-gate": "8f36e0eb727d77d7bd0b88db2d396aca6550605b7c5ef396b5587c8f6b214520",
+    "scripts/hermes-busdriver-agent-draft": "e7610dd11c0f5c6d8e3cf8a937b83136a8f89a2bbf6cd45b2d4414d4d4ec9dac",
+    "scripts/hermes-busdriver-agent-balance-plan": "58a64901f350e9dafcb4f69ddf2ab66198bcd03a2bc3b216425d88bce8f191f9",
+    "scripts/hermes-busdriver-agent-smoke": "969b7149fbc83c688d2e9857b475bd474383bef067774617feca1764029780da",
+    "scripts/hermes-busdriver-pr-grind-check": "af549d313336205136e376d6ad35622ca504ba1e4f7d4d7d88ace2b134036b49",
+    "scripts/hermes-busdriver-pr-grind-loop": "7a5a1c1ca803d639603e4090c771657af0d776e78bcb83142387671a154f1515",
+    "scripts/hermes-busdriver-litmus-status": "0c045ec533ae921f0ff8fa2e444db9efc0a60bb611e7bac74e66197660729500",
+    "scripts/hermes-busdriver-finalization-readiness": "67b064fbac161bab49971a6eb974824ce9365b6425c8371960a9edb940554689",
+    "scripts/hermes-busdriver-finalization-contract-status": "795a2b53f96aafa8bca369ffa44e06a00392ff2a4f012fae3bce9d21e5a782dd",
+    "scripts/hermes-busdriver-delivery-status": "a798078d7f5bc2306e16f4c9ecf5fe983dcfd4568eaa73f310515c6997c7f638",
+    "scripts/hermes-busdriver-smoke": "f2a742ab932eca7d0edba20284d1e6b4f83d8efd584fe077bc2466d537240344",
+    "scripts/hermes-busdriver-lock": "7b6ee2464dbf52db35270021dba853a14f44e6fb81474597e2e1136e32a398f0",
+}
+DELIVERY_STATUS_RUNTIME_SOURCES = {
+    relative: ROOT / relative for relative in TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS
+}
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "git": "f9d9ddc8cba6309af5606cdb7668b0fe703aba90b6a128c0b7d8fd601baf7fd4",
+    "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
+    "jq": "49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a",
+}
+TRUSTED_GIT = Path("/opt/homebrew/bin/git").resolve()
+TRUSTED_GH = Path("/opt/homebrew/bin/gh").resolve()
+TRUSTED_JQ = Path("/usr/bin/jq").resolve()
 DELIVERY_STATUS_SCHEMA = "hermes-busdriver-delivery-status/v0"
 LITMUS_STATUS_SCHEMA = "hermes-busdriver-litmus-status/v0"
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
@@ -37,6 +76,8 @@ DEFAULT_PHASE0_STATUS_TIMEOUT = 60
 DEFAULT_RELAY_ROLE_TIMEOUT = 90
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 ARTIFACT_ENV = "HERMES_BUSDRIVER_DELIVERY_RUNS_DIR"
+ARTIFACT_AUTH_SCHEMA = "hermes-busdriver-delivery-artifact-auth/v1"
+_ARTIFACT_AUTH_KEYS: dict[str, bytes] = {}
 TAIL_LIMIT = 4000
 MARKER_FINGERPRINT_MAX_BYTES = 1024 * 1024
 BACKSTOP_VERDICT_MAX_BYTES = 65536
@@ -99,8 +140,22 @@ def redact_value(value: Any) -> Any:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fail-closed Hermes Delivery Mode dispatcher")
+    parser = argparse.ArgumentParser(
+        description="Fail-closed Hermes Delivery Mode dispatcher",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Production policy:\n"
+            "  commit is the only mutating operation currently dispatchable.\n"
+            "  verify: verifier_containment_unavailable\n"
+            "  pre-pr-review: isolated_review_runtime_unavailable\n"
+            "  push: atomic_push_base_binding_unavailable\n"
+            "  pr-create: atomic_pr_create_binding_unavailable\n"
+            "  merge: atomic_merge_base_binding_unavailable\n"
+            "Fixed blockers return before run identity, delivery status, lock, artifact, credentials, or side effects."
+        ),
+    )
     parser.add_argument("--repo", help="Target git repo/worktree to inspect and verify")
+    parser.add_argument("--expected-repository", help="Trusted canonical GitHub owner/repo binding required for every mutating operation")
     parser.add_argument("--plugin-root", help="Busdriver plugin root")
     parser.add_argument("--relay-role", help="Optionally resolve one relay equivalent role through delivery-status")
     parser.add_argument("--relay-config", help="Relay config JSON path to pass through delivery-status")
@@ -114,8 +169,8 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for delivery-status before failing closed; defaults to max(180, nested helper timeouts + 30s margin)",
     )
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
-    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports verify, pr-grind, and gated finalization operations; status is read-only run lookup")
-    parser.add_argument("--operation", default="plan", choices=["plan", "verify", "pr-grind", "pre-pr-review", "commit", "push", "pr-create", "merge"], help="Delivery operation; mutating operations require fresh Busdriver-equivalent evidence and acquire a finalization lock")
+    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports read-only pr-grind and gated commit; status is a read-only same-process lookup authenticated by a process-scoped capability, while cross-process lookup fails closed with artifact_writer_authentication_unavailable; other execute operations use the fixed blockers listed below")
+    parser.add_argument("--operation", default="plan", choices=["plan", "verify", "pr-grind", "pre-pr-review", "commit", "push", "pr-create", "merge"], help="Delivery operation; only commit currently reaches evidence and finalization lock")
     parser.add_argument("--run-id", help="Optional durable delivery run id echoed in the envelope and artifact filename")
     parser.add_argument("--commit-message", help="Commit message for execute commit")
     parser.add_argument("--push-remote", default="origin", help="Git remote for execute push / post-fix push")
@@ -141,7 +196,7 @@ def parse_args() -> argparse.Namespace:
         "--verifier",
         action="append",
         default=[],
-        help="Trusted NAME=COMMAND or COMMAND executed locally with shell=False; launch errors fail closed. May be repeated for execute verify.",
+        help="Reserved verifier NAME=COMMAND syntax; production execute verify returns verifier_containment_unavailable before launching commands.",
     )
     parser.add_argument("--pretty", action="store_true")
     return parser.parse_args()
@@ -200,8 +255,42 @@ def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
 
 
+def materialize_delivery_status_runtime(destination: Path) -> Path:
+    if set(DELIVERY_STATUS_RUNTIME_SOURCES) != set(TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS):
+        raise OSError("delivery_status_runtime_inventory_mismatch")
+    authenticated: dict[str, bytes] = {}
+    for relative, expected_digest in TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS.items():
+        source = DELIVERY_STATUS_RUNTIME_SOURCES[relative]
+        if source.is_symlink() or not source.is_file():
+            raise OSError("delivery_status_runtime_source_invalid")
+        content = source.read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected_digest:
+            raise OSError("delivery_status_runtime_integrity_failed")
+        authenticated[relative] = content
+    for relative, content in authenticated.items():
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o500)
+    return destination / "scripts" / "hermes-busdriver-delivery-status"
+
+
+def materialize_delivery_status_executables(destination: Path) -> Path:
+    trusted_bin = destination / "trusted-bin"
+    trusted_bin.mkdir(mode=0o700)
+    for name, expected_digest in TRUSTED_EXECUTABLE_DIGESTS.items():
+        source = trusted_executable_path(name)
+        content = source.read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected_digest:
+            raise OSError("delivery_status_executable_integrity_failed")
+        target = trusted_bin / name
+        target.write_bytes(content)
+        target.chmod(0o500)
+    return trusted_bin
+
+
 def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool = True) -> tuple[dict[str, Any], int]:
-    cmd = [sys.executable, str(DELIVERY_STATUS)]
+    cmd: list[str] = []
     if args.repo:
         cmd += ["--repo", args.repo]
     if args.plugin_root:
@@ -235,7 +324,22 @@ def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool =
 
     timeout = effective_delivery_status_timeout(args)
     try:
-        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout, env=safe_git_env())
+        with tempfile.TemporaryDirectory(prefix="hermes-delivery-status-runtime-") as runtime_dir:
+            runtime_root = Path(runtime_dir)
+            delivery_status = materialize_delivery_status_runtime(runtime_root)
+            trusted_bin = materialize_delivery_status_executables(runtime_root)
+            cmd[:0] = [sys.executable, "-I", str(delivery_status)]
+            runtime_path = os.pathsep.join(
+                (str(trusted_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+            )
+            cp = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+                env=safe_git_env({"PATH": runtime_path, "HERMES_BUSDRIVER_PRIVATE_RUNTIME": "1"}),
+            )
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -245,6 +349,13 @@ def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool =
             "stdout_tail": tail(e.stdout),
             "stderr": tail(e.stderr),
         }, 124
+    except OSError as e:
+        return {
+            "ok": False,
+            "error": "delivery_status_runtime_integrity_failed",
+            "returncode": 2,
+            "detail": str(e),
+        }, 2
 
     try:
         data = json.loads(cp.stdout)
@@ -372,7 +483,7 @@ def staged_diff_hash(repo: Path) -> str | None:
     try:
         cp = subprocess.run(
             [
-                "git",
+                str(trusted_executable_path("git")),
                 "-C",
                 str(repo),
                 "-c",
@@ -395,7 +506,33 @@ def staged_diff_hash(repo: Path) -> str | None:
     return hashlib.sha256(cp.stdout).hexdigest()
 
 
-def commit_litmus_staged_diff_blocker(delivery_status: dict[str, Any], repo: Path) -> str | None:
+def reviewed_tree_diff_hash(repo: Path, parent_head: str, tree: str) -> str | None:
+    try:
+        cp = subprocess.run(
+            [
+                str(trusted_executable_path("git")), "-C", str(repo), "-c", f"core.attributesFile={os.devnull}",
+                "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                parent_head, tree,
+            ],
+            capture_output=True,
+            check=False,
+            env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if cp.returncode != 0 or not cp.stdout:
+        return None
+    return hashlib.sha256(cp.stdout).hexdigest()
+
+
+def commit_litmus_staged_diff_blocker(
+    delivery_status: dict[str, Any],
+    repo: Path,
+    *,
+    expected_parent_head: str | None = None,
+    expected_tree: str | None = None,
+) -> str | None:
     litmus = delivery_status.get("litmus_status") if isinstance(delivery_status.get("litmus_status"), dict) else {}
     summary = litmus.get("summary") if isinstance(litmus.get("summary"), dict) else {}
     markers = summary.get("markers") if isinstance(summary.get("markers"), dict) else {}
@@ -403,7 +540,11 @@ def commit_litmus_staged_diff_blocker(delivery_status: dict[str, Any], repo: Pat
     marker_hash = marker.get("diff_hash")
     if not isinstance(marker_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", marker_hash):
         return "commit_litmus_staged_diff_hash_missing"
-    current_hash = staged_diff_hash(repo)
+    current_hash = (
+        reviewed_tree_diff_hash(repo, expected_parent_head, expected_tree)
+        if expected_parent_head is not None and expected_tree is not None
+        else staged_diff_hash(repo)
+    )
     if current_hash is None:
         return "staged_diff_hash_unavailable"
     if marker_hash != current_hash:
@@ -415,7 +556,7 @@ def diff_hash(repo: Path, *spec: str) -> str | None:
     try:
         cp = subprocess.run(
             [
-                "git",
+                str(trusted_executable_path("git")),
                 "-C",
                 str(repo),
                 "-c",
@@ -501,7 +642,7 @@ def live_remote_branch_head(repo: Path, branch: str, remote: str = "origin") -> 
     ref = f"refs/heads/{branch}"
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "ls-remote", "--heads", remote, ref],
+            [str(trusted_executable_path("git")), "-C", str(repo), "ls-remote", "--heads", remote, ref],
             text=True,
             capture_output=True,
             check=False,
@@ -531,7 +672,7 @@ def remote_head_ancestor_status(repo: Path, remote_head: str | None) -> tuple[bo
         return True, None
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "merge-base", "--is-ancestor", remote_head, "HEAD"],
+            [str(trusted_executable_path("git")), "-C", str(repo), "merge-base", "--is-ancestor", remote_head, "HEAD"],
             text=True,
             capture_output=True,
             check=False,
@@ -551,10 +692,26 @@ def remote_head_ancestor_status(repo: Path, remote_head: str | None) -> tuple[bo
 
 def push_command(repo: Path, remote: str, branch: str, remote_head: str | None, source_ref: str = "HEAD") -> list[str]:
     lease = f"refs/heads/{branch}:{remote_head or ''}"
-    return ["git", "push", "--no-follow-tags", "-u", f"--force-with-lease={lease}", remote, f"{source_ref}:refs/heads/{branch}"]
+    return ["git", "-c", f"core.hooksPath={os.devnull}", "push", "--no-follow-tags", "-u", f"--force-with-lease={lease}", remote, f"{source_ref}:refs/heads/{branch}"]
 
 
-def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | None = None) -> dict[str, Any]:
+def run_isolated_push(repo: Path, remote_url: str, branch: str, remote_head: str | None, source_oid: str, base_branch: str, base_oid: str) -> dict[str, Any]:
+    # Git omits an unchanged base refspec from the receive transaction, so it
+    # cannot provide a server-side compare-only guard for the reviewed base.
+    return {"cmd": ["git", "push"], "returncode": 2, "ok": False, "stdout_tail": "", "stderr_tail": "", "error": "atomic_push_base_binding_unavailable"}
+
+
+def commit_staged_index(
+    repo: Path,
+    message: str,
+    env_extra: dict[str, str] | None = None,
+    *,
+    expected_parent_head: str | None = None,
+    expected_tree: str | None = None,
+    reviewed_status: str | None = None,
+    reviewed_untracked_snapshot: dict[str, str] | None = None,
+    disable_hooks: bool = False,
+) -> dict[str, Any]:
     started = time.time()
     env = safe_git_mutation_env(env_extra)
     substeps: list[dict[str, Any]] = []
@@ -664,8 +821,10 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
     substeps.append({"name": "git_status_before_commit", "cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": pre_status_rc, "ok": pre_status_rc == 0, "stdout_tail": tail(pre_status_out), "stderr_tail": tail(pre_status_err), "pre_allowed_marker_entry_count": len(pre_allowed_marker_snapshot)})
     if pre_status_rc != 0:
         return {"cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": pre_status_rc or 1, "ok": False, "stdout_tail": pre_status_out, "stderr_tail": pre_status_err, "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_status_failed", "substeps": substeps, "before_head": "", "after_head": ""}
+    if reviewed_status is not None and pre_status_out != reviewed_status.rstrip("\n"):
+        return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": pre_status_out, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_status_changed_after_review", "substeps": substeps, "before_head": "", "after_head": ""}
     pre_commit_dirty_entries: list[str] = []
-    pre_existing_untracked_snapshot: dict[str, str] = {}
+    pre_existing_untracked_snapshot: dict[str, str] = dict(reviewed_untracked_snapshot or {})
     for pre_line in pre_status_out.splitlines():
         if not pre_line:
             continue
@@ -678,7 +837,10 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
             continue
         if pre_line.startswith("?? "):
             for pre_path in pre_paths:
-                pre_existing_untracked_snapshot[pre_path] = untracked_file_identity(repo, pre_path)
+                identity = untracked_file_identity(repo, pre_path)
+                if reviewed_untracked_snapshot is not None and pre_existing_untracked_snapshot.get(pre_path) != identity:
+                    return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": pre_status_out, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_status_changed_after_review", "substeps": substeps, "before_head": "", "after_head": ""}
+                pre_existing_untracked_snapshot[pre_path] = identity
             continue
         if len(pre_xy) > 1 and pre_xy[1] != " ":
             pre_commit_dirty_entries.append(pre_line)
@@ -736,6 +898,8 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
     before = str(before_effect.get("stdout_tail") or "").strip()
     if not before_effect.get("ok") or not before:
         return {"cmd": ["git", "commit"], "returncode": int(before_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": before_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "head_lookup_failed", "substeps": substeps, "before_head": before, "after_head": before}
+    if expected_parent_head is not None and before != expected_parent_head:
+        return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "commit_parent_changed_after_review", "expected_parent_head": expected_parent_head, "observed_parent_head": before, "substeps": substeps, "before_head": before, "after_head": before}
 
     ref_effect = run_safe(["git", "symbolic-ref", "--quiet", "HEAD"], repo, timeout=30, env=env)
     substeps.append({"name": "git_symbolic_ref_head", **ref_effect})
@@ -745,9 +909,12 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
 
     tree_effect = run_safe(["git", "write-tree"], repo, timeout=60, env=env)
     substeps.append({"name": "git_write_tree_before", **tree_effect})
-    expected_tree = str(tree_effect.get("stdout_tail") or "").strip()
-    if not tree_effect.get("ok") or not expected_tree:
+    observed_tree = str(tree_effect.get("stdout_tail") or "").strip()
+    if not tree_effect.get("ok") or not observed_tree:
         return {"cmd": ["git", "write-tree"], "returncode": int(tree_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": tree_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "write_tree_failed", "substeps": substeps, "before_head": before, "after_head": before}
+    if expected_tree is not None and observed_tree != expected_tree:
+        return {"cmd": ["git", "write-tree"], "returncode": 1, "ok": False, "stdout_tail": observed_tree, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "commit_index_changed_after_review", "expected_tree": expected_tree, "observed_tree": observed_tree, "substeps": substeps, "before_head": before, "after_head": before}
+    expected_tree = expected_tree or observed_tree
 
     reviewed_paths_rc, reviewed_paths_out, reviewed_paths_err = git_output(repo, "diff", "--cached", "--name-only", "-z", "--no-renames", before, "--")
     reviewed_paths = [path for path in reviewed_paths_out.split("\0") if path]
@@ -760,69 +927,90 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
         substeps.append({"name": "git_pre_commit_reviewed_untracked_worktree_check", "cmd": [], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "paths": preexisting_untracked_reviewed_paths})
         return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_reviewed_untracked_worktree", "substeps": substeps, "before_head": before, "after_head": before}
 
-    commit_cmd = ["git", "-c", "commit.gpgsign=false", "commit", "--cleanup=verbatim", "-m", message]
-    commit_effect = run_safe(commit_cmd, repo, timeout=300, env=env)
-    substeps.append({"name": "git_commit", **commit_effect})
+    candidate_commit = ""
+    if disable_hooks:
+        commit_tree_effect = run_safe(
+            ["git", "commit-tree", expected_tree, "-p", before],
+            repo,
+            timeout=300,
+            env=env,
+            input_text=message.rstrip("\n") + "\n",
+        )
+        substeps.append({"name": "git_commit_tree", **commit_tree_effect})
+        candidate_commit = str(commit_tree_effect.get("stdout_tail") or "").strip()
+        if not commit_tree_effect.get("ok") or not re.fullmatch(r"[0-9a-fA-F]{40,64}", candidate_commit):
+            return {"cmd": ["git", "commit-tree"], "returncode": int(commit_tree_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": commit_tree_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "git_commit_tree_failed", "substeps": substeps, "before_head": before, "after_head": before}
+        commit_cmd = ["git", "update-ref", branch_ref, candidate_commit, before]
+        commit_effect = run_safe(commit_cmd, repo, timeout=60, env=env)
+        substeps.append({"name": "git_update_ref_commit_cas", **commit_effect, "candidate_commit": candidate_commit, "expected_old_head": before})
+        if not commit_effect.get("ok"):
+            live_head_effect = run_safe(["git", "rev-parse", "HEAD"], repo, timeout=30, env=env)
+            substeps.append({"name": "git_rev_parse_after_commit_cas_failure", **live_head_effect})
+            live_head = str(live_head_effect.get("stdout_tail") or "").strip()
+            return {"cmd": commit_cmd, "returncode": int(commit_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "commit_parent_changed_during_publish", "candidate_commit": candidate_commit, "substeps": substeps, "before_head": before, "after_head": live_head or before}
+    else:
+        commit_cmd = ["git", "-c", "commit.gpgsign=false", "commit", "--cleanup=verbatim", "-m", message]
+        commit_effect = run_safe(commit_cmd, repo, timeout=300, env=env)
+        substeps.append({"name": "git_commit", **commit_effect})
     after_effect = run_safe(["git", "rev-parse", "HEAD"], repo, timeout=30, env=env)
     substeps.append({"name": "git_rev_parse_after", **after_effect})
     after = str(after_effect.get("stdout_tail") or "").strip() if after_effect.get("ok") else before
-    after_tree_effect = run_safe(["git", "rev-parse", "HEAD^{tree}"], repo, timeout=30, env=env) if after and after != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
+    if disable_hooks and after != candidate_commit:
+        reset_effect = run_safe(["git", "update-ref", branch_ref, before, candidate_commit], repo, timeout=60, env=env)
+        substeps.append({"name": "git_update_ref_before_after_hook_drift", **reset_effect})
+        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "post_publish_ref_advanced", "candidate_commit": candidate_commit, "substeps": substeps, "before_head": before, "after_head": after}
+    verified_commit = candidate_commit or after
+    after_tree_effect = run_safe(["git", "rev-parse", f"{verified_commit}^{{tree}}"], repo, timeout=30, env=env) if verified_commit and verified_commit != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
     substeps.append({"name": "git_rev_parse_after_tree", **after_tree_effect})
     after_tree = str(after_tree_effect.get("stdout_tail") or "").strip() if after_tree_effect.get("ok") else ""
 
     def fail_and_restore_reviewed_tree(error: str) -> dict[str, Any]:
-        reset_effect: dict[str, Any]
+        # The ref rollback is a compare-and-swap against the commit published by
+        # this invocation.  After that CAS, pathname-based restore/rm/clean is
+        # unsafe: another actor may already own index or worktree bytes.  Keep
+        # all bytes intact and require explicit reconciliation.
         if after and after != before:
-            reset_effect = run_safe(["git", "update-ref", branch_ref, before, after], repo, timeout=60, env=env)
+            reset_effect = run_safe(["git", "update-ref", branch_ref, before, verified_commit], repo, timeout=60, env=env)
         else:
             reset_effect = {"cmd": ["git", "update-ref", branch_ref, before, after or before], "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "skipped": True}
         substeps.append({"name": "git_update_ref_before_after_hook_drift", **reset_effect})
-        if reset_effect.get("ok"):
-            restore_effect = restore_reviewed_paths_from_tree(expected_tree, reviewed_paths, "git_restore_reviewed_tree", "git_ls_tree_reviewed_paths_expected_tree")
-        else:
-            restore_effect = {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": "reset_failed"}
-            substeps.append({"name": "git_restore_reviewed_tree", **restore_effect, "path_count": len(reviewed_paths)})
         tracked_dirty, untracked_dirty, status_effect = non_marker_dirty_paths()
-        reviewed_path_set = set(reviewed_paths)
-        reviewed_untracked_dirty = [path for path in untracked_dirty if path in reviewed_path_set]
-        clean_reviewed_untracked_ok = True
-        if reviewed_untracked_dirty:
-            clean_reviewed_untracked_effect = run_safe_pathspec_batches(["git", "clean", "-fd"], reviewed_untracked_dirty, "git_clean_reviewed_untracked_failed_commit_drift")
-            substeps.append({"name": "git_clean_reviewed_untracked_failed_commit_drift", **clean_reviewed_untracked_effect, "path_count": len(reviewed_untracked_dirty)})
-            clean_reviewed_untracked_ok = bool(clean_reviewed_untracked_effect.get("ok"))
-            tracked_dirty, untracked_dirty, status_effect = non_marker_dirty_paths()
-        tracked_dirty = [path for path in tracked_dirty if path not in reviewed_path_set]
-        untracked_dirty = [path for path in untracked_dirty if path not in reviewed_path_set]
-        substeps.append({"name": "git_status_after_failed_commit_restore", **status_effect, "tracked_dirty": tracked_dirty, "untracked_dirty": untracked_dirty})
-        restore_extra_ok = True
-        clean_extra_ok = True
-        if tracked_dirty and tracked_dirty != ["<status_failed>"]:
-            substeps.append({"name": "git_non_marker_tracked_failed_commit_drift_left_for_operator", "cmd": [], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "path_count": len(tracked_dirty), "paths": tracked_dirty})
-            restore_extra_ok = False
-        elif tracked_dirty == ["<status_failed>"]:
-            restore_extra_ok = False
-        if untracked_dirty:
-            substeps.append({"name": "git_untracked_failed_commit_drift_left_for_operator", "cmd": [], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "path_count": len(untracked_dirty), "paths": untracked_dirty})
-            clean_extra_ok = False
-        final_tracked_dirty, final_untracked_dirty, final_status_effect = non_marker_dirty_paths()
-        final_tracked_dirty = [path for path in final_tracked_dirty if path not in reviewed_path_set]
-        final_untracked_dirty = [path for path in final_untracked_dirty if path not in reviewed_path_set]
-        substeps.append({"name": "git_status_after_failed_commit_cleanup_verify", **final_status_effect, "tracked_dirty": final_tracked_dirty, "untracked_dirty": final_untracked_dirty})
-        reviewed_index_verify_effect = run_safe_pathspec_batches(["git", "diff", "--cached", "--quiet", expected_tree], reviewed_paths, "git_diff_cached_quiet_reviewed_paths_after_failed_cleanup", timeout=30)
-        reviewed_worktree_verify_effect = run_safe_pathspec_batches(["git", "diff", "--quiet", expected_tree], reviewed_paths, "git_diff_worktree_quiet_reviewed_paths_after_failed_cleanup", timeout=30)
-        substeps.append({"name": "git_diff_cached_quiet_reviewed_paths_after_failed_cleanup", **reviewed_index_verify_effect})
-        substeps.append({"name": "git_diff_worktree_quiet_reviewed_paths_after_failed_cleanup", **reviewed_worktree_verify_effect})
-        reviewed_index_ok = bool(reviewed_index_verify_effect.get("ok"))
-        reviewed_worktree_ok = bool(reviewed_worktree_verify_effect.get("ok"))
-        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": commit_effect.get("stdout_tail", ""), "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": error, "expected_tree": expected_tree, "actual_tree": after_tree, "reset_to_before_ok": bool(reset_effect.get("ok")), "restore_reviewed_index_ok": reviewed_index_ok and restore_extra_ok and clean_reviewed_untracked_ok and not final_tracked_dirty, "restore_reviewed_worktree_ok": reviewed_worktree_ok and restore_extra_ok and clean_extra_ok and clean_reviewed_untracked_ok and not final_tracked_dirty and not final_untracked_dirty, "substeps": substeps, "before_head": before, "after_head": before if reset_effect.get("ok") else after}
+        substeps.append({
+            "name": "git_status_after_failed_commit_rollback_preserve",
+            **status_effect,
+            "tracked_dirty": tracked_dirty,
+            "untracked_dirty": untracked_dirty,
+            "reconciliation_required": True,
+        })
+        return {
+            "cmd": commit_cmd,
+            "returncode": 1,
+            "ok": False,
+            "stdout_tail": commit_effect.get("stdout_tail", ""),
+            "stderr_tail": commit_effect.get("stderr_tail", ""),
+            "elapsed_seconds": round(time.time() - started, 3),
+            "error": error,
+            "expected_tree": expected_tree,
+            "actual_tree": after_tree,
+            "reset_to_before_ok": bool(reset_effect.get("ok")),
+            "restore_reviewed_index_ok": False,
+            "restore_reviewed_worktree_ok": False,
+            "reconciliation_required": True,
+            "worktree_index_preserved": True,
+            "post_rollback_tracked_dirty": tracked_dirty,
+            "post_rollback_untracked_dirty": untracked_dirty,
+            "substeps": substeps,
+            "before_head": before,
+            "after_head": before if reset_effect.get("ok") else after,
+        }
 
-    parent_effect = run_safe(["git", "rev-list", "--parents", "-n", "1", "HEAD"], repo, timeout=30, env=env) if after and after != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
+    parent_effect = run_safe(["git", "rev-list", "--parents", "-n", "1", verified_commit], repo, timeout=30, env=env) if verified_commit and verified_commit != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
     substeps.append({"name": "git_rev_list_head_parents_after_commit", **parent_effect})
     parent_line = str(parent_effect.get("stdout_tail") or "").strip()
-    parent_ok = parent_line == f"{after} {before}"
+    parent_ok = parent_line == f"{verified_commit} {before}"
     if after and after != before:
-        message_rc, message_out, message_err = git_output(repo, "log", "-1", "--format=%B")
-        message_effect = {"cmd": ["git", "log", "-1", "--format=%B"], "returncode": message_rc, "ok": message_rc == 0, "stdout_tail": tail(message_out), "stderr_tail": tail(message_err)}
+        message_rc, message_out, message_err = git_output(repo, "log", "-1", "--format=%B", verified_commit)
+        message_effect = {"cmd": ["git", "log", "-1", "--format=%B", verified_commit], "returncode": message_rc, "ok": message_rc == 0, "stdout_tail": tail(message_out), "stderr_tail": tail(message_err)}
     else:
         message_rc, message_out, message_err = 1, "", ""
         message_effect = {"cmd": ["git", "log", "-1", "--format=%B"], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": ""}
@@ -853,39 +1041,40 @@ def commit_staged_index(repo: Path, message: str, env_extra: dict[str, str] | No
     substeps.append({"name": "git_status_reviewed_paths_after_commit", **reviewed_status_effect, "reviewed_untracked_paths": reviewed_untracked_after_commit})
     diff_check_failed = index_clean_effect.get("returncode") not in {0, 1} or worktree_clean_effect.get("returncode") not in {0, 1} or reviewed_status_rc != 0
     if diff_check_failed:
-        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_dirty_check_failed", "substeps": substeps, "before_head": before, "after_head": after}
-    if dirty_reviewed_paths_after_commit:
-        clean_effect = restore_reviewed_paths_from_tree(after, reviewed_paths, "git_restore_reviewed_paths_after_post_commit_drift", "git_ls_tree_reviewed_paths_after_post_commit_drift")
-        if not clean_effect.get("ok"):
-            return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": clean_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_dirty_restore_failed", "substeps": substeps, "before_head": before, "after_head": after}
-    if reviewed_untracked_after_commit:
-        clean_reviewed_untracked_effect = run_safe_pathspec_batches(["git", "clean", "-fd"], reviewed_untracked_after_commit, "git_clean_reviewed_untracked_post_commit_drift")
-        substeps.append({"name": "git_clean_reviewed_untracked_post_commit_drift", **clean_reviewed_untracked_effect, "path_count": len(reviewed_untracked_after_commit)})
-        if not clean_reviewed_untracked_effect.get("ok"):
-            return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": clean_reviewed_untracked_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_reviewed_untracked_clean_failed", "substeps": substeps, "before_head": before, "after_head": after}
+        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_dirty_check_failed", "commit_verified": True, "substeps": substeps, "before_head": before, "after_head": after}
+    if dirty_reviewed_paths_after_commit or reviewed_untracked_after_commit:
+        substeps.append({
+            "name": "git_post_commit_reviewed_drift_preserved",
+            "cmd": [],
+            "returncode": 0,
+            "ok": True,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "tracked_or_modified": bool(dirty_reviewed_paths_after_commit),
+            "untracked_paths": reviewed_untracked_after_commit,
+            "warning": "post_commit_concurrent_work_preserved",
+        })
 
     tracked_dirty, untracked_dirty, status_effect = non_marker_dirty_paths()
     substeps.append({"name": "git_status_after_commit_non_marker_dirty", **status_effect, "tracked_dirty": tracked_dirty, "untracked_dirty": untracked_dirty})
     if tracked_dirty == ["<status_failed>"]:
-        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": status_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_status_failed", "substeps": substeps, "before_head": before, "after_head": after}
-    if tracked_dirty:
-        substeps.append({"name": "git_non_marker_tracked_post_commit_drift_left_for_operator", "cmd": [], "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "path_count": len(tracked_dirty), "paths": tracked_dirty, "warning": "post_commit_external_dirty_drift"})
-        return {"cmd": commit_cmd, "returncode": 0, "ok": True, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "warning": "post_commit_external_dirty_drift", "post_commit_dirty_paths": tracked_dirty, "substeps": substeps, "before_head": before, "after_head": after}
-    if untracked_dirty:
-        substeps.append({"name": "git_untracked_post_commit_drift_left_for_operator", "cmd": [], "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "path_count": len(untracked_dirty), "paths": untracked_dirty, "warning": "post_commit_untracked_dirty"})
-        return {"cmd": commit_cmd, "returncode": 0, "ok": True, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "warning": "post_commit_untracked_dirty", "post_commit_dirty_paths": untracked_dirty, "substeps": substeps, "before_head": before, "after_head": after}
-    return {"cmd": commit_cmd, "returncode": 0, "ok": True, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "substeps": substeps, "before_head": before, "after_head": after}
+        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": status_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "post_commit_status_failed", "commit_verified": True, "substeps": substeps, "before_head": before, "after_head": after}
+    if tracked_dirty or untracked_dirty:
+        dirty_paths = sorted(set(tracked_dirty + untracked_dirty))
+        substeps.append({"name": "git_post_commit_concurrent_work_left_for_operator", "cmd": [], "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "path_count": len(dirty_paths), "paths": dirty_paths, "warning": "post_commit_concurrent_work_preserved"})
+        return {"cmd": commit_cmd, "returncode": 0, "ok": True, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "warning": "post_commit_concurrent_work_preserved", "commit_verified": True, "post_commit_dirty_paths": dirty_paths, "substeps": substeps, "before_head": before, "after_head": after}
+    return {"cmd": commit_cmd, "returncode": 0, "ok": True, "stdout_tail": after, "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "commit_verified": True, "substeps": substeps, "before_head": before, "after_head": after}
 
 
 def push_remote_safety(repo: Path, remote: str) -> tuple[bool, str | None]:
     if github_repo_slug(repo, remote) is None:
         return False, "github_origin_remote_required_for_push"
-    pushurl_rc, pushurl, _pushurl_err = git_output(repo, "config", "--local", "--get-all", f"remote.{remote}.pushurl")
+    pushurl_rc, pushurl, _pushurl_err = git_output(repo, "config", "--get-all", f"remote.{remote}.pushurl")
     if pushurl_rc == 0 and pushurl:
         return False, "remote_pushurl_blocked_for_push"
     if pushurl_rc not in {0, 1}:
         return False, "remote_pushurl_check_failed_for_push"
-    rewrite_rc, rewrite, _rewrite_err = git_output(repo, "config", "--local", "--get-regexp", r"^url\..*\.(pushInsteadOf|insteadOf)$")
+    rewrite_rc, rewrite, _rewrite_err = git_output(repo, "config", "--get-regexp", r"^url\..*\.(pushInsteadOf|insteadOf)$")
     if rewrite_rc == 0 and rewrite:
         return False, "url_rewrite_blocked_for_push"
     if rewrite_rc not in {0, 1}:
@@ -897,11 +1086,65 @@ def push_remote_safety(repo: Path, remote: str) -> tuple[bool, str | None]:
         ("push.pushOption", "push_option_blocked_for_push"),
     )
     for key, reason in modifier_checks:
-        rc, value, _err = git_output(repo, "config", "--local", "--get-all", key)
+        rc, value, _err = git_output(repo, "config", "--get-all", key)
         if rc == 0 and value:
             return False, reason
         if rc not in {0, 1}:
             return False, f"{reason}_check_failed"
+    return True, None
+
+
+def git_mutation_config_safety(repo: Path) -> tuple[bool, str | None]:
+    """Reject repository-local config that can redirect hooks, credentials, or network I/O."""
+    try:
+        cp = subprocess.run(
+            [
+                str(trusted_executable_path("git")), "-C", str(repo), "config", "--name-only", "--get-regexp",
+                r"^(core\.(hookspath|sshcommand|gitproxy|askpass|fsmonitor|attributesfile)|credential\.|remote\..*\.(receivepack|uploadpack|proxy)|http\.|filter\.|diff\.|gpg\.|url\.|include\.|includeif\.)",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env=safe_git_mutation_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+        return False, "local_git_config_unreadable_for_mutation"
+    if cp.returncode not in {0, 1}:
+        return False, "local_git_config_unreadable_for_mutation"
+    for raw_name in cp.stdout.splitlines() if cp.returncode == 0 else []:
+        name = raw_name.strip().lower()
+        if name == "core.hookspath":
+            return False, "local_hooks_path_blocked_for_mutation"
+        if name.startswith("credential."):
+            return False, "local_credential_config_blocked_for_mutation"
+        return False, "local_network_command_config_blocked_for_mutation"
+    try:
+        common = subprocess.run(
+            [str(trusted_executable_path("git")), "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env=safe_git_mutation_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, "local_git_hooks_unreadable_for_mutation"
+    if common.returncode != 0 or not common.stdout.strip():
+        return False, "local_git_hooks_unreadable_for_mutation"
+    hooks_dir = Path(common.stdout.strip()) / "hooks"
+    try:
+        hook_entries = list(hooks_dir.iterdir()) if hooks_dir.exists() else []
+    except OSError:
+        return False, "local_git_hooks_unreadable_for_mutation"
+    for hook in hook_entries:
+        if hook.name.endswith(".sample"):
+            continue
+        try:
+            if hook.is_symlink() or (hook.is_file() and os.access(hook, os.X_OK)):
+                return False, "local_git_hooks_blocked_for_mutation"
+        except OSError:
+            return False, "local_git_hooks_unreadable_for_mutation"
     return True, None
 
 
@@ -925,12 +1168,12 @@ def git_remote_owner(repo: Path, remote: str = "origin") -> str | None:
     return slug.split("/", 1)[0] if slug else None
 
 
-def github_repo_slug(repo: Path, remote: str = "origin") -> str | None:
+def github_remote_url(repo: Path, remote: str = "origin") -> str | None:
     if not isinstance(remote, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", remote):
         return None
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "config", "--local", "--get-all", f"remote.{remote}.url"],
+            [str(trusted_executable_path("git")), "-C", str(repo), "config", "--get-all", f"remote.{remote}.url"],
             text=True,
             capture_output=True,
             check=False,
@@ -946,6 +1189,15 @@ def github_repo_slug(repo: Path, remote: str = "origin") -> str | None:
         return None
     url = urls[0]
     patterns = (
+        r"^https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:\.git)?/?$",
+        r"^git@github\.com:[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:\.git)?$",
+        r"^ssh://git@github\.com/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:\.git)?/?$",
+    )
+    return url if any(re.fullmatch(pattern, url) for pattern in patterns) else None
+
+
+def github_slug_from_remote_url(url: str) -> str | None:
+    patterns = (
         r"^https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
         r"^git@github\.com:([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$",
         r"^ssh://git@github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
@@ -957,6 +1209,80 @@ def github_repo_slug(repo: Path, remote: str = "origin") -> str | None:
     return None
 
 
+def github_repo_slug(repo: Path, remote: str = "origin") -> str | None:
+    url = github_remote_url(repo, remote)
+    return github_slug_from_remote_url(url) if url is not None else None
+
+
+def github_pr_snapshot(repo: Path, repo_slug: str, pr: int) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+    effect = run_safe(
+        ["gh", "api", f"repos/{repo_slug}/pulls/{pr}"],
+        repo,
+        timeout=60,
+        env={"GH_REPO": repo_slug},
+        allow_gh_repo=True,
+        capture_stdout=True,
+    )
+    if not effect.get("ok"):
+        return None, effect, "github_pr_snapshot_unavailable"
+    raw_stdout = effect.pop("stdout", None)
+    try:
+        data = json.loads(str(raw_stdout if raw_stdout is not None else effect.get("stdout_tail") or ""))
+    except json.JSONDecodeError:
+        return None, effect, "github_pr_snapshot_invalid_json"
+    if not isinstance(data, dict) or data.get("number") != pr:
+        return None, effect, "github_pr_snapshot_identity_invalid"
+    return data, effect, None
+
+
+def github_matching_pull_requests(repo: Path, repo_slug: str, head: str, base: str) -> tuple[list[dict[str, Any]] | None, dict[str, Any], str | None]:
+    effect = run_safe(
+        ["gh", "api", "-X", "GET", f"repos/{repo_slug}/pulls", "-f", "state=all", "-f", f"head={head}", "-f", f"base={base}"],
+        repo,
+        timeout=60,
+        env={"GH_REPO": repo_slug},
+        allow_gh_repo=True,
+        capture_stdout=True,
+    )
+    if not effect.get("ok"):
+        return None, effect, "github_pr_reconciliation_unavailable"
+    raw_stdout = effect.pop("stdout", None)
+    try:
+        data = json.loads(str(raw_stdout if raw_stdout is not None else effect.get("stdout_tail") or ""))
+    except json.JSONDecodeError:
+        return None, effect, "github_pr_reconciliation_invalid_json"
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        return None, effect, "github_pr_reconciliation_invalid_shape"
+    return data, effect, None
+
+
+def pull_request_identity_matches(snapshot: dict[str, Any], repo_slug: str, expected_head_ref: str, expected_base: str) -> bool:
+    head = snapshot.get("head") if isinstance(snapshot.get("head"), dict) else {}
+    base = snapshot.get("base") if isinstance(snapshot.get("base"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    expected_branch = expected_head_ref.split(":", 1)[-1]
+    return (
+        head.get("ref") == expected_branch
+        and base.get("ref") == expected_base
+        and head_repo.get("full_name") == repo_slug
+        and base_repo.get("full_name") == repo_slug
+    )
+
+
+def exact_pull_request_matches(snapshot: dict[str, Any], repo_slug: str, expected_head: str, expected_base: str) -> bool:
+    head = snapshot.get("head") if isinstance(snapshot.get("head"), dict) else {}
+    base = snapshot.get("base") if isinstance(snapshot.get("base"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    return (
+        head.get("sha") == expected_head
+        and base.get("ref") == expected_base
+        and head_repo.get("full_name") == repo_slug
+        and base_repo.get("full_name") == repo_slug
+    )
+
+
 def valid_local_branch_name(repo: Path, branch: str | None) -> bool:
     if not isinstance(branch, str) or not branch or branch.startswith("-") or ":" in branch:
         return False
@@ -964,7 +1290,7 @@ def valid_local_branch_name(repo: Path, branch: str | None) -> bool:
         return False
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "check-ref-format", "--branch", branch],
+            [str(trusted_executable_path("git")), "-C", str(repo), "check-ref-format", "--branch", branch],
             text=True,
             capture_output=True,
             check=False,
@@ -1013,18 +1339,49 @@ def busdriver_plugin_root_safety(plugin: Path) -> tuple[bool, str | None]:
         return False, "plugin_root_integrity_failed"
     rels = [str(rel) for rel in required]
     try:
-        top = subprocess.run(["git", "-C", str(plugin), "rev-parse", "--show-toplevel"], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+        trusted_git = str(trusted_executable_path("git"))
+        top = subprocess.run([trusted_git, "-C", str(plugin), "rev-parse", "--show-toplevel"], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
         if top.returncode == 0 and top.stdout.strip() and Path(top.stdout.strip()).resolve() == plugin:
-            tracked = subprocess.run(["git", "-C", str(plugin), "ls-files", "--error-unmatch", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+            tracked = subprocess.run([trusted_git, "-C", str(plugin), "ls-files", "--error-unmatch", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
             if tracked.returncode != 0:
                 return False, "plugin_root_integrity_failed"
-            worktree_clean = subprocess.run(["git", "-C", str(plugin), "diff", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
-            index_clean = subprocess.run(["git", "-C", str(plugin), "diff", "--cached", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+            worktree_clean = subprocess.run([trusted_git, "-C", str(plugin), "diff", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+            index_clean = subprocess.run([trusted_git, "-C", str(plugin), "diff", "--cached", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
             if worktree_clean.returncode != 0 or index_clean.returncode != 0:
                 return False, "plugin_root_dirty"
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
         return False, "plugin_root_integrity_failed"
     return True, None
+
+
+def materialize_authenticated_busdriver_snapshot(plugin: Path, destination: Path) -> bool:
+    """Materialize the pinned committed plugin tree without executing worktree bytes."""
+    try:
+        trusted_git = str(trusted_executable_path("git"))
+        archive = subprocess.run(
+            [trusted_git, "-C", str(plugin), "archive", "--format=tar", TRUSTED_BUSDRIVER_PLUGIN_COMMIT],
+            capture_output=True,
+            check=False,
+            timeout=60,
+            env=safe_git_env(),
+        )
+        if archive.returncode != 0 or not archive.stdout:
+            return False
+        destination.mkdir(parents=True, exist_ok=False)
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+            members = bundle.getmembers()
+            destination_resolved = destination.resolve()
+            for member in members:
+                (destination / member.name).resolve().relative_to(destination_resolved)
+                if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                    return False
+            bundle.extractall(destination, members=members, filter="data")
+        package = json.loads((destination / "package.json").read_text())
+        if package.get("name") != "busdriver" or package.get("version") != TRUSTED_BUSDRIVER_PLUGIN_VERSION:
+            return False
+        return True
+    except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError, tarfile.TarError, subprocess.TimeoutExpired):
+        return False
 
 
 def normalized_pr_head_arg(repo: Path, head: str | None, current: str | None, remote: str = "origin") -> tuple[str | None, str | None]:
@@ -1044,7 +1401,7 @@ def normalized_pr_head_arg(repo: Path, head: str | None, current: str | None, re
     return None, "pr_head_must_match_current_branch"
 
 
-def candidate_backstop_diff_hash(repo: Path, base: str | None = "main", marker_state_dirs: tuple[str, ...] | list[str] | set[str] = (".claude", ".opencode")) -> str | None:
+def candidate_backstop_diff_hash(repo: Path, base: str | None = "main", marker_state_dirs: tuple[str, ...] | list[str] | set[str] = (".claude", ".opencode"), head: str = "HEAD") -> str | None:
     # PR backstop evidence must cover the full clean branch candidate against the
     # PR base, not the branch upstream (which may be the already-pushed feature
     # branch). If local staged/unstaged changes exist, there is no single safe PR
@@ -1056,7 +1413,7 @@ def candidate_backstop_diff_hash(repo: Path, base: str | None = "main", marker_s
     base_ref = pr_base_ref(repo, base)
     if not base_ref:
         return None
-    return diff_hash(repo, f"{base_ref}...HEAD")
+    return diff_hash(repo, f"{base_ref}...{head}")
 
 
 def read_backstop_verdict_file(repo: Path, path_value: str | None) -> tuple[str | None, str | None]:
@@ -1211,15 +1568,20 @@ def review_base_arg(args: argparse.Namespace, delivery_status: dict[str, Any]) -
     return getattr(args, "base", None) or observed_litmus_base_ref(delivery_status)
 
 
-def pr_review_base_matches(delivery_status: dict[str, Any], repo: Path, base: str | None, marker_state_dirs: tuple[str, ...] | list[str] | set[str] = (".claude", ".opencode")) -> bool:
+def pr_review_base_matches(delivery_status: dict[str, Any], repo: Path, base: str | None, marker_state_dirs: tuple[str, ...] | list[str] | set[str] = (".claude", ".opencode"), expected_head: str | None = None, expected_base_head: str | None = None) -> bool:
     expected_base = pr_base_ref(repo, base)
     if expected_base is None:
         return False
     base_branch = remote_branch_name_from_ref(expected_base)
-    expected_hash = candidate_backstop_diff_hash(repo, base, marker_state_dirs)
-    head_rc, expected_head, _head_err = git_output(repo, "rev-parse", "HEAD")
+    head_rc, current_head, _head_err = git_output(repo, "rev-parse", "HEAD")
+    reviewed_head = expected_head or current_head
+    expected_hash = (
+        None
+        if repo_blocking_dirty_entries(repo, marker_state_dirs)
+        else diff_hash(repo, f"{expected_base_head}...{reviewed_head}")
+    ) if expected_base_head else candidate_backstop_diff_hash(repo, base, marker_state_dirs, reviewed_head)
     branch = current_branch(repo)
-    expected_base_head = local_ref_head(repo, expected_base)
+    expected_base_head = expected_base_head or local_ref_head(repo, expected_base)
     live_base_head, _live_base_error = live_remote_branch_head(repo, base_branch or "", "origin")
     litmus = delivery_status.get("litmus_status") if isinstance(delivery_status.get("litmus_status"), dict) else {}
     summary = litmus.get("summary") if isinstance(litmus.get("summary"), dict) else {}
@@ -1243,7 +1605,8 @@ def pr_review_base_matches(delivery_status: dict[str, Any], repo: Path, base: st
         and expected_base_head == live_base_head
         and isinstance(observed_head, str)
         and head_rc == 0
-        and observed_head == expected_head
+        and current_head == reviewed_head
+        and observed_head == reviewed_head
         and isinstance(observed_branch, str)
         and branch is not None
         and observed_branch == branch
@@ -1278,6 +1641,14 @@ def verifier_error_name(item: str, index: int) -> str:
 
 def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    verifier_home = tempfile.TemporaryDirectory(prefix="hermes-deliver-verifier-home-")
+    verifier_env = {
+        "HOME": verifier_home.name,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", ""),
+        "TMPDIR": os.environ.get("TMPDIR", tempfile.gettempdir()),
+    }
     for index, item in enumerate(verifiers, start=1):
         try:
             name, command = parse_verifier(item, index)
@@ -1295,7 +1666,7 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
             })
             continue
         try:
-            cp = subprocess.run(argv, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=timeout)
+            cp = subprocess.run(argv, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=timeout, env=verifier_env)
             results.append({
                 "name": name,
                 "command": command,
@@ -1324,13 +1695,84 @@ def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[s
                 "stdout_tail": "",
                 "stderr_tail": tail(f"{type(e).__name__}: {e}"),
             })
+    verifier_home.cleanup()
     return results
 
 
+def verifier_dispatch_blocker() -> str | None:
+    return "verifier_containment_unavailable"
+
+
 def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    script = PR_GRIND_LOOP
+    expected_repository = getattr(args, "expected_repository", None) or github_repo_slug(repo, "origin")
+    if not expected_repository:
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_expected_repository_required"}, 2
+    sources = (
+        (PR_GRIND_LOOP, "hermes-busdriver-pr-grind-loop", TRUSTED_PR_GRIND_LOOP_SHA256),
+        (PR_GRIND_CHECK, "hermes-busdriver-pr-grind-check", TRUSTED_PR_GRIND_CHECK_SHA256),
+    )
+    authenticated: dict[str, bytes] = {}
+    try:
+        for source, name, expected_digest in sources:
+            if source.is_symlink() or not source.is_file():
+                raise OSError(f"{name}_not_regular")
+            content = source.read_bytes()
+            if hashlib.sha256(content).hexdigest() != expected_digest:
+                return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_bundle_integrity_failed", "source": name}, 2
+            authenticated[name] = content
+    except OSError as e:
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_bundle_integrity_failed", "detail": type(e).__name__}, 2
+    snapshot, _, snapshot_error = github_pr_snapshot(repo, expected_repository, int(args.pr))
+    if snapshot is None:
+        return {"ok": False, "status": "blocked", "clean": False, "error": snapshot_error or "pr_grind_identity_unavailable"}, 2
+    head = snapshot.get("head") if isinstance(snapshot.get("head"), dict) else {}
+    base = snapshot.get("base") if isinstance(snapshot.get("base"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    expected_identity = {
+        "repo": str(repo),
+        "repository": expected_repository,
+        "pr": int(args.pr),
+        "url": f"https://github.com/{expected_repository}/pull/{int(args.pr)}",
+        "latest_head": head.get("sha"),
+        "head_repository": head_repo.get("full_name"),
+        "head_ref": head.get("ref"),
+        "base_repository": base_repo.get("full_name"),
+        "base": base.get("ref"),
+        "base_sha": base.get("sha"),
+    }
+    if (
+        snapshot.get("number") != expected_identity["pr"]
+        or snapshot.get("html_url") != expected_identity["url"]
+        or expected_identity["base_repository"] != expected_repository
+        or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", str(expected_identity["head_repository"] or ""))
+        or not isinstance(expected_identity["head_ref"], str)
+        or not expected_identity["head_ref"]
+        or not isinstance(expected_identity["base"], str)
+        or not expected_identity["base"]
+        or not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(expected_identity["latest_head"] or ""))
+        or not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(expected_identity["base_sha"] or ""))
+    ):
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_identity_invalid"}, 2
+    requested_base = getattr(args, "base", None)
+    if requested_base and remote_branch_name_from_ref(normalize_pr_base_arg(requested_base)) != expected_identity["base"]:
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_base_binding_mismatch"}, 2
+    bundle_guard = tempfile.TemporaryDirectory(prefix="hermes-pr-grind-bundle-")
+    private_scripts = Path(bundle_guard.name) / "scripts"
+    private_scripts.mkdir()
+    for name, content in authenticated.items():
+        private = private_scripts / name
+        private.write_bytes(content)
+        private.chmod(0o500)
+    try:
+        materialize_delivery_status_executables(Path(bundle_guard.name))
+    except OSError as e:
+        bundle_guard.cleanup()
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_executable_bundle_integrity_failed", "detail": type(e).__name__}, 2
+    script = private_scripts / "hermes-busdriver-pr-grind-loop"
     cmd = [
         sys.executable,
+        "-I",
         str(script),
         "--repo",
         str(repo),
@@ -1345,10 +1787,21 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
         "--check-timeout",
         str(args.check_timeout),
     ]
+    cmd += [
+        "--expected-repository", expected_repository,
+        "--expected-head-repository", str(expected_identity["head_repository"]),
+        "--expected-head-ref", str(expected_identity["head_ref"]),
+        "--expected-base-repository", str(expected_identity["base_repository"]),
+        "--expected-base-ref", str(expected_identity["base"]),
+        "--expected-head-sha", str(expected_identity["latest_head"]),
+        "--expected-base-sha", str(expected_identity["base_sha"]),
+    ]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
+    runtime_env = safe_git_env()
+    runtime_env["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] = "1"
     try:
-        cp = subprocess.run(cmd, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0), env=safe_git_env())
+        cp = subprocess.run(cmd, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0), env=runtime_env)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -1377,6 +1830,9 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
         }, cp.returncode or 1
     if not isinstance(data, dict):
         return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_loop_json_not_object", "returncode": cp.returncode}, cp.returncode or 1
+    for field, expected_value in expected_identity.items():
+        if data.get(field) != expected_value:
+            return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_loop_identity_mismatch", "field": field}, 2
     data.setdefault("returncode", cp.returncode)
     if cp.stderr:
         data.setdefault("stderr_tail", tail(cp.stderr))
@@ -1394,7 +1850,9 @@ def pr_grind_loop_authority_safe(value: Any) -> bool:
 def pr_grind_loop_authority_tree_safe(value: Any) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in PR_GRIND_LOOP_DECISION_FLAGS and item is not False:
+            if (key in PR_GRIND_LOOP_DECISION_FLAGS or key.endswith("_allowed")) and item is not False:
+                return False
+            if "authority" in key and isinstance(item, bool) and item is not False:
                 return False
             if not pr_grind_loop_authority_tree_safe(item):
                 return False
@@ -1410,10 +1868,91 @@ def pr_grind_loop_envelope_safe(value: Any) -> bool:
     status = value.get("status")
     clean = value.get("clean")
     decision_data = value.get("decision")
+    iterations = value.get("iterations")
+    policy_gaps = value.get("policy_gaps")
+    limits = value.get("limits")
+    identity_safe = (
+        isinstance(value.get("repo"), str)
+        and bool(value["repo"])
+        and isinstance(value.get("repository"), str)
+        and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", value["repository"]) is not None
+        and isinstance(value.get("pr"), int)
+        and not isinstance(value.get("pr"), bool)
+        and value["pr"] > 0
+        and value.get("url") == f"https://github.com/{value['repository']}/pull/{value['pr']}"
+        and isinstance(value.get("latest_head"), str)
+        and re.fullmatch(r"[0-9a-fA-F]{40,64}", value["latest_head"]) is not None
+        and isinstance(value.get("head_repository"), str)
+        and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", value["head_repository"]) is not None
+        and isinstance(value.get("head_ref"), str)
+        and bool(value["head_ref"])
+        and isinstance(value.get("base_repository"), str)
+        and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", value["base_repository"]) is not None
+        and value["base_repository"] == value["repository"]
+        and isinstance(value.get("base"), str)
+        and bool(value["base"])
+        and isinstance(value.get("base_sha"), str)
+        and re.fullmatch(r"[0-9a-fA-F]{40,64}", value["base_sha"]) is not None
+    )
+    evidence_safe = (
+        isinstance(iterations, list)
+        and isinstance(policy_gaps, list)
+        and all(isinstance(item, str) for item in policy_gaps)
+        and isinstance(limits, dict)
+        and isinstance(limits.get("max_wait_seconds"), (int, float))
+        and isinstance(limits.get("poll_interval"), (int, float))
+        and isinstance(limits.get("max_polls"), int)
+        and not isinstance(limits.get("max_polls"), bool)
+        and limits["max_polls"] > 0
+        and limits.get("max_fix_rounds") == 0
+        and isinstance(value.get("elapsed_seconds"), (int, float))
+    )
+    for iteration in iterations if isinstance(iterations, list) else []:
+        checks = iteration.get("checks") if isinstance(iteration, dict) else None
+        if (
+            not isinstance(iteration, dict)
+            or not isinstance(iteration.get("iteration"), int)
+            or not isinstance(iteration.get("elapsed_seconds"), (int, float))
+            or not isinstance(iteration.get("source"), str)
+            or iteration.get("status") not in VALID_PR_GRIND_LOOP_STATUSES
+            or not isinstance(iteration.get("clean"), bool)
+            or iteration["clean"] is not (iteration["status"] == "clean")
+            or not isinstance(iteration.get("head"), str)
+            or re.fullmatch(r"[0-9a-fA-F]{40,64}", iteration["head"]) is None
+            or not isinstance(iteration.get("base"), str)
+            or not isinstance(iteration.get("blockers"), list)
+            or not isinstance(checks, dict)
+            or any(not isinstance(checks.get(field), int) or isinstance(checks.get(field), bool) for field in ("failed", "pending", "kept"))
+            or not isinstance(checks.get("mode"), str)
+            or not isinstance(checks.get("source"), str)
+            or not isinstance(iteration.get("actionable_comment_count"), int)
+            or not isinstance(iteration.get("decision_reason"), str)
+        ):
+            evidence_safe = False
+            break
+    clean_evidence = True
+    if status == "clean":
+        last = iterations[-1] if isinstance(iterations, list) and iterations else None
+        last_checks = last.get("checks") if isinstance(last, dict) and isinstance(last.get("checks"), dict) else {}
+        clean_evidence = (
+            isinstance(last, dict)
+            and not policy_gaps
+            and last.get("status") == "clean"
+            and last.get("clean") is True
+            and last.get("head") == value.get("latest_head")
+            and last.get("base") == value.get("base")
+            and last.get("blockers") == []
+            and last_checks.get("failed") == 0
+            and last_checks.get("pending") == 0
+            and isinstance(last_checks.get("kept"), int)
+            and last_checks["kept"] > 0
+            and last.get("actionable_comment_count") == 0
+        )
     return (
         value.get("schema") == PR_GRIND_LOOP_SCHEMA
         and value.get("version") == 1
         and isinstance(value.get("ok"), bool)
+        and value.get("ok") is (status == "clean")
         and value.get("read_only") is True
         and status in VALID_PR_GRIND_LOOP_STATUSES
         and isinstance(clean, bool)
@@ -1421,8 +1960,15 @@ def pr_grind_loop_envelope_safe(value: Any) -> bool:
         and isinstance(decision_data, dict)
         and decision_data.get("status") == status
         and isinstance(decision_data.get("reason"), str)
+        and decision_data.get("pr_grind_clean") is (status == "clean")
+        and decision_data.get("fix_rounds_attempted") == 0
+        and decision_data.get("marker_write_allowed") is False
+        and isinstance(decision_data.get("ack_ledger_policy"), str)
         and pr_grind_loop_authority_safe(decision_data)
         and pr_grind_loop_authority_tree_safe(value)
+        and identity_safe
+        and evidence_safe
+        and clean_evidence
     )
 
 
@@ -1458,13 +2004,15 @@ def delivery_run(
     delivery_status: dict[str, Any],
     result_decision: dict[str, Any],
     reason: str | None,
+    *,
+    create_identity: bool = True,
 ) -> dict[str, Any]:
     repo = delivery_status.get("repo") if isinstance(delivery_status.get("repo"), dict) else {}
     return {
         "schema": RUN_SCHEMA,
         "version": 1,
-        "run_id": args.run_id or new_run_id(),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_id": (args.run_id or new_run_id()) if create_identity else args.run_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if create_identity else None,
         "phase": delivery_phase(args, reason),
         "status": result_decision.get("status"),
         "reason": result_decision.get("reason"),
@@ -1565,16 +2113,142 @@ def run_summary(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def mutating_authority_safe(value: Any, operation: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_flag = {
+        "commit": "commit_allowed",
+        "push": "push_allowed",
+        "pr-create": "pr_allowed",
+        "merge": "merge_allowed",
+    }.get(operation)
+    if (
+        value.get("schema") != FINALIZATION_AUTHORITY_SCHEMA
+        or value.get("version") != 0
+        or value.get("operation") != operation
+        or not isinstance(value.get("allowed"), bool)
+        or not isinstance(value.get("reason"), str)
+        or not isinstance(value.get("sources"), list)
+        or not all(isinstance(source, str) for source in value.get("sources", []))
+        or not all(isinstance(value.get(key), bool) for key in BLOCKED_FLAGS)
+        or value.get("marker_write_allowed") is not False
+    ):
+        return False
+    positive = {key for key in BLOCKED_FLAGS if value.get(key) is True}
+    if value.get("allowed") is False:
+        return not positive
+    expected_positive = {"finalization_allowed"}
+    if required_flag:
+        expected_positive.add(required_flag)
+    return positive == expected_positive
+
+
+def mutating_run_metadata_safe(value: Any, run_id: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    operation = value.get("operation")
+    return (
+        value.get("schema") == MUTATING_RUN_SCHEMA
+        and value.get("version") == 0
+        and value.get("run_id") == run_id
+        and isinstance(value.get("created_at"), str)
+        and operation in {"pre-pr-review", "commit", "push", "pr-create", "merge"}
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("reason"), str)
+        and isinstance(value.get("repo_root"), (str, type(None)))
+        and (value.get("pr_number") is None or isinstance(value.get("pr_number"), (int, str)))
+        and mutating_authority_safe(value.get("authority"), operation)
+        and isinstance(value.get("side_effects"), list)
+        and all(isinstance(effect, dict) for effect in value.get("side_effects", []))
+        and isinstance(value.get("lock_acquire"), (dict, type(None)))
+        and isinstance(value.get("lock_release"), (dict, type(None)))
+    )
+
+
 def artifact_is_valid(data: dict[str, Any], run_id: str) -> bool:
     run = data.get("run")
     decision_data = data.get("decision")
+    mutating_run = data.get("mutating_run")
+    operation = data.get("operation")
+    expected_phase = {
+        "verify": "verify",
+        "pr-grind": "pr_grind",
+        "pre-pr-review": "pre_pr_review",
+        "commit": "commit",
+        "push": "push",
+        "pr-create": "pr_create",
+        "merge": "merge",
+    }.get(operation)
+    if isinstance(run, dict) and run.get("reason") == "delivery_status_failed":
+        expected_phase = "delivery_status"
+    outcome_consistent = (
+        isinstance(run, dict)
+        and isinstance(decision_data, dict)
+        and data.get("mode") == "execute"
+        and expected_phase is not None
+        and run.get("phase") == expected_phase
+        and decision_data.get("status") == run.get("status")
+        and decision_data.get("reason") == run.get("reason")
+        and not (data.get("ok") is True and (run.get("status") == "blocked" or str(run.get("status")).endswith("_failed") or run.get("status") == "observed_target_unattributed"))
+        and not (data.get("ok") is False and run.get("status") in {"verified", "pr_grind_clean"})
+        and (
+            mutating_run is None
+            or (
+                isinstance(mutating_run, dict)
+                and mutating_run.get("operation") == operation
+                and mutating_run.get("status") == run.get("status")
+                and mutating_run.get("reason") == run.get("reason")
+            )
+        )
+    )
     return (
         data.get("schema") == SCHEMA
         and data.get("version") == 1
         and isinstance(data.get("ok"), bool)
         and decision_metadata_safe(decision_data)
         and run_metadata_safe(run, run_id)
+        and (mutating_run is None or mutating_run_metadata_safe(mutating_run, run_id))
+        and outcome_consistent
     )
+
+
+def new_artifact_auth_key() -> tuple[str, bytes]:
+    """Create a process-scoped writer capability that is never persisted or inherited by exec children."""
+    key_id = secrets.token_hex(16)
+    key = os.urandom(32)
+    _ARTIFACT_AUTH_KEYS[key_id] = key
+    return key_id, key
+
+
+def artifact_auth_message(data: dict[str, Any], path: Path) -> bytes:
+    unsigned = dict(data)
+    unsigned.pop("writer_authentication", None)
+    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return b"hermes-busdriver-delivery-artifact-v1\0" + path.name.encode() + b"\0" + canonical
+
+
+def artifact_auth_shape_valid(auth: Any) -> bool:
+    return (
+        isinstance(auth, dict)
+        and auth.get("schema") == ARTIFACT_AUTH_SCHEMA
+        and auth.get("algorithm") == "hmac-sha256-process-scoped"
+        and isinstance(auth.get("key_id"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", auth["key_id"]) is not None
+        and isinstance(auth.get("mac"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", auth["mac"]) is not None
+    )
+
+
+def authenticate_artifact(data: dict[str, Any], path: Path) -> bool:
+    auth = data.get("writer_authentication")
+    if not artifact_auth_shape_valid(auth):
+        return False
+    assert isinstance(auth, dict)
+    key = _ARTIFACT_AUTH_KEYS.get(auth["key_id"])
+    if key is None:
+        return False
+    expected = hmac.new(key, artifact_auth_message(data, path), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, auth["mac"])
 
 
 def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
@@ -1584,10 +2258,13 @@ def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
     matches: list[tuple[float, str, Path, dict[str, Any]]] = []
     for path in base.glob("*.json"):
         try:
+            st = path.lstat()
+            if path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o600:
+                continue
             data = json.loads(path.read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if not isinstance(data, dict) or not artifact_is_valid(data, run_id):
+        if not isinstance(data, dict) or not artifact_is_valid(data, run_id) or not authenticate_artifact(data, path):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -1600,14 +2277,49 @@ def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
     return path, data
 
 
+def has_process_external_artifact(run_id: str) -> bool:
+    """Return true only for structurally valid artifacts whose process-scoped writer key is unavailable."""
+    base = artifact_base()
+    if not base.is_dir():
+        return False
+    for path in base.glob("*.json"):
+        try:
+            st = path.lstat()
+            if path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o600:
+                continue
+            data = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        auth = data.get("writer_authentication") if isinstance(data, dict) else None
+        if (
+            isinstance(data, dict)
+            and artifact_is_valid(data, run_id)
+            and artifact_auth_shape_valid(auth)
+            and isinstance(auth, dict)
+            and auth["key_id"] not in _ARTIFACT_AUTH_KEYS
+        ):
+            return True
+    return False
+
+
 def write_artifact(result: dict[str, Any]) -> None:
     run = result.get("run") if isinstance(result.get("run"), dict) else {}
     run_id = str(run.get("run_id") or new_run_id())
     path = artifact_path(run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise RuntimeError("delivery_artifact_directory_invalid")
+    path.parent.chmod(0o700)
     result["run_artifact_path"] = str(path)
     if isinstance(result.get("run"), dict):
         result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
+    key_id, key = new_artifact_auth_key()
+    result["writer_authentication"] = {
+        "schema": ARTIFACT_AUTH_SCHEMA,
+        "algorithm": "hmac-sha256-process-scoped",
+        "key_id": key_id,
+        "mac": hmac.new(key, artifact_auth_message(result, path), hashlib.sha256).hexdigest(),
+    }
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1673,7 +2385,12 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     found = artifact_for_run_id(args.run_id)
     if found is None:
-        result_decision = decision("blocked", "run_not_found")
+        missing_reason = (
+            "artifact_writer_authentication_unavailable"
+            if has_process_external_artifact(args.run_id)
+            else "run_not_found"
+        )
+        result_decision = decision("blocked", missing_reason)
         result = {
             "schema": SCHEMA,
             "version": 1,
@@ -1683,11 +2400,11 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "repo": None,
             "pr": None,
             "delivery_status": None,
-            "status_lookup": {"found": False, "reason": "run_not_found", "run_id": args.run_id},
+            "status_lookup": {"found": False, "reason": missing_reason, "run_id": args.run_id},
             "verifiers": [],
-            "steps": steps_for("run_not_found"),
+            "steps": steps_for(missing_reason),
             "decision": result_decision,
-            "run": delivery_run(args, {}, result_decision, "run_not_found"),
+            "run": delivery_run(args, {}, result_decision, missing_reason),
             "run_artifact_path": None,
         }
         return redact_value(result), 1
@@ -1726,12 +2443,79 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 
 
-def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str] | None = None, *, allow_gh_repo: bool = False, input_text: str | None = None) -> dict[str, Any]:
+_TRUSTED_EXECUTABLE_RUNTIME: dict[str, tuple[Any, Path, Path, str]] = {}
+
+
+def trusted_executable_path(name: str) -> Path:
+    source = {"git": TRUSTED_GIT, "gh": TRUSTED_GH, "jq": TRUSTED_JQ}.get(name)
+    if source is None:
+        raise ValueError(f"unsupported trusted executable:{name}")
+    expected_digest = TRUSTED_EXECUTABLE_DIGESTS[name]
+    cached = _TRUSTED_EXECUTABLE_RUNTIME.get(name)
+    if cached is not None:
+        _guard, private, cached_source, cached_digest = cached
+        if cached_source == source and cached_digest == expected_digest:
+            try:
+                mode = stat.S_IMODE(private.lstat().st_mode)
+                digest = hashlib.sha256(private.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise RuntimeError(f"trusted_runtime_executable_unavailable:{name}:{type(exc).__name__}") from exc
+            if private.is_symlink() or not private.is_file() or mode != 0o500 or digest != expected_digest:
+                raise RuntimeError(f"trusted_runtime_executable_integrity_failed:{name}")
+            return private
+        cached[0].cleanup()
+        _TRUSTED_EXECUTABLE_RUNTIME.pop(name, None)
+    try:
+        content = source.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"trusted_executable_unavailable:{name}:{type(exc).__name__}") from exc
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise RuntimeError(f"trusted_executable_integrity_failed:{name}")
+    guard = tempfile.TemporaryDirectory(prefix=f"hermes-delivery-{name}-runtime-")
+    runtime_root = Path(guard.name)
+    runtime_root.chmod(0o700)
+    private = runtime_root / name
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(private, flags, 0o500)
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short trusted executable write")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        private.chmod(0o500)
+    except OSError as exc:
+        guard.cleanup()
+        raise RuntimeError(f"trusted_runtime_executable_materialization_failed:{name}:{type(exc).__name__}") from exc
+    _TRUSTED_EXECUTABLE_RUNTIME[name] = (guard, private, source, expected_digest)
+    return private
+
+
+def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str] | None = None, *, allow_gh_repo: bool = False, input_text: str | None = None, capture_stdout: bool = False) -> dict[str, Any]:
     started = time.time()
+    effective_argv = list(argv)
+    trusted_name = Path(effective_argv[0]).name if effective_argv and Path(effective_argv[0]).name in {"git", "gh"} else None
+    try:
+        if trusted_name is not None:
+            effective_argv[0] = str(trusted_executable_path(trusted_name))
+    except RuntimeError as exc:
+        return {"cmd": argv, "returncode": 126, "ok": False, "stdout_tail": "", "stderr_tail": str(exc), "error": "trusted_executable_rejected"}
     effective_env = safe_git_env(env, allow_gh_repo=allow_gh_repo)
+    if trusted_name == "gh":
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
+            value = os.environ.get(key)
+            if value:
+                effective_env[key] = value
     try:
         proc = subprocess.Popen(
-            argv,
+            effective_argv,
             cwd=str(cwd),
             shell=False,
             text=True,
@@ -1743,7 +2527,7 @@ def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str]
         )
         try:
             stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
-            return {
+            result = {
                 "cmd": argv,
                 "returncode": proc.returncode,
                 "ok": proc.returncode == 0,
@@ -1751,6 +2535,12 @@ def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str]
                 "stderr_tail": tail(stderr),
                 "elapsed_seconds": round(time.time() - started, 3),
             }
+            if capture_stdout:
+                if len(stdout) > 2_000_000:
+                    result.update({"ok": False, "returncode": 1, "error": "stdout_capture_limit_exceeded"})
+                else:
+                    result["stdout"] = stdout
+            return result
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -1790,8 +2580,12 @@ def repo_root_from_status(delivery_status: dict[str, Any]) -> Path | None:
 
 def git_output(repo: Path, *args: str) -> tuple[int, str, str]:
     try:
-        cp = subprocess.run(["git", "-C", str(repo), "-c", "core.fsmonitor=false", *args], text=True, capture_output=True, check=False, env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}), timeout=30)
-    except subprocess.TimeoutExpired:
+        git_bin = trusted_executable_path("git")
+        git_args = list(args)
+        if git_args and git_args[0] == "diff":
+            git_args[1:1] = ["--no-ext-diff", "--no-textconv"]
+        cp = subprocess.run([str(git_bin), "-C", str(repo), "-c", "core.fsmonitor=false", *git_args], text=True, capture_output=True, check=False, env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}), timeout=30)
+    except (subprocess.TimeoutExpired, RuntimeError):
         return 124, "", "git command timed out"
     except OSError as e:
         return 127, "", str(e)
@@ -1799,12 +2593,12 @@ def git_output(repo: Path, *args: str) -> tuple[int, str, str]:
 
 
 def safe_git_env(extra: dict[str, str] | None = None, *, allow_gh_repo: bool = False) -> dict[str, str]:
-    blocked_shell_env = {"BASH_ENV", "ENV", "ZDOTDIR"}
-    blocked_gh_env = {"GH_REPO", "GH_HOST"}
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_") and key not in blocked_shell_env and key not in blocked_gh_env}
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "SSH_AUTH_SOCK"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
     if extra:
         for key, value in extra.items():
-            if key in blocked_shell_env or key == "GH_HOST":
+            if key in {"BASH_ENV", "ENV", "ZDOTDIR", "PYTHONPATH", "PYTHONHOME", "GH_HOST"}:
                 continue
             if key == "GH_REPO":
                 if allow_gh_repo and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
@@ -1814,15 +2608,18 @@ def safe_git_env(extra: dict[str, str] | None = None, *, allow_gh_repo: bool = F
                 env[key] = value
             elif key == "GIT_CONFIG_GLOBAL" and value == os.devnull:
                 env[key] = value
+            elif key == "GIT_ALTERNATE_OBJECT_DIRECTORIES" and isinstance(value, str) and os.path.isabs(value):
+                env[key] = value
             elif not key.startswith("GIT_"):
                 env[key] = value
     return env
 
 
 def safe_git_mutation_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(extra or {})
-    env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
-    env.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    env = safe_git_env(extra)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
@@ -1838,7 +2635,7 @@ def live_remote_head(repo: Path, branch: str) -> tuple[str | None, str | None]:
         return None, "upstream_config_missing"
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "ls-remote", "--heads", remote, merge_ref],
+            [str(trusted_executable_path("git")), "-C", str(repo), "ls-remote", "--heads", remote, merge_ref],
             text=True,
             capture_output=True,
             check=False,
@@ -2029,7 +2826,7 @@ def staged_changes_status(repo: Path) -> tuple[bool, str | None]:
     try:
         cp = subprocess.run(
             [
-                "git",
+                str(trusted_executable_path("git")),
                 "-C",
                 str(repo),
                 "-c",
@@ -2164,7 +2961,7 @@ def staged_marker_entries(repo: Path, state_dir_names: tuple[str, ...] | list[st
         return []
     try:
         cp = subprocess.run(
-            ["git", "-C", str(repo), "-c", "diff.renames=false", "diff", "--cached", "--no-renames", "--name-only", "-z"],
+            [str(trusted_executable_path("git")), "-C", str(repo), "-c", "diff.renames=false", "diff", "--cached", "--no-renames", "--name-only", "-z"],
             capture_output=True,
             check=False,
             timeout=30,
@@ -2211,26 +3008,59 @@ def run_lock_helper(cmd: list[str], timeout: int = 30) -> tuple[dict[str, Any], 
         return {"parse_error": type(e).__name__}, result
 
 
+def materialize_trusted_lock() -> Path:
+    lock_bytes = LOCK_SOURCE.read_bytes()
+    if hashlib.sha256(lock_bytes).hexdigest() != TRUSTED_LOCK_SHA256:
+        raise OSError("trusted_lock_integrity_failed")
+    generation = Path(tempfile.mkdtemp(prefix="hermes-lock-helper-"))
+    trusted = generation / "hermes-busdriver-lock"
+    trusted.write_bytes(lock_bytes)
+    trusted.chmod(0o500)
+    return trusted
+
+
 def acquire_finalization_lock(repo: Path, state_dir: str | None = None) -> dict[str, Any]:
-    cmd = [sys.executable, str(ROOT / "scripts" / "hermes-busdriver-lock"), "acquire", "--repo", str(repo), "--operation", "finalization", "--ttl-seconds", str(6 * 60 * 60)]
+    try:
+        helper = materialize_trusted_lock()
+    except OSError as exc:
+        return {"acquired": False, "reason": str(exc)}
+    cmd = [sys.executable, "-I", str(helper), "acquire", "--repo", str(repo), "--operation", "finalization", "--ttl-seconds", str(6 * 60 * 60)]
     if state_dir:
         cmd += ["--state-dir", state_dir]
     payload, result = run_lock_helper(cmd)
     if "parse_error" in payload:
         payload = {"acquired": False, **payload}
+    if payload.get("acquired"):
+        payload["trusted_helper_path"] = str(helper)
+    else:
+        helper.unlink(missing_ok=True)
+        helper.parent.rmdir()
     payload["command"] = result
     return payload
 
 
-def release_finalization_lock(repo: Path, token: str, state_dir: str | None = None) -> dict[str, Any]:
-    cmd = [sys.executable, str(ROOT / "scripts" / "hermes-busdriver-lock"), "release", "--repo", str(repo), "--operation", "finalization", "--token", token]
+def release_finalization_lock(repo: Path, token: str, state_dir: str | None = None, lock_path: str = "", helper_path: str = "") -> dict[str, Any]:
+    if not helper_path or not lock_path:
+        return {"released": False, "reason": "lock-identity-missing"}
+    helper = Path(helper_path)
+    cmd = [sys.executable, "-I", str(helper), "release", "--repo", str(repo), "--operation", "finalization", "--token", token, "--lock-path", lock_path]
     if state_dir:
         cmd += ["--state-dir", state_dir]
-    payload, result = run_lock_helper(cmd)
-    if "parse_error" in payload:
-        payload = {"released": False, **payload}
-    payload["command"] = result
-    return payload
+    try:
+        payload, result = run_lock_helper(cmd)
+        if "parse_error" in payload:
+            payload = {"released": False, **payload}
+        payload["command"] = result
+        return payload
+    finally:
+        helper.unlink(missing_ok=True)
+        try:
+            helper.parent.rmdir()
+        except OSError:
+            pass
+
+
+release_finalization_lock.supports_lock_identity = True  # type: ignore[attr-defined]
 
 
 def finalization_state_dir(args: argparse.Namespace) -> str | None:
@@ -2301,7 +3131,7 @@ def legacy_decision_for_mutation(status: str, reason: str) -> dict[str, Any]:
 
 
 def mutating_run_envelope(args: argparse.Namespace, operation: str, status: str, reason: str, repo: Path | None, authority: dict[str, Any], side_effects: list[dict[str, Any]], lock: dict[str, Any] | None, release: dict[str, Any] | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    success_statuses = {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged"}
+    success_statuses = {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged", "already_up_to_date"}
     release_placeholder = getattr(args, "_lock_release_placeholder", None) if status in success_statuses else None
     release_value: Any = release if release is not None else release_placeholder
     return {
@@ -2341,8 +3171,14 @@ def side_effect_completed_release_failed_status(operation: str, effects: list[di
 def release_failure_reconciliation(operation: str, mutating_run: dict[str, Any] | None, release: Any) -> tuple[dict[str, Any], list[dict[str, str]], int] | None:
     if mutating_run is None or not isinstance(release, dict) or release.get("released") is True:
         return None
-    if mutating_run.get("status") not in {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged"}:
+    if mutating_run.get("status") not in {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged", "already_up_to_date"}:
         return None
+    if mutating_run.get("status") == "already_up_to_date":
+        reason = "finalization_lock_release_failed"
+        mutating_run["status"] = "already_up_to_date_release_failed"
+        mutating_run["reason"] = reason
+        mutating_run["authority"] = mutating_authority(operation, False, reason)
+        return legacy_decision_for_mutation("already_up_to_date_release_failed", reason), steps_for(reason, operation), 2
     side_effects = mutating_run.get("side_effects") if isinstance(mutating_run.get("side_effects"), list) else []
     release_status = side_effect_completed_release_failed_status(operation, side_effects)
     if release_status == "finalization_lock_release_failed":
@@ -2363,6 +3199,11 @@ def release_failure_reconciliation(operation: str, mutating_run: dict[str, Any] 
 
 
 def run_busdriver_pre_pr_review(repo: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    # The pinned Busdriver helper still shells out to Git/Codex and cannot yet be
+    # given a config-free Git runtime plus a minimal isolated model credential
+    # store. Do not execute it with the user's HOME or SSH agent.
+    return {"ok": False, "reason": "isolated_review_runtime_unavailable", "side_effects": []}, 2
+
     effects: list[dict[str, Any]] = []
     if not args.plugin_root:
         return {"ok": False, "reason": "plugin_root_required"}, 2
@@ -2374,11 +3215,15 @@ def run_busdriver_pre_pr_review(repo: Path, args: argparse.Namespace) -> tuple[d
     plugin_safe, plugin_reason = busdriver_plugin_root_safety(plugin)
     if not plugin_safe:
         return {"ok": False, "reason": plugin_reason or "plugin_root_untrusted", "side_effects": effects}, 2
-    init = plugin / "skills" / "litmus" / "scripts" / "init-review-loop.sh"
-    loop = plugin / "skills" / "litmus" / "scripts" / "run-review-loop.sh"
+    snapshot_guard = tempfile.TemporaryDirectory(prefix="hermes-busdriver-authenticated-plugin-")
+    authenticated_plugin = Path(snapshot_guard.name) / "busdriver"
+    if not materialize_authenticated_busdriver_snapshot(plugin, authenticated_plugin):
+        return {"ok": False, "reason": "plugin_snapshot_authentication_failed", "side_effects": effects}, 2
+    init = authenticated_plugin / "skills" / "litmus" / "scripts" / "init-review-loop.sh"
+    loop = authenticated_plugin / "skills" / "litmus" / "scripts" / "run-review-loop.sh"
     if not init.exists() or not loop.exists():
         return {"ok": False, "reason": "busdriver_litmus_scripts_missing", "init": str(init), "loop": str(loop)}, 2
-    env_extra = {"LITMUS_MODE": "pr", "BUSDRIVER_PLUGIN_ROOT": str(plugin), "CLAUDE_PLUGIN_ROOT": str(plugin), "BUSDRIVER_STATE_DIR": marker_state_dir}
+    env_extra = {"LITMUS_MODE": "pr", "BUSDRIVER_PLUGIN_ROOT": str(authenticated_plugin), "CLAUDE_PLUGIN_ROOT": str(authenticated_plugin), "BUSDRIVER_STATE_DIR": marker_state_dir}
     litmus_base_ref = requested_litmus_base_ref(args)
     if litmus_base_ref:
         env_extra["LITMUS_PR_BASE"] = litmus_base_ref
@@ -2447,6 +3292,12 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
         authority = mutating_authority(operation, False, reason)
         mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, None, None, {"requested_repo": str(requested_repo), "delivery_status_repo": str(repo)})
         return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+    expected_repository = getattr(args, "expected_repository", None)
+    if expected_repository and github_repo_slug(repo, "origin") != expected_repository:
+        reason = "expected_repository_mismatch"
+        authority = mutating_authority(operation, False, reason)
+        mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, None, None, {"expected_repository": expected_repository})
+        return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
     if operation == "commit" and not args.commit_message:
         reason = "commit_message_required"
         authority = mutating_authority(operation, False, reason)
@@ -2483,7 +3334,19 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
             mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"delivery_status_after_lock": delivery_status_effect_summary(delivery_status_after_lock, delivery_status_after_lock_rc, delivery_status_blocker)})
             return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
         delivery_status = delivery_status_after_lock
+        if expected_repository and github_repo_slug(repo, "origin") != expected_repository:
+            reason = "expected_repository_changed_after_lock"
+            authority = mutating_authority(operation, False, reason)
+            mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"expected_repository": expected_repository})
+            return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
         litmus_status = litmus_decision_status(delivery_status)
+        config_safe, config_safety_reason = git_mutation_config_safety(repo)
+        effects.append({"name": "git_local_config_mutation_safety", "ok": config_safe, "reason": config_safety_reason})
+        if not config_safe:
+            reason = config_safety_reason or "git_local_config_unsafe_for_mutation"
+            authority = mutating_authority(operation, False, reason)
+            mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
+            return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
         if operation == "pre-pr-review":
             blocking_entries = repo_blocking_dirty_entries(repo, busdriver_marker_state_dirs(args))
             if blocking_entries:
@@ -2534,20 +3397,57 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"litmus_decision_status": litmus_status})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            staged_hash_blocker = commit_litmus_staged_diff_blocker(delivery_status, repo)
+            reviewed_status_rc, reviewed_status, _reviewed_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
+            if reviewed_status_rc != 0:
+                reason = "commit_status_snapshot_failed"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            reviewed_untracked_snapshot = {
+                path: untracked_file_identity(repo, path)
+                for line in reviewed_status.splitlines()
+                if line.startswith("?? ")
+                for path in porcelain_entry_paths(line)
+            }
+            parent_rc, reviewed_parent_head, _parent_err = git_output(repo, "rev-parse", "HEAD")
+            tree_rc, reviewed_tree, _tree_err = git_output(repo, "write-tree")
+            if parent_rc != 0 or not reviewed_parent_head or tree_rc != 0 or not reviewed_tree:
+                reason = "commit_candidate_snapshot_failed"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            staged_hash_blocker = commit_litmus_staged_diff_blocker(
+                delivery_status,
+                repo,
+                expected_parent_head=reviewed_parent_head,
+                expected_tree=reviewed_tree,
+            )
             if staged_hash_blocker:
                 reason = staged_hash_blocker
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"litmus_decision_status": litmus_status})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            before = git_output(repo, "rev-parse", "HEAD")[1]
-            effect = commit_staged_index(repo, args.commit_message, {"BUSDRIVER_STATE_DIR": busdriver_marker_state_dir(args)})
+            before = reviewed_parent_head
+            effect = commit_staged_index(
+                repo,
+                args.commit_message,
+                {"BUSDRIVER_STATE_DIR": busdriver_marker_state_dir(args)},
+                expected_parent_head=reviewed_parent_head,
+                expected_tree=reviewed_tree,
+                reviewed_status=reviewed_status,
+                reviewed_untracked_snapshot=reviewed_untracked_snapshot,
+                disable_hooks=True,
+            )
             after = git_output(repo, "rev-parse", "HEAD")[1]
-            effect.update({"before_head": before, "after_head": after})
+            helper_after = effect.get("after_head")
+            effect.update({"before_head": before, "after_head": after, "verified_after_head": helper_after})
+            commit_completed = bool(effect.get("commit_verified") is True and isinstance(helper_after, str) and helper_after != before and after == helper_after)
+            post_commit_warning = effect.get("warning")
+            if commit_completed and post_commit_warning:
+                effect.update({"effect_completed": True, "reconciliation_required": True})
             effects.append({"name": "git_commit", **effect})
-            commit_completed = bool(after and after != before)
-            ok = bool(effect.get("ok") and commit_completed)
-            reason = str(effect.get("warning") or "committed") if ok else str(effect.get("error") or "git_commit_failed")
+            ok = bool(effect.get("ok") and commit_completed and not post_commit_warning)
+            reason = str(post_commit_warning or "committed") if effect.get("ok") and commit_completed else str(effect.get("error") or "git_commit_failed")
             commit_status = "committed" if commit_completed else "blocked"
             authority = mutating_authority(operation, ok, reason, authority_sources)
             mut_run = mutating_run_envelope(args, operation, commit_status, reason, repo, authority, effects, lock_payload, None)
@@ -2587,7 +3487,8 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
             remote_safe, remote_safety_reason = push_remote_safety(repo, args.push_remote)
-            if not remote_safe:
+            push_url = github_remote_url(repo, args.push_remote)
+            if not remote_safe or not push_url or (expected_repository and github_slug_from_remote_url(push_url) != expected_repository):
                 reason = remote_safety_reason or "push_remote_safety_required"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote})
@@ -2603,8 +3504,14 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"litmus_decision_status": litmus_status})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            push_head_rc, push_head, _push_head_err = git_output(repo, "rev-parse", "HEAD")
+            if push_head_rc != 0 or not push_head:
+                reason = "push_head_lookup_failed"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
             review_base = review_base_arg(args, delivery_status)
-            if not pr_review_base_matches(delivery_status, repo, review_base, busdriver_marker_state_dirs(args)):
+            if not pr_review_base_matches(delivery_status, repo, review_base, busdriver_marker_state_dirs(args), expected_head=push_head):
                 reason = "pr_review_base_mismatch"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"base": review_base, "branch": branch})
@@ -2615,19 +3522,31 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "remote_head_error": remote_head_error})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            remote_branch_was_missing = remote_head_error == "remote_branch_not_found"
+            if remote_head == push_head:
+                reason = "remote_branch_already_at_reviewed_head"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "already_up_to_date", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "remote_head": remote_head, "expected_remote_head": push_head})
+                return {"ok": True, "decision": legacy_decision_for_mutation("already_up_to_date", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0
+            reviewed_base_ref = pr_base_ref(repo, review_base)
+            reviewed_base_branch = remote_branch_name_from_ref(reviewed_base_ref)
+            reviewed_base_head = local_ref_head(repo, reviewed_base_ref) if reviewed_base_ref else None
+            if not reviewed_base_branch or not reviewed_base_head or not pr_review_base_matches(delivery_status, repo, review_base, busdriver_marker_state_dirs(args), expected_head=push_head, expected_base_head=reviewed_base_head):
+                reason = "pr_review_base_mismatch"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"base": review_base, "branch": branch})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
             remote_ancestor_ok, remote_ancestor_reason = remote_head_ancestor_status(repo, remote_head)
             if not remote_ancestor_ok:
                 reason = remote_ancestor_reason or "remote_head_ancestor_required_for_push"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "remote_head": remote_head})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            push_head_rc, push_head, _push_head_err = git_output(repo, "rev-parse", "HEAD")
-            if push_head_rc != 0 or not push_head:
-                reason = "push_head_lookup_failed"
+            live_head_rc, live_head, _live_head_err = git_output(repo, "rev-parse", "HEAD")
+            if live_head_rc != 0 or live_head != push_head:
+                reason = "local_head_changed_after_review"
                 authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "reviewed_head": push_head, "live_head": live_head})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 1
             pre_push_status_rc, pre_push_status, pre_push_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
             push_allowed_marker_paths = allowed_marker_paths(busdriver_marker_state_dirs(args))
             pre_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, pre_push_status, push_allowed_marker_paths) if pre_push_status_rc == 0 else {}
@@ -2649,11 +3568,24 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "blocking_dirty_entries": pre_push_dirty_entries})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            push_cmd = push_command(repo, args.push_remote, branch, remote_head, push_head)
-            effect = run_safe(push_cmd, repo, timeout=600, env=safe_git_mutation_env())
+            final_config_safe, final_config_reason = git_mutation_config_safety(repo)
+            final_remote_safe, final_remote_reason = push_remote_safety(repo, args.push_remote)
+            final_push_url = github_remote_url(repo, args.push_remote)
+            if not final_config_safe or not final_remote_safe or final_push_url != push_url or (expected_repository and github_slug_from_remote_url(str(final_push_url or "")) != expected_repository):
+                reason = final_config_reason or final_remote_reason or "push_destination_changed_before_side_effect"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "remote": args.push_remote})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            effect = run_isolated_push(repo, push_url, branch, remote_head, push_head, reviewed_base_branch, reviewed_base_head)
             effects.append({"name": "git_push", **effect, "expected_remote_head": push_head})
+            if effect.get("error") == "atomic_push_base_binding_unavailable":
+                reason = "atomic_push_base_binding_unavailable"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote, "branch": branch, "expected_remote_head": push_head, "expected_base_head": reviewed_base_head})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
             ok = bool(effect.get("ok"))
             push_completed = False
+            target_observed_unattributed = False
             reason = "pushed" if ok else "git_push_failed"
             recheck_head = None
             recheck_error = None
@@ -2693,96 +3625,30 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 local_post_failure_ok = post_push_head_rc == 0 and post_push_head == push_head and not post_push_dirty_entries and status_unchanged and marker_unchanged
                 effects.append({"name": "git_push_local_post_failure_verify", "ok": local_post_failure_ok, "local_head": post_push_head, "expected_local_head": push_head, "blocking_dirty_entries": post_push_dirty_entries, "status_unchanged": status_unchanged, "marker_unchanged": marker_unchanged, "status_returncode": post_push_status_rc, "status_stdout_tail": tail(post_push_status), "status_stderr_tail": tail(post_push_status_err)})
                 recheck_head, recheck_error = live_remote_branch_head(repo, branch, args.push_remote)
-                effects.append({"name": "git_push_remote_recheck", "ok": recheck_error is None and (recheck_head in {push_head, remote_head}), "remote_head": recheck_head, "expected_remote_head": push_head, "previous_remote_head": remote_head, "reason": recheck_error})
+                recheck_effect = {"name": "git_push_remote_recheck", "ok": recheck_error is None and (recheck_head in {push_head, remote_head}), "remote_head": recheck_head, "expected_remote_head": push_head, "previous_remote_head": remote_head, "reason": recheck_error}
+                effects.append(recheck_effect)
                 if recheck_error is None and recheck_head == push_head:
-                    push_completed = True
-                    reason = "pushed_after_failed_push_remote_verified" if local_post_failure_ok else "post_push_local_drift_after_failed_push"
+                    target_observed_unattributed = True
+                    recheck_effect.update({"attributed_to_current_push": False, "reconciliation_required": True})
+                    reason = "push_failed_target_observed_reconciliation_required"
                 elif recheck_head and recheck_head != remote_head and reason == "git_push_failed":
                     reason = "remote_branch_changed_before_push"
                 elif not local_post_failure_ok:
                     reason = "post_push_local_drift_after_failed_push_unverified"
-            push_status = "pushed" if push_completed else "blocked"
+            push_status = "pushed" if push_completed else ("observed_target_unattributed" if target_observed_unattributed else "blocked")
             authority = mutating_authority(operation, ok, reason, authority_sources)
             mut_run = mutating_run_envelope(args, operation, push_status, reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote, "branch": branch, "expected_remote_head": push_head, "observed_remote_head": recheck_head})
             return {"ok": ok, "decision": legacy_decision_for_mutation(push_status, reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0 if ok else int(effect.get("returncode") or 1)
         if operation == "pr-create":
-            blocking_entries = repo_blocking_dirty_entries(repo, busdriver_marker_state_dirs(args))
-            if blocking_entries:
-                reason = "clean_worktree_required_for_pr_create"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"blocking_dirty_entries": blocking_entries})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            litmus_status, litmus_blocker = require_litmus_status(delivery_status, {"pr_review_fresh"})
-            if litmus_blocker:
-                reason = "fresh_pre_pr_dual_review_required" if litmus_blocker == "fresh_litmus_required" else litmus_blocker
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"litmus_decision_status": litmus_status})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            title = args.pr_title or args.commit_message
-            if not title:
-                reason = "pr_title_required"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            branch = current_branch(repo)
-            if args.push_remote != "origin":
-                reason = "pr_create_requires_origin_push_remote"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"push_remote": args.push_remote})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            head, head_reason = normalized_pr_head_arg(repo, args.head, branch, args.push_remote)
-            if head_reason:
-                reason = head_reason
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"head": args.head, "branch": branch})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            safety_ok, safety_reason = push_remote_safety(repo, args.push_remote)
-            if not safety_ok:
-                reason = safety_reason
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            head_rc, local_head, _head_err = git_output(repo, "rev-parse", "HEAD")
-            remote_head, remote_head_error = live_remote_branch_head(repo, branch, args.push_remote)
-            if head_rc != 0 or not local_head or not remote_head:
-                reason = "remote_head_verification_required_for_pr_create"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "remote_head_error": remote_head_error})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            if local_head != remote_head:
-                reason = "remote_head_mismatch_for_pr_create"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "local_head": local_head, "remote_head": remote_head})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            review_base = review_base_arg(args, delivery_status)
-            if not pr_review_base_matches(delivery_status, repo, review_base, busdriver_marker_state_dirs(args)):
-                reason = "pr_review_base_mismatch"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"base": review_base})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            pr_base_branch = remote_branch_name_from_ref(pr_base_ref(repo, review_base))
-            if not pr_base_branch:
-                reason = "pr_base_ref_required_for_pr_create"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"base": review_base})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            slug = github_repo_slug(repo, args.push_remote)
-            if not slug:
-                reason = "github_origin_remote_required_for_pr_create"
-                authority = mutating_authority(operation, False, reason)
-                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": args.push_remote})
-                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            cmd = ["gh", "pr", "create", "--base", pr_base_branch, "--title", title, "--body", args.pr_body]
-            if head:
-                cmd += ["--head", head]
-            gh_env = {"GH_REPO": slug}
-            effect = run_safe(cmd, repo, timeout=300, env=gh_env, allow_gh_repo=True)
-            effects.append({"name": "gh_pr_create", **effect})
-            ok = bool(effect.get("ok"))
-            reason = "pr_created" if ok else "gh_pr_create_failed"
-            authority = mutating_authority(operation, ok, reason, authority_sources)
-            mut_run = mutating_run_envelope(args, operation, "pr_created" if ok else "blocked", reason, repo, authority, effects, lock_payload, None)
-            return {"ok": ok, "decision": legacy_decision_for_mutation("pr_created" if ok else "blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0 if ok else int(effect.get("returncode") or 1)
+            # GitHub's PR-create APIs bind mutable branch names and expose no
+            # atomic reviewed head+base SHA precondition. A postcondition can
+            # attribute an already-created effect, but cannot make the mutation
+            # fail closed. Keep the operation present but non-dispatchable until
+            # such a server-side capability exists.
+            reason = "atomic_pr_create_binding_unavailable"
+            authority = mutating_authority(operation, False, reason)
+            mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
+            return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
         if operation == "merge":
             if not args.pr:
                 reason = "pr_required"
@@ -2802,23 +3668,51 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            slug = github_repo_slug(repo, "origin")
+            slug = expected_repository or github_repo_slug(repo, "origin")
             if not slug:
                 reason = "github_origin_remote_required_for_merge"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"remote": "origin"})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            cmd = ["gh", "pr", "merge", str(args.pr), f"--{args.merge_method}", "--match-head-commit", latest_head]
-            if args.delete_branch:
-                cmd.append("--delete-branch")
-            gh_env = {"GH_REPO": slug}
-            effect = run_safe(cmd, repo, timeout=300, env=gh_env, allow_gh_repo=True)
-            effects.append({"name": "gh_pr_merge", **effect})
-            ok = bool(effect.get("ok"))
-            reason = "merged" if ok else "gh_pr_merge_failed"
-            authority = mutating_authority(operation, ok, reason, authority_sources + ["latest_pr_grind_clean"])
-            mut_run = mutating_run_envelope(args, operation, "merged" if ok else "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop})
-            return {"ok": ok, "decision": legacy_decision_for_mutation("merged" if ok else "blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0 if ok else int(effect.get("returncode") or 1)
+            loop_repo = loop.get("repo")
+            try:
+                loop_repo_matches = isinstance(loop_repo, str) and Path(loop_repo).expanduser().resolve() == repo
+            except OSError:
+                loop_repo_matches = False
+            if loop.get("repository") != slug or not loop_repo_matches:
+                reason = "pr_grind_repository_binding_mismatch"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop, "repo_slug": slug})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            pre_merge_snapshot, pre_merge_effect, pre_merge_error = github_pr_snapshot(repo, slug, int(args.pr))
+            effects.append({"name": "gh_pr_merge_precondition_query", **pre_merge_effect, "reason": pre_merge_error})
+            if pre_merge_snapshot is None:
+                reason = "merge_precondition_query_required"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop, "repo_slug": slug})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            base_data = pre_merge_snapshot.get("base") if isinstance(pre_merge_snapshot.get("base"), dict) else {}
+            snapshot_base = base_data.get("ref")
+            snapshot_base_sha = base_data.get("sha")
+            requested_base = remote_branch_name_from_ref(normalize_pr_base_arg(args.base)) if args.base else snapshot_base
+            if (
+                not isinstance(snapshot_base, str)
+                or not snapshot_base
+                or not isinstance(snapshot_base_sha, str)
+                or not snapshot_base_sha
+                or requested_base != snapshot_base
+                or not exact_pull_request_matches(pre_merge_snapshot, slug, latest_head, snapshot_base)
+                or pre_merge_snapshot.get("state") != "open"
+                or pre_merge_snapshot.get("merged_at") is not None
+            ):
+                reason = "merge_pr_identity_or_state_mismatch"
+                authority = mutating_authority(operation, False, reason)
+                mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop, "repo_slug": slug, "pr_number": args.pr})
+                return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            reason = "atomic_merge_base_binding_unavailable"
+            authority = mutating_authority(operation, False, reason)
+            mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"pr_grind_loop": loop, "repo_slug": slug, "pr_number": args.pr, "expected_head": latest_head, "expected_base": snapshot_base, "expected_base_sha": snapshot_base_sha})
+            return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
 
         reason = "unsupported_operation"
         authority = mutating_authority(operation, False, reason)
@@ -2826,7 +3720,16 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
         return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
     finally:
         if token and lock_state_dir_initialized:
-            release_payload = release_finalization_lock(repo, token, lock_state_dir)
+            if getattr(release_finalization_lock, "supports_lock_identity", False):
+                release_payload = release_finalization_lock(
+                    repo,
+                    token,
+                    lock_state_dir,
+                    str((lock_payload or {}).get("path") or ""),
+                    str((lock_payload or {}).get("trusted_helper_path") or ""),
+                )
+            else:
+                release_payload = release_finalization_lock(repo, token, lock_state_dir)
             redacted_release = redact_value(release_payload)
             release_placeholder.clear()
             if isinstance(redacted_release, dict):
@@ -2835,10 +3738,28 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 release_placeholder.update({"released": False, "reason": "release_payload_invalid"})
             execute_mutating_operation.last_release = release_placeholder  # type: ignore[attr-defined]
 
+def early_policy_steps(reason: str, operation: str) -> list[dict[str, str]]:
+    return [
+        {
+            "name": "finalization_lock",
+            "status": "skipped",
+            "reason": "early_policy_blocker_before_lock",
+        },
+        {"name": operation, "status": "blocked", "reason": reason},
+        {"name": "postflight_reconciliation", "status": "skipped", "reason": reason},
+    ]
+
+
 def steps_for(reason: str | None, operation: str | None = None) -> list[dict[str, str]]:
     if operation in {"pre-pr-review", "commit", "push", "pr-create", "merge"}:
-        success_reasons = {"busdriver_pre_pr_review_marker_written", "committed", "pushed", "pr_created", "merged"}
-        completed_warning_reasons = {"post_commit_external_dirty_drift", "post_commit_untracked_dirty", "post_commit_non_marker_dirty_remaining", "post_commit_status_failed", "post_commit_dirty_check_failed", "post_commit_dirty_restore_failed", "post_commit_reviewed_untracked_clean_failed", "pushed_with_post_push_dirty_worktree", "post_push_status_failed", "local_head_post_push_mismatch", "post_push_local_drift_after_failed_push", "pushed_after_failed_push_remote_verified"}
+        if reason == "push_failed_target_observed_reconciliation_required":
+            return [
+                {"name": "finalization_lock", "status": "passed", "reason": "single_flight_finalization"},
+                {"name": operation, "status": "failed", "reason": reason},
+                {"name": "postflight_reconciliation", "status": "failed", "reason": reason},
+            ]
+        success_reasons = {"busdriver_pre_pr_review_marker_written", "committed", "pushed", "remote_branch_already_at_reviewed_head", "pr_created"}
+        completed_warning_reasons = {"post_commit_concurrent_work_preserved", "post_commit_external_dirty_drift", "post_commit_untracked_dirty", "post_commit_non_marker_dirty_remaining", "post_commit_status_failed", "post_commit_dirty_check_failed", "post_commit_dirty_restore_failed", "post_commit_reviewed_untracked_clean_failed", "pushed_with_post_push_dirty_worktree", "post_push_status_failed", "local_head_post_push_mismatch", "post_push_local_drift_after_failed_push", "pushed_after_failed_push_remote_verified", "pr_created_after_failed_command_reconciled", "pr_created_non_open_postcondition"}
         operation_passed = reason in success_reasons or reason in completed_warning_reasons
         return [
             {"name": "finalization_lock", "status": "passed" if operation_passed else "checked", "reason": "single_flight_finalization"},
@@ -2866,6 +3787,15 @@ def steps_for(reason: str | None, operation: str | None = None) -> list[dict[str
     if reason == "run_not_found":
         return [
             {"name": "status_lookup", "status": "blocked", "reason": "run_not_found"},
+            {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "merge", "status": "skipped", "reason": "finalization_disabled"},
+            {"name": "deploy", "status": "skipped", "reason": "finalization_disabled"},
+        ]
+    if reason == "verifier_containment_unavailable":
+        return [
+            {"name": "verify", "status": "blocked", "reason": "verifier_containment_unavailable"},
             {"name": "commit", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "push", "status": "skipped", "reason": "finalization_disabled"},
             {"name": "pr", "status": "skipped", "reason": "finalization_disabled"},
@@ -2969,8 +3899,72 @@ def decision(status: str, reason: str) -> dict[str, Any]:
     return {"status": status, "reason": reason, **BLOCKED_FLAGS}
 
 
+def early_policy_result(args: argparse.Namespace, blocker: str) -> dict[str, Any]:
+    blocked_decision = decision("blocked", blocker)
+    empty_status: dict[str, Any] = {}
+    return {
+        "schema": SCHEMA,
+        "version": 1,
+        "ok": False,
+        "mode": args.mode,
+        "operation": args.operation,
+        "repo": None,
+        "pr": pr_summary(args.pr, empty_status),
+        "delivery_status": None,
+        "pr_grind_loop": None,
+        "mutating_run": None,
+        "verifiers": [],
+        "steps": early_policy_steps(blocker, args.operation),
+        "decision": blocked_decision,
+        "run": delivery_run(args, empty_status, blocked_decision, blocker, create_identity=False),
+        "run_artifact_path": None,
+    }
+
+
 def main() -> int:
     args = parse_args()
+    if args.mode == "execute" and args.operation == "plan":
+        result = early_policy_result(args, "unsupported_operation")
+        print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
+        return 2
+    if args.mode == "execute" and args.operation == "pre-pr-review":
+        result = early_policy_result(args, "isolated_review_runtime_unavailable")
+        print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
+        return 2
+    if args.mode == "execute" and args.operation in {"push", "pr-create", "merge"}:
+        blocker = {
+            "push": "atomic_push_base_binding_unavailable",
+            "pr-create": "atomic_pr_create_binding_unavailable",
+            "merge": "atomic_merge_base_binding_unavailable",
+        }[args.operation]
+        result = early_policy_result(args, blocker)
+        print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
+        return 2
+    if args.mode == "execute" and args.operation == "verify":
+        verifier_blocker = verifier_dispatch_blocker()
+        if verifier_blocker:
+            blocked_decision = decision("blocked", verifier_blocker)
+            empty_status: dict[str, Any] = {}
+            result = {
+                "schema": SCHEMA,
+                "version": 1,
+                "ok": False,
+                "mode": args.mode,
+                "operation": effective_operation(args),
+                "repo": None,
+                "pr": pr_summary(args.pr, empty_status),
+                "delivery_status": None,
+                "pr_grind_loop": None,
+                "mutating_run": None,
+                "verifiers": [],
+                "steps": steps_for(verifier_blocker, args.operation),
+                "decision": blocked_decision,
+                "run": delivery_run(args, empty_status, blocked_decision, verifier_blocker, create_identity=False),
+                "run_artifact_path": None,
+            }
+            print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
+            return 2
+
     if args.mode != "status" and not args.run_id:
         args.run_id = new_run_id()
     if args.mode == "status":
@@ -3025,12 +4019,19 @@ def main() -> int:
                 returncode = 2
                 write_run_artifact = True
             else:
-                repo = Path(args.repo or ".").expanduser().resolve()
-                verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
-                result_ok = all(v["ok"] for v in verifiers)
-                reason = "verified" if result_ok else "verifier_failed"
-                result_decision = decision("verified" if result_ok else "blocked", reason)
-                returncode = 0 if result_ok else 1
+                verifier_blocker = verifier_dispatch_blocker()
+                if verifier_blocker:
+                    reason = verifier_blocker
+                    result_ok = False
+                    result_decision = decision("blocked", reason)
+                    returncode = 2
+                else:
+                    repo = Path(args.repo or ".").expanduser().resolve()
+                    verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
+                    result_ok = all(v["ok"] for v in verifiers)
+                    reason = "verified" if result_ok else "verifier_failed"
+                    result_decision = decision("verified" if result_ok else "blocked", reason)
+                    returncode = 0 if result_ok else 1
                 write_run_artifact = True
         elif args.operation == "pr-grind":
             if not args.pr:
@@ -3124,6 +4125,7 @@ def main() -> int:
                 if isinstance(result.get("mutating_run"), dict):
                     result["mutating_run"]["artifact_write_error"] = artifact_error
                 if isinstance(result.get("run"), dict):
+                    result["run"]["reason"] = "artifact_write_failed_after_side_effect"
                     result["run"]["artifact_write_error"] = artifact_error
                     result["run"]["artifacts"] = []
                 result["steps"] = [{"name": "write_artifact", "status": "blocked", "reason": "artifact_write_failed_after_side_effect"}]
