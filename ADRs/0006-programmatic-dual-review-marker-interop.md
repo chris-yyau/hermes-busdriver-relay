@@ -4,7 +4,7 @@
 
 Accepted non-mutating design/spike contract. This ADR does not grant finalization authority and adds no executor, dispatcher, marker writer, commit, push, PR, merge, deploy, release, or publish path.
 
-Current status has no finalization, dispatch, marker-write, commit, push, PR, merge, deploy, release, or publish authority. All authority false until a later Busdriver-approved implementation is separately contracted and tested.
+This dual-review/marker-interop surface has no programmatic execution, finalization, marker-write, commit, push, PR, merge, deploy, release, or publish authority. Draft dispatch through the separately contracted Pi/OpenCode adapters and operator-explicit Delivery Mode are governed by ADR 0008; neither grants this ADR's future dual-review seam reusable authority.
 
 ## Context
 
@@ -44,7 +44,7 @@ Hermes must not write `pr-review-passed.local` or any Busdriver marker. Marker i
 - freshness windows;
 - trust semantics for which gates may consume the marker.
 
-Until Busdriver defines that surface, Hermes may only report normalized marker status. It must not create, update, delete, consume-as-authority, or forge marker files.
+ADR 0008 exposes an operator-explicit `pre-pr-review` parser/result-envelope surface, but production execution is `policy_blocked` by `isolated_review_runtime_unavailable` before delivery-status or trusted-writer handling. It does not make Hermes a marker writer and does not implement generic marker interop. Hermes may only report normalized marker status and must not create, update, delete, consume-as-authority, or forge marker files.
 
 ## Non-Goals
 
@@ -53,7 +53,7 @@ Until Busdriver defines that surface, Hermes may only report normalized marker s
 - no marker forging;
 - no MCP/plugin graph replication;
 - no deploy/release/publish automation;
-- no non-Codex mutating adapter enablement.
+- no draft-adapter authority expansion; Pi/OpenCode draft lanes are governed separately by ADR 0008 and remain non-finalizing.
 
 ## Staged Unlock Plan
 

@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only finalization readiness and Busdriver handoff envelope.
 
-This helper deliberately stops before commit/push/PR/merge/deploy authority. It
+This helper deliberately stops before pre-PR-review/commit/push/PR/merge/deploy authority. It
 combines the existing read-only Delivery Mode status probe with the Phase-0
 Busdriver status probe, then emits a deterministic handoff envelope an operator
 or Busdriver/Claude session can review. It never writes Busdriver markers and has
@@ -10,11 +10,430 @@ no execute mode.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
+import hashlib
 import json
+import os
+import re
+import select
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# The most this process will hold of a pinned helper candidate, enforced BEFORE the memory is spent.
+# The digest below is the only thing that authenticates these bytes, and it necessarily runs last —
+# so a reader that loops to EOF has already paid whatever the file asked for by the time it learns
+# the file was never trusted. The largest helper this repo ships is a few hundred KB; the number is
+# ours because the file's is not. Restated across every copy of the reader, so a contract test is
+# what keeps them equal.
+MAX_AUTHENTICATED_HELPER_BYTES = 1024 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
+SF_RESTRICTED = 0x00080000
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> SystemExit:
+    payload = {"ok": False, "error": f"trusted_root_owned_source_{reason}", "executable": name}
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+def _trusted_identity(st: os.stat_result) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    try:
+        parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        root_st = os.fstat(parent_fd)
+        if not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != 0 or root_st.st_mode & _NON_OWNER_WRITABLE:
+            raise _trusted_source_refusal(name, "ancestry_untrusted", "/")
+        for component in path.parts[1:-1]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                  dir_fd=parent_fd)
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+            directory_st = os.fstat(parent_fd)
+            if (not stat.S_ISDIR(directory_st.st_mode) or directory_st.st_uid != 0
+                    or directory_st.st_mode & _NON_OWNER_WRITABLE):
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            reason = "metadata_invalid" if exc.errno == errno.ELOOP else "unavailable"
+            raise _trusted_source_refusal(name, reason, type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                    or opened.st_mode & _NON_OWNER_WRITABLE
+                    or not opened.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+                raise _trusted_source_refusal(name, "metadata_invalid")
+            if name in SHIM_BACKED_SOURCES:
+                if not getattr(opened, "st_flags", 0) & SF_RESTRICTED:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+            elif opened.st_nlink != 1:
+                raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+            chunks, total = [], 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _trusted_identity(os.fstat(fd)) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if _trusted_identity(final) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DELIVERY_STATUS = ROOT / "scripts" / "hermes-busdriver-delivery-status"
@@ -26,6 +445,10 @@ SCHEMA = "hermes-busdriver-finalization-readiness/v0"
 # The sibling is an executable helper, so validate by contract literal here rather than importing it.
 DELIVERY_STATUS_SCHEMA = "hermes-busdriver-delivery-status/v0"
 HANDOFF_SCHEMA = "hermes-busdriver-handoff/v0"
+# Mirrors hermes-busdriver-delivery-status. A result read from a caller-named --*-result-file is
+# a test diagnostic, so it can never reach ready_for_merge_handoff no matter how well it
+# validates; this helper re-derives the consequence rather than trusting the child's status.
+FIXTURE_EVIDENCE_BLOCKER = "fixture_evidence_not_authoritative"
 FINALIZATION_GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 FINALIZATION_GUARDRAILS_VERSION = 0
 FINALIZATION_CONTRACT_STATUS_SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
@@ -40,9 +463,9 @@ DEFAULT_CONTRACT_STATUS_TIMEOUT = 30
 DEFAULT_AGENT_BALANCE_PLAN_TIMEOUT = 30
 DELIVERY_STATUS_TIMEOUT_MARGIN = 30
 POLICY = (
-    "Read-only finalization readiness only prepares a handoff envelope. It does "
-    "not authorize or perform commit, push, PR creation, merge, deploy, release, "
-    "publish, Busdriver marker writes, or gate bypass."
+    "Finalization readiness remains a read-only handoff helper. It does not itself perform pre-PR review, "
+    "commit, push, PR creation, merge, deploy, release, publish, Busdriver marker writes, or gate bypass. Explicit "
+    "Delivery Mode mutations must use the separate gated executor with fresh runtime evidence."
 )
 BLOCKED_FLAGS = {
     "finalization_allowed": False,
@@ -72,8 +495,6 @@ CONTRACT_STATUS_UNSAFE_BOOLEAN_KEYS = {
     "marker_writes_performed",
     "repo_mutations_performed",
     "safe_to_execute_by_this_helper",
-    "implemented",
-    "retired",
 }
 DUAL_REVIEW_REQUIRED_ROLE_SPECS = [
     {
@@ -99,6 +520,7 @@ DUAL_REVIEW_REQUIRED_ROLE_SPECS = [
     },
 ]
 UNSUPPORTED_FINALIZATION_OPERATIONS = [
+    "pre_pr_review",
     "commit",
     "push",
     "pr_create",
@@ -116,20 +538,22 @@ FINALIZATION_GUARDRAILS = {
     "schema": FINALIZATION_GUARDRAILS_SCHEMA,
     "version": FINALIZATION_GUARDRAILS_VERSION,
     "read_only": True,
-    "status": "non_mutating_relay_only",
+    "status": "gated_delivery_mode_executor",
     "unsupported_mutating_operations": UNSUPPORTED_FINALIZATION_OPERATIONS,
     "remaining_work": [
         {
             "id": "deliver-mutating-executor",
-            "status": "policy_blocked",
+            "status": "implemented_gated",
+            "implemented": True,
             "safe_to_execute_by_this_helper": False,
-            "description": "hermes-busdriver-deliver commit/push/PR/merge executor mode, if ever approved",
+            "description": "hermes-busdriver-deliver aggregate executor envelope; pre-PR review/push/PR-create/merge remain policy-blocked and only commit may reach gated mutation checks",
         },
         {
             "id": "mutating-final-result-envelope",
-            "status": "policy_blocked",
+            "status": "implemented_gated",
+            "implemented": True,
             "safe_to_execute_by_this_helper": False,
-            "description": "mutating final delivery result envelope",
+            "description": "gated mutating delivery result envelope",
         },
         {
             "id": "programmatic-litmus-pre-pr-dual-review",
@@ -153,6 +577,263 @@ FINALIZATION_GUARDRAILS = {
 }
 
 
+REDACTION = "[REDACTED]"
+# Kept byte-identical to the sibling relays (deliver, delivery-status, pr-grind-check,
+# pr-grind-loop, litmus-status, finalization-readiness). These are standalone executables with no
+# shared import path, so the block is restated rather than shared; a contract test asserts they
+# agree, which is what keeps one copy from drifting into a leak.
+SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
+def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_value(value: Any, known: tuple[str, ...] = (), _depth: int = 0) -> Any:
+    """`known` is the capability values this payload's own keys named — see capability_scalars().
+
+    Replaced before the shape patterns run, and for the same reason credential_env_values() is: an
+    opaque credential matches no shape, so its literal value is the only thing that can find it
+    again where no key names it. redact_text() keeps its single-argument signature — the parity
+    suite monkeypatches it as a one-arg function — so the learned values are applied here.
+
+    Kept byte-compatible with delivery-status.redact_value, plus a depth/size bound because the
+    input here can be a hostile JSON document rather than our own envelope.
+    """
+    if _depth > 100:
+        return REDACTION
+    if isinstance(value, str):
+        for secret in known:
+            value = value.replace(secret, REDACTION)
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_value(item, known, _depth + 1) for item in value[:10000]]
+    if isinstance(value, dict):
+        # The key is untrusted text too, and here emphatically so: this input is a hostile JSON
+        # document, not our own envelope, so `{"<token>": "seen"}` is simply one of the shapes it
+        # can be. `known` and the shape patterns find a credential in a VALUE; neither reaches a key
+        # that IS one. Routing the key through the str branch applies both halves to it.
+        return {
+            redact_value(str(key), known, _depth + 1): redact_value(item, known, _depth + 1)
+            for key, item in value.items()
+        }
+    return value
+
+
+# Restated from hermes-busdriver-delivery-status, which restates it from agent-draft, whose leaked
+# lock token established the rule: a KEY names a capability, and no value pattern can see one.
+# redact_text() matches SHAPES — `ghp_…`, `token: <value>`, a URL userinfo — so an opaque enterprise
+# credential under an opaque key has nothing to match on and is emitted verbatim. That is r32 High 1
+# precisely: every validator here binds the fields it REQUIRES and says nothing about the ones it
+# does not, so a fully-bound child payload carrying one extra nested `token` was accepted, retained
+# under `delivery_status`/`agent_balance_plan`, and printed. The key is the only thing that names
+# it, so the key is what gets read.
+#
+# `capability` stays SINGULAR deliberately: `relay_capabilities` is delivery-status's own map of
+# relay script paths, which this probe re-emits wholesale, and redacting it would destroy the field
+# rather than protect anything in it.
+CAPABILITY_KEYS = re.compile(
+    r"(?i)(^|_)(tokens?|secrets?|credentials?|capability|password|passwd|passphrase"
+    r"|authorization|bearer|api[_-]?key|access[_-]?key|private[_-]?key)($|_)"
+)
+
+
+def capability_value(key: str, value: Any) -> Any:
+    """What a capability-shaped key is still allowed to say.
+
+    A bool or null under `token_redacted` / `has_secret` is a fact ABOUT a capability, not one: no
+    credential survives in one bit. hermes-busdriver-lock publishes exactly that — `token_redacted:
+    true` — as its proof that it stripped the release token, so blanket-redacting every key that
+    merely says "token" would replace the proof with a string and cost the reader the only signal
+    that says the strip happened. Everything that can carry bytes — a string, a number, or a
+    container nesting either — is redacted, because only those can be a credential.
+
+    The `_count` carve-out is this relay's alone, and it is why the signature takes the key that
+    delivery-status's copy has no need of: readiness ingests finalization-contract-status, whose
+    `summary.capability_allowed_count: 0` is capability-shaped by key and numeric by value. A count
+    of capabilities is a fact ABOUT them in exactly the sense a bool is, and it is the
+    authority-negative signal this envelope exists to publish — so redacting it would destroy the
+    field rather than protect anything in it, which is the same reason `capability` stays singular.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int) and key.endswith("_count"):
+        return value
+    return REDACTION
+
+
+def strip_capabilities(value: Any, _depth: int = 0) -> Any:
+    """Recursively drop capability-bearing keys from anything bound for the envelope.
+
+    Recursive because the capability is not always at the top, and keyed on shape rather than on an
+    allowlist because the leak was always a field nobody enumerated: `unknown_extra_field` nesting
+    a `token` is exactly the payload a strict-but-partial validator waves through.
+    """
+    if _depth > 100:
+        return REDACTION
+    if isinstance(value, dict):
+        return {
+            key: capability_value(str(key), item)
+            if CAPABILITY_KEYS.search(str(key))
+            else strip_capabilities(item, _depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [strip_capabilities(item, _depth + 1) for item in value[:10000]]
+    return value
+
+
+def capability_scalars(value: Any) -> tuple[str, ...]:
+    """Collect bounded opaque values named by capability-shaped keys.
+
+    Shape redaction cannot recognize a random enterprise token. A sensitive key is the
+    provenance that identifies it; collect that value before stripping the key so copies nested
+    elsewhere in the same child payload are redacted too.
+    """
+    found: set[str] = set()
+    stack: list[tuple[Any, bool, int]] = [(value, False, 0)]
+    visited = 0
+    while stack and visited < 10_000 and len(found) < 256:
+        item, sensitive, depth = stack.pop()
+        visited += 1
+        if depth > 64:
+            continue
+        if isinstance(item, dict):
+            for key, child in item.items():
+                child_sensitive = sensitive or bool(CAPABILITY_KEYS.search(str(key)))
+                stack.append((child, child_sensitive, depth + 1))
+        elif isinstance(item, list):
+            stack.extend((child, sensitive, depth + 1) for child in item)
+        elif sensitive and isinstance(item, bytes):
+            text = item[:4097].decode(errors="replace")
+            if 8 <= len(text) <= 4096:
+                found.add(text)
+        elif sensitive and isinstance(item, str) and 8 <= len(item) <= 4096:
+            found.add(item)
+    return tuple(sorted(found, key=len, reverse=True))
+
+
+# What one child named, every later pass redacts — for the life of the process.
+#
+# sanitized_payload() STRIPS the key that names a value, so by the time the final envelope crosses
+# the funnel there is nothing left to learn from. A copy of those same opaque bytes sitting under an
+# ordinary key in a DIFFERENT child would then have nothing to match on: delivery-status embeds its
+# own phase-0 view while this probe runs phase-0 again itself, so the same value genuinely does
+# arrive twice, named once. Learning is therefore cumulative rather than per-payload, which is the
+# only ordering in which "collect before stripping" survives a second pass over already-stripped
+# output. Bounded like capability_scalars()'s own collect, since a hostile child chooses how much
+# it names.
+LEARNED_CAPABILITY_VALUES: set[str] = set()
+MAX_LEARNED_CAPABILITY_VALUES = 256
+
+
+def sanitized_payload(value: Any) -> Any:
+    """The one funnel every untrusted child object crosses on its way into this envelope.
+
+    Both transforms, always, in one place: capability-shaped keys stripped, then every remaining
+    string redacted by shape. Two call sites that each remembered to do this would be two call
+    sites that can forget, and r32 is the list of the ones that did.
+    """
+    if len(LEARNED_CAPABILITY_VALUES) < MAX_LEARNED_CAPABILITY_VALUES:
+        LEARNED_CAPABILITY_VALUES.update(capability_scalars(value))
+    known = tuple(sorted(LEARNED_CAPABILITY_VALUES, key=len, reverse=True))
+    return redact_value(strip_capabilities(value), known)
+
+
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input — including a URL-userinfo class with no length bound — so
+# a hostile subprocess returning 500MB of stderr, or a remote URL of the same size, costs that much
+# CPU and memory inside a helper whose entire job is to emit a few KB. Bounding after redaction, as
+# r25 did, means the bound never applies to the expensive step it exists to protect.
+#
+# 8192, not a tight bound: every shape pattern above matches far less than this, so the span exists
+# to keep a long-but-real match (a `token: <value>` with a verbose value, a long URL) whole inside
+# the budget. It costs 8KB of regex work and buys the guarantee below.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED — not sliced to its last `budget` bytes, which is what r26 did and
+# what leaked. The value classes for `token:`, `--token`, `"token":` and `Bearer` are unbounded, so
+# a long enough value has the very prefix that IDENTIFIES it as a secret cut away by that slice;
+# the remainder matches no shape pattern and the tail is emitted raw. No window size fixes it —
+# the prefix sits arbitrarily far from the tail. An unmatched fragment of a secret is still a
+# secret, and no diagnostic from an attacker-controlled 12KB+ of output is worth emitting one.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value or ""
+    if limit <= 0:
+        return ""
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
+def tail(value: str | bytes | None, limit: int = 4000) -> str:
+    """Redact, then bound — over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(value, limit)
+
+
+# Every flag that lets the caller name a program this probe runs or forwards for execution.
+CUSTOM_HELPER_FLAGS = ("pr_grind_check_script", "litmus_status_script", "agent_balance_plan_script")
+# Production authors none of its own evidence, so this is False here and stays False. Only
+# tests/fixtures/finalization-readiness-test-harness flips it, and production never loads it.
+FIXTURE_MODE = False
+
+
+def custom_helper_refusal(custom: "list[str]") -> "dict[str, Any] | None":
+    """Refuse every caller-named helper executable, before anything spawns.
+
+    The same refusal delivery-status makes, made here too rather than only relied on downstream:
+    --agent-balance-plan-script never reaches delivery-status, so a child-only gate would leave
+    this probe spawning the caller's program itself. See delivery-status.custom_helper_refusal()
+    for why r28's --fixture-mode was not a boundary — the caller that names the program is the
+    caller that passes the flag, so it only labelled the output of code that had already run.
+    """
+    if custom:
+        return {"ok": False, "error": "custom_helper_execution_not_permitted", "flags": custom}
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only finalization readiness / Busdriver handoff envelope")
     parser.add_argument("--repo", default=".", help="Target git repo/worktree to inspect read-only")
@@ -166,10 +847,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr", help="Pull request number for post-PR readiness")
     parser.add_argument("--target", default="auto", choices=["auto", "commit", "pr", "merge", "delivery"], help="Finalization handoff target to evaluate")
     parser.add_argument("--pr-grind-check-script", help="Path to hermes-busdriver-pr-grind-check for delivery-status")
-    parser.add_argument("--pr-grind-result-file", help="Fixture/result JSON from hermes-busdriver-pr-grind-check")
     parser.add_argument("--pr-grind-timeout", type=int, default=180)
     parser.add_argument("--litmus-status-script", help="Path to hermes-busdriver-litmus-status for delivery-status")
-    parser.add_argument("--litmus-status-result-file", help="Fixture/result JSON from hermes-busdriver-litmus-status")
     parser.add_argument("--litmus-status-timeout", type=int, default=60)
     parser.add_argument("--agent-balance-plan-script", help="Path hermes-busdriver-agent-balance-plan helper")
     parser.add_argument("--agent-balance-plan-timeout", type=int, default=DEFAULT_AGENT_BALANCE_PLAN_TIMEOUT)
@@ -182,25 +861,326 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--phase0-status-timeout", type=int, default=60)
     parser.add_argument("--pretty", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    custom = sorted(flag for flag in CUSTOM_HELPER_FLAGS if getattr(args, flag, None))
+    refusal = custom_helper_refusal(custom)
+    if refusal is not None:
+        # Refusal is a normal fail-closed envelope, so it ships on stdout with the blocked exit
+        # code every other envelope here uses — stderr would make the only machine-readable
+        # signal a caller gets for this path the one place they do not parse.
+        print(json.dumps(refusal, sort_keys=True))
+        raise SystemExit(2)
+    return args
 
 
-def run_json(cmd: list[str], timeout: int) -> tuple[dict[str, Any], int]:
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# The readiness probe's trusted children are relay scripts that re-derive their own trusted runtime
+# from their frozen root-owned tables, so they need no ambient help to find git/gh/jq.
+# HERMES_BUSDRIVER_PRIVATE_RUNTIME is gone with the directory of private copies it used to select.
+FORWARDED_CHILD_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+CREDENTIAL_CHILD_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+# Every helper this probe executes by default, plus the helpers delivery-status can execute,
+# pinned to the bytes that were reviewed.
+# Kept in sync with config/trusted-runtime-manifest.json by test_trusted_runtime_manifest.
+# This is intentionally narrower than delivery_status_runtime, which also contains metadata-only
+# public entrypoints. Including metadata-only smoke here creates a smoke<->readiness hash cycle.
+TRUSTED_READINESS_HELPER_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '5d10873d3606b96e27ef5a33cb0c9f130f9e96f08e5dd71b753a3fd1fa64c719',
+                                    'scripts/hermes-busdriver-delivery-status': '1d3ce65f0fe13b095bd296e6f1d92b639e2753ba84a3d36cdf3acd7d840a3811',
+                                    'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
+                                    'scripts/hermes-busdriver-litmus-status': 'ba95be8b96e7fc215e5fa96288b093a90e0265f1fe6dd428715b8c462034c561',
+                                    'scripts/hermes-busdriver-lock': '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52',
+                                    'scripts/hermes-busdriver-pr-grind-check': '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e',
+                                    'scripts/hermes-busdriver-relay-role': 'c272f01b1a88e470c8b574a5326ec41a4df871d14ade64cd24966311b98a21dc',
+                                    'scripts/hermes-busdriver-status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'}
+
+
+def child_env(*, credentials: bool = False) -> dict[str, str]:
+    """Explicit allowlist for every child of this probe.
+
+    An inherited environment lets a caller pick the child's PATH and inject startup/loader code
+    through PYTHONPATH/BASH_ENV/LD_*/DYLD_*; ambient GIT_* redirects git. None of it is forwarded.
+
+    `credentials` defaults to FALSE and is opt-in per call site. r25 forwarded GH_TOKEN and friends
+    to EVERY child, including the arbitrary executable named by --agent-balance-plan-script — so
+    pointing that flag at any program handed it the operator's GitHub credentials. Only the
+    digest-authenticated helpers that actually talk to GitHub get them.
+    """
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = CONTAINED_PATH
+    keys = FORWARDED_CHILD_ENV_KEYS if credentials else tuple(k for k in FORWARDED_CHILD_ENV_KEYS if k not in CREDENTIAL_CHILD_ENV_KEYS)
+    env.update({key: os.environ[key] for key in keys if isinstance(os.environ.get(key), str)})
+    return env
+
+
+def _read_authenticated(path: Path, expected_digest: str) -> bytes:
+    """Read a helper's bytes, proving identity and cost across the read rather than trusting the name.
+
+    Two things run after the open, and until r34 neither was proved. The READ was unbounded: the
+    candidate chose how much memory this process spent, and it chose before the digest that would
+    have rejected it. And identity was compared once, at open, so everything the read spans — a
+    truncation, a growth, a new hard link, a chmod, a rename away from the name — was covered by
+    nothing at all.
+
+    So the size is checked before the read, the read is capped one byte past the bound (reading
+    exactly the bound cannot distinguish "this file IS the bound" from "this is a prefix of a larger
+    one"), and the fd is re-examined afterwards against what it said at open. `st_size` is never
+    trusted as a stopping condition — it is read from the very file the check exists to doubt.
+
+    The closing lstat is the half no descriptor can see: the fd proves OUR inode is unchanged and
+    says nothing about where the NAME points, and the name is what the caller goes on to use.
+    """
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise OSError("helper_not_regular")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        cp = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
-    except FileNotFoundError as e:
-        return {"ok": False, "error": "command_not_found", "cmd": cmd, "stderr": str(e)}, 127
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("helper_identity_changed")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+        ):
+            raise OSError("helper_metadata_invalid")
+        if opened.st_size > MAX_AUTHENTICATED_HELPER_BYTES:
+            # Refused without ever holding it. This is the whole point of the bound.
+            raise OSError("helper_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_HELPER_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_HELPER_BYTES:
+            raise OSError("helper_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            raise OSError("helper_changed_during_read")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("helper_replaced_during_read")
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise OSError("helper_digest_invalid")
+    return data
+
+
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def _write_exclusive(path: Path, data: bytes, mode: int) -> os.stat_result:
+    """Write the retained helper, then prove the descriptor still holds exactly what was authenticated.
+
+    The bytes reaching here were hashed against a pin, but the hash authenticated MEMORY. Without a
+    flush they need not be on disk when the child is launched to read them, and without a closing
+    re-read "we wrote it" and "the file holds it" stay separate claims — the second is the one the
+    execution below actually depends on. `os.chmod(path, ...)` was the same shape of gap: it names
+    the file a second time, and a second resolution can land somewhere else.
+
+    The digest proves OUR inode is intact and can prove nothing else; the closing identity check
+    proves the other direction — that `path` still REACHES it — which is the half no descriptor can
+    see. An adversary who renames our file aside and its own into place leaves every fd-visible
+    field (type, owner, link count, size, mode, digest) describing our inode exactly, and leaves the
+    name the child is about to execute pointing at theirs.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: _digest_fd reads the bytes back through THIS descriptor, and a
+        # write-only one cannot be read. Reopening the name would resolve it a second time.
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(data)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("retained_helper_metadata_invalid")
+            if _digest_fd(fd, st.st_size) != hashlib.sha256(data).hexdigest():
+                raise OSError("retained_helper_replaced_after_write")
+            if not _names_created_inode(parent_fd, path.name, created):
+                raise OSError("retained_helper_replaced_after_write")
+        except BaseException:
+            # Never leave a half-written helper for the next step to execute. But by now the name may
+            # belong to something else — the case the identity check above fails on — and deleting
+            # THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, path.name, created):
+                try:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+        # Handed back so a caller whose own later step fails can prove, before unlinking, that the
+        # name still reaches THIS inode. Without it the caller's cleanup resolves the name a second
+        # time — the very thing every check above refuses to do.
+        return created
+    finally:
+        os.close(parent_fd)
+
+
+def _digest_fd(fd: int, size: int) -> str:
+    """sha256 of the bytes behind THIS descriptor. `pread` so it neither moves nor rides the offset."""
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(1 << 16, size - offset), offset)
+        if not chunk:
+            raise OSError("retained_helper_truncated")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def authenticated_helper(*relatives: str) -> Any:
+    """Yield private copies of default helpers, executed from the bytes we verified.
+
+    r25 executed `ROOT / relative` directly with no digest and no metadata check at all — any
+    tampered or swapped sibling answered, and the readiness gate believed it. Hashing the path and
+    then executing the same pathname would still leave the TOCTOU window the r25 review named: the
+    file can be replaced, or a hard link mutated, between the check and the exec. So the verified
+    BYTES are what get written to a private 0700 bundle and run; the source path never reaches the
+    exec line.
+
+    The WHOLE runtime closure is materialized, not just the requested helper, because
+    delivery-status resolves its own siblings (lock, litmus-status, pr-grind-check) through
+    `ROOT = Path(__file__).resolve().parents[1]`. Copying one script into a bare temp dir would
+    silently repoint ROOT at that dir and every sibling lookup would miss — which is why the
+    bundle mirrors `scripts/` layout. This is the same closure, and the same reason, as
+    deliver.materialize_delivery_status_runtime.
+    """
+    authenticated = {
+        relative: _read_authenticated(ROOT / relative, digest)
+        for relative, digest in TRUSTED_READINESS_HELPER_DIGESTS.items()
+    }
+    with tempfile.TemporaryDirectory(prefix="hermes-readiness-runtime-") as temp:
+        bundle = Path(temp)
+        bundle.chmod(0o700)
+        scripts_dir = bundle / "scripts"
+        scripts_dir.mkdir()
+        # chmod, not mkdir(mode=): mkdir's mode is masked by the caller's umask.
+        scripts_dir.chmod(0o700)
+        for relative, data in authenticated.items():
+            target = bundle / relative
+            _write_exclusive(target, data, 0o500)
+            # Re-authenticate the copy we are about to execute, not the one we read.
+            _read_authenticated(target, TRUSTED_READINESS_HELPER_DIGESTS[relative])
+        retained = {relative: (bundle / relative, authenticated[relative]) for relative in relatives}
+        yield tuple(retained[relative] for relative in relatives) if len(relatives) != 1 else retained[relatives[0]]
+
+
+RETAINED_PYTHON_STDIN_LOADER = (
+    "import sys\n"
+    "virtual = sys.argv[1]\n"
+    "program = sys.stdin.buffer.read()\n"
+    "sys.argv = [virtual, *sys.argv[2:]]\n"
+    "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+    "exec(compile(program, virtual, 'exec'), namespace)\n"
+)
+
+
+class RetainedPythonCommand(list[str]):
+    def __init__(self, argv: list[str], stdin_bytes: bytes) -> None:
+        super().__init__(argv)
+        self.stdin_bytes = stdin_bytes
+
+
+def python_child(script: Path | tuple[Path, bytes], *args: str) -> list[str]:
+    # -I: no PYTHONPATH, no user site-packages, no cwd on sys.path for the trusted child.
+    if isinstance(script, tuple):
+        virtual, program = script
+        return RetainedPythonCommand(
+            [str(trusted_executable_path("python3")), "-I", "-c", RETAINED_PYTHON_STDIN_LOADER, str(virtual), *args],
+            program,
+        )
+    return [str(trusted_executable_path("python3")), "-I", str(script), *args]
+
+
+def run_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict[str, Any], int]:
+    """Every child of this probe is ingested here, so this is where they are sanitized.
+
+    All four loaders reach their helper through this one function, on the success path and on every
+    error path alike — which is what makes it the boundary rather than four boundaries that can each
+    forget one. r32 High 1 was four call sites' worth of "the validator bound the fields it
+    required": the payloads were embedded verbatim under `delivery_status`, `phase0_status`,
+    `finalization_contract_status` and `agent_balance_plan`, and only the agent-balance-plan FIXTURE
+    path redacted anything at all.
+
+    Sanitizing here rather than after validation is safe in the one direction that matters: the
+    funnel preserves bools and rewrites only strings and capability-shaped keys, so it can never
+    turn a payload a validator would REJECT into one it accepts — `has_positive_contract_authority`
+    still sees `is not False`, and a redacted string still fails an `== SCHEMA` literal.
+    """
+    data, rc = _ingest_json(cmd, timeout, credentials=credentials)
+    return sanitized_payload(data), rc
+
+
+def _ingest_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict[str, Any], int]:
+    try:
+        bounded = run_bounded(cmd, timeout=timeout, env=child_env(credentials=credentials), stdin_bytes=getattr(cmd, "stdin_bytes", None))
+        if bounded.overflowed:
+            # A tuple like every other path here: the callers unpack `data, rc`, so the bare dict
+            # this returned before unpacked to its own KEYS — `data="ok"`, `rc="error"` — and the
+            # refusal it exists to deliver never survived its own return statement.
+            return {"ok": False, "error": "helper_output_too_large"}, 1
+        if bounded.timed_out:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        cp = subprocess.CompletedProcess(cmd, bounded.returncode, bounded.stdout, bounded.stderr)
     except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
         return {
             "ok": False,
             "error": "timeout",
             "cmd": cmd,
             "returncode": 124,
-            "stdout_tail": stdout[-4000:],
-            "stderr": stderr[-4000:],
+            "stdout_tail": tail(e.stdout),
+            "stderr": tail(e.stderr),
         }, 124
+    except OSError as e:
+        # FileNotFoundError plus NotADirectoryError/PermissionError from an unusable child
+        # path: keep the existing rc 127 shape rather than tracebacking out of the probe.
+        return {"ok": False, "error": "command_not_found", "cmd": cmd, "stderr": tail(str(e))}, 127
     try:
         data = json.loads(cp.stdout)
     except json.JSONDecodeError as e:
@@ -209,16 +1189,16 @@ def run_json(cmd: list[str], timeout: int) -> tuple[dict[str, Any], int]:
             "error": "invalid_json",
             "cmd": cmd,
             "returncode": cp.returncode,
-            "parse_error": str(e),
-            "stdout_tail": cp.stdout[-4000:],
-            "stderr": cp.stderr[-4000:],
+            "parse_error": tail(str(e), 512),
+            "stdout_tail": tail(cp.stdout),
+            "stderr": tail(cp.stderr),
         }, cp.returncode
     if not isinstance(data, dict):
         return {"ok": False, "error": "invalid_json_type", "cmd": cmd, "returncode": cp.returncode}, cp.returncode
     if cp.returncode != 0:
         data["ok"] = False
         data["returncode"] = cp.returncode
-        data["stderr"] = cp.stderr[-4000:]
+        data["stderr"] = tail(cp.stderr)
     return data, cp.returncode
 
 
@@ -233,8 +1213,20 @@ def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
 
 
-def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    cmd = [sys.executable, str(DELIVERY_STATUS), "--repo", args.repo]
+def helper_unavailable(schema: str, reason: str, detail: str) -> dict[str, Any]:
+    return {
+        "schema": schema,
+        "ok": False,
+        "read_only": True,
+        "available": False,
+        "reason": reason,
+        "detail": detail,
+        "authority": BLOCKED_FLAGS,
+    }
+
+
+def load_delivery_status(args: argparse.Namespace, delivery_status: Path) -> tuple[dict[str, Any], int]:
+    cmd = python_child(delivery_status, "--repo", args.repo)
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
     if args.relay_state_dir:
@@ -247,16 +1239,15 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--relay-role-timeout", str(args.relay_role_timeout)]
     if args.pr:
         cmd += ["--pr", args.pr]
+    # No mode to forward: production refuses every --*-script at parse_args(), so the forwards
+    # below are unreachable here and exist for the contract harness, which routes the child
+    # through the delivery-status harness that honours them.
     if args.pr_grind_check_script:
         cmd += ["--pr-grind-check-script", args.pr_grind_check_script]
-    if args.pr_grind_result_file:
-        cmd += ["--pr-grind-result-file", args.pr_grind_result_file]
     if args.pr_grind_timeout is not None:
         cmd += ["--pr-grind-timeout", str(args.pr_grind_timeout)]
     if args.litmus_status_script:
         cmd += ["--litmus-status-script", args.litmus_status_script]
-    if args.litmus_status_result_file:
-        cmd += ["--litmus-status-result-file", args.litmus_status_result_file]
     if args.litmus_status_timeout is not None:
         cmd += ["--litmus-status-timeout", str(args.litmus_status_timeout)]
     if args.drift_baseline:
@@ -265,11 +1256,15 @@ def load_delivery_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]
         cmd += ["--phase0-status-timeout", str(args.phase0_status_timeout)]
     if args.state_dir:
         cmd += ["--busdriver-state-dir-name", args.state_dir]
-    return run_json(cmd, effective_delivery_status_timeout(args))
+    # delivery-status is the one child that reaches GitHub (through its authenticated pr-grind
+    # checker), so it is the one child that gets the credentials.
+    return run_json(cmd, effective_delivery_status_timeout(args), credentials=True)
 
 
-def load_phase0_status(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    cmd = [sys.executable, str(PHASE0_STATUS), "--repo", args.repo, "--state-dir", args.state_dir, "--operation", "repo-mutation"]
+def load_phase0_status(args: argparse.Namespace, phase0_status: Path) -> tuple[dict[str, Any], int]:
+    # Readiness reads Phase-0 status; it has no use for resolver bytes, so it does not ask for
+    # them. Defense in depth behind the status probe's own canonical-root/digest binding.
+    cmd = python_child(phase0_status, "--repo", args.repo, "--state-dir", args.state_dir, "--operation", "repo-mutation", "--no-external-resolver")
     if args.relay_state_dir:
         cmd += ["--relay-state-dir", args.relay_state_dir]
     if args.plugin_root:
@@ -310,8 +1305,8 @@ def invalid_contract_status(reason: str, data: dict[str, Any], rc: int) -> dict[
     }
 
 
-def load_contract_status() -> tuple[dict[str, Any], int]:
-    data, rc = run_json([sys.executable, str(CONTRACT_STATUS)], DEFAULT_CONTRACT_STATUS_TIMEOUT)
+def load_contract_status(contract_status: Path) -> tuple[dict[str, Any], int]:
+    data, rc = run_json(python_child(contract_status), DEFAULT_CONTRACT_STATUS_TIMEOUT)
     if rc != 0:
         return invalid_contract_status("finalization_contract_status_subprocess_failed", data, rc), rc
     if data.get("schema") != FINALIZATION_CONTRACT_STATUS_SCHEMA or data.get("read_only") is not True or data.get("ok") is not True:
@@ -336,9 +1331,44 @@ def invalid_agent_balance_plan(reason: str, data: dict[str, Any], rc: int) -> di
     }
 
 
-def load_agent_balance_plan(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    script = Path(args.agent_balance_plan_script) if args.agent_balance_plan_script else AGENT_BALANCE_PLAN
-    data, rc = run_json([sys.executable, str(script)], args.agent_balance_plan_timeout)
+AGENT_BALANCE_PLAN_FIXTURE_BLOCKER = "agent_balance_plan_fixture_not_authoritative"
+
+
+def load_agent_balance_plan(args: argparse.Namespace, balance_plan: Path) -> tuple[dict[str, Any], int]:
+    """Run the pinned plan helper, or a caller-named one demoted to a fixture.
+
+    Two separate questions, which r25 conflated into "it printed the right shape":
+
+    1. PROVENANCE. `--agent-balance-plan-script` names an arbitrary executable that authors its
+       own stdout. Structural validation proves shape, never origin — the same reason a
+       `--*-result-file` is non-authoritative. r25 accepted any script printing
+       `schema`/`ok: true`/`read_only: true`, cleared `agent_balance_plan_unavailable` with it,
+       and let readiness reach a ready handoff on evidence the caller wrote. It is now labeled
+       `fixture` and carries its own blocker, exactly as delivery-status treats a caller-named
+       --pr-grind-check-script.
+    2. INTEGRITY. The DEFAULT helper is the only authoritative one, and only when its bytes are
+       the reviewed bytes, executed from a private copy.
+    """
+    if args.agent_balance_plan_script:
+        script = Path(args.agent_balance_plan_script).expanduser()
+        # No credentials: this is an arbitrary executable, not a trusted relay helper.
+        # Sanitized whether or not it succeeded — by run_json(), for every child rather than this
+        # one. r25 redacted only the failure tails through tail(), so a SUCCESSFUL custom payload
+        # was embedded verbatim; r32 then found the same hole under the three children that had no
+        # redact_value() call here at all, which is why the funnel moved to the ingest boundary.
+        data, rc = run_json(python_child(script), args.agent_balance_plan_timeout)
+        result = _validated_balance_plan(data, rc)
+        if isinstance(result[0], dict):
+            result[0].update({"source": "fixture", "authoritative": False, "script": str(script)})
+        return result
+
+    data, rc = run_json(python_child(balance_plan), args.agent_balance_plan_timeout)
+    plan, code = _validated_balance_plan(data, rc)
+    plan.update({"source": "script", "authoritative": plan.get("ok") is True})
+    return plan, code
+
+
+def _validated_balance_plan(data: dict[str, Any], rc: int) -> tuple[dict[str, Any], int]:
     if rc != 0:
         return invalid_agent_balance_plan("agent_balance_plan_subprocess_failed", data, rc), rc
     if data.get("schema") != AGENT_BALANCE_PLAN_SCHEMA or data.get("read_only") is not True or data.get("ok") is not True:
@@ -460,6 +1490,14 @@ def marker_flag(summary: dict[str, Any], marker: str, field: str) -> bool | None
         return None
     value = entry.get(field)
     return value if isinstance(value, bool) else None
+
+
+def fixture_sourced_delivery(delivery: dict[str, Any]) -> bool:
+    """True when any delivery evidence came from a caller-named result file."""
+    return any(
+        isinstance(delivery.get(key), dict) and delivery[key].get("source") == "fixture"
+        for key in ("pr_grind", "litmus_status")
+    )
 
 
 def pre_pr_dual_review_evidence(litmus_summary: Any) -> dict[str, Any]:
@@ -623,8 +1661,18 @@ def readiness(
         blockers.append("finalization_contract_status_unavailable")
     if agent_balance_plan.get("ok") is not True:
         blockers.append("agent_balance_plan_unavailable")
+    # Re-derived from the evidence's own provenance, not from whether it validated: a caller-named
+    # plan script authors its own stdout, so a forged-but-well-formed plan must not clear a
+    # production blocker or reach a ready handoff.
+    if agent_balance_plan.get("source") == "fixture" and AGENT_BALANCE_PLAN_FIXTURE_BLOCKER not in blockers:
+        blockers.append(AGENT_BALANCE_PLAN_FIXTURE_BLOCKER)
     if is_idle_without_finalization_candidate(args, delivery):
         blockers = [b for b in blockers if b != "litmus_status_not_fresh"]
+    # Re-derived from the evidence's own provenance rather than inherited from the child's
+    # blocker list: a fixture must not reach ready_for_merge_handoff even if a custom
+    # --delivery-status-script were to hand us a decision that omitted the blocker.
+    if fixture_sourced_delivery(delivery) and FIXTURE_EVIDENCE_BLOCKER not in blockers:
+        blockers.append(FIXTURE_EVIDENCE_BLOCKER)
 
     repo = delivery.get("repo") or {}
     target = infer_target(args, delivery)
@@ -693,6 +1741,10 @@ def handoff_envelope(
             "dirty": repo.get("dirty"),
             "merge_state": repo.get("merge_state"),
             "dirty_entries": repo.get("dirty_entries"),
+            # The list is bounded by delivery-status; re-emitting it without these would hand a
+            # reader a short list that looks complete.
+            "dirty_entries_total_count": repo.get("dirty_entries_total_count"),
+            "dirty_entries_truncated": repo.get("dirty_entries_truncated"),
         },
         "pr": summarize_pr(args.pr, delivery),
         "busdriver_phase0": {
@@ -708,6 +1760,13 @@ def handoff_envelope(
             "delivery_decision": delivery.get("decision"),
             "busdriver_drift": phase0.get("busdriver_drift") or ((delivery.get("phase0_status") or {}).get("busdriver_drift")),
             "litmus_status": (delivery.get("litmus_status") or {}).get("summary"),
+            # The summary alone drops the wrapper's `source`, so a fixture-sourced summary became
+            # indistinguishable from a live run to every downstream reader of this envelope.
+            "litmus_status_source": (delivery.get("litmus_status") or {}).get("source"),
+            "pr_grind_source": (delivery.get("pr_grind") or {}).get("source"),
+            # Re-derived from provenance, not read back from the child's blocker list: a custom
+            # --delivery-status-script that omits the blocker must not also clear this flag.
+            "fixture_sourced_evidence": fixture_sourced_delivery(delivery) or FIXTURE_EVIDENCE_BLOCKER in (delivery.get("decision") or {}).get("blockers", []),
             "finalization_lock": delivery.get("finalization_lock"),
             "relay_role_resolution": delivery.get("relay_role_resolution"),
             "finalization_contract_status": contract_status,
@@ -733,12 +1792,34 @@ def handoff_envelope(
     }
 
 
+def load_all(args: argparse.Namespace) -> tuple[tuple[dict[str, Any], int], ...]:
+    """Materialize the authenticated runtime once, then run every default helper out of it."""
+    with authenticated_helper(
+        "scripts/hermes-busdriver-delivery-status",
+        "scripts/hermes-busdriver-status",
+        "scripts/hermes-busdriver-finalization-contract-status",
+        "scripts/hermes-busdriver-agent-balance-plan",
+    ) as (delivery_status, phase0_status, contract_status, balance_plan):
+        return (
+            load_delivery_status(args, delivery_status),
+            load_phase0_status(args, phase0_status),
+            load_contract_status(contract_status),
+            load_agent_balance_plan(args, balance_plan),
+        )
+
+
 def main() -> int:
     args = parse_args()
-    delivery, delivery_rc = load_delivery_status(args)
-    phase0, phase0_rc = load_phase0_status(args)
-    contract_status, contract_status_rc = load_contract_status()
-    agent_balance_plan, agent_balance_plan_rc = load_agent_balance_plan(args)
+    try:
+        (delivery, delivery_rc), (phase0, phase0_rc), (contract_status, contract_status_rc), (agent_balance_plan, agent_balance_plan_rc) = load_all(args)
+    except OSError as exc:
+        # The reviewed bytes are not on disk, so no helper here can answer. Fail closed rather
+        # than fall back to whatever is at the path.
+        detail = str(exc) or type(exc).__name__
+        delivery, delivery_rc = helper_unavailable(DELIVERY_STATUS_SCHEMA, "readiness_runtime_integrity_failed", detail), 1
+        phase0, phase0_rc = helper_unavailable("hermes-busdriver-status/v0", "readiness_runtime_integrity_failed", detail), 1
+        contract_status, contract_status_rc = invalid_contract_status("readiness_runtime_integrity_failed", {"detail": detail}, 1), 1
+        agent_balance_plan, agent_balance_plan_rc = invalid_agent_balance_plan("readiness_runtime_integrity_failed", {"detail": detail}, 1), 1
     ready = readiness(args, delivery, phase0, contract_status, agent_balance_plan)
     dual_review = dual_review_readiness(phase0)
     pre_pr_evidence = pre_pr_dual_review_evidence((delivery.get("litmus_status") or {}).get("summary"))
@@ -756,6 +1837,8 @@ def main() -> int:
             and agent_balance_plan.get("ok") is True
         ),
         "read_only": True,
+        # Stated on the envelope's face: a fixture run authors some of its own evidence.
+        "fixture_mode": bool(FIXTURE_MODE),
         "delivery_status_returncode": delivery_rc,
         "phase0_status_returncode": phase0_rc,
         "finalization_contract_status_returncode": contract_status_rc,
@@ -771,7 +1854,12 @@ def main() -> int:
         "phase0_status": phase0,
         "decision": {"status": ready["status"], "reason": "read_only_finalization_readiness", **BLOCKED_FLAGS},
     }
-    print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+    # The same funnel again, over the assembled envelope: defense in depth against THIS file rather
+    # than against the children. run_json() already sanitized every child object, so what this pass
+    # covers is the assembly — a field projected into the handoff envelope, a `detail` built from an
+    # OSError string on the integrity path, a future key nobody has written yet. It costs one walk
+    # of a few KB and removes "someone adds an emitter and forgets" as a way to leak.
+    print(json.dumps(sanitized_payload(result), indent=2 if args.pretty else None, sort_keys=True))
     return 0 if result["ok"] else (delivery_rc or phase0_rc or contract_status_rc or agent_balance_plan_rc or 1)
 
 

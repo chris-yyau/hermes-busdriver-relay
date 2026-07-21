@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted as a non-mutating integration contract and prerequisite checklist. This ADR does **not** grant finalization authority, add an executor, approve marker writes, or change the current read-only relay surface.
+Accepted as a finalization authority contract and prerequisite checklist. Amended after the gated Delivery Mode executor slice: the relay has narrow fail-closed parser/result-envelope surfaces, but parser exposure is not dispatchability. Production Pi/OpenCode dispatch is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; verifier command execution is blocked by `verifier_containment_unavailable`; pre-PR review by `isolated_review_runtime_unavailable`; push by `atomic_push_base_binding_unavailable`; PR creation by `atomic_pr_create_binding_unavailable`; and merge by `atomic_merge_base_binding_unavailable`. This ADR still does **not** grant finalization authority as standing permission, approve arbitrary marker writes, authorize draft launchers to mutate, or allow deploy/release/publish side effects.
 
 ## Context
 
-The relay currently provides Busdriver-aware discovery, status, draft gating, verify-only delivery runs, read-only PR-grind checks/loops, read-only litmus/pre-PR marker freshness checks, and a finalization-readiness handoff envelope. Those helpers intentionally keep all commit/push/PR/merge/deploy/publish/marker-write authority flags false.
+The relay currently provides Busdriver-aware discovery, status, non-installed adapter/verifier test harnesses, read-only PR-grind checks/loops, read-only litmus/pre-PR marker freshness checks, a finalization-readiness handoff envelope, and gated parser/result-envelope surfaces. Status/readiness helpers intentionally keep all commit/push/PR/merge/deploy/publish/marker-write authority flags false; a specific executor operation may cross into mutation only after proving fresh per-operation evidence at runtime and only when that operation has no active policy blocker. Production agent dispatch, verifier execution, push, PR creation, and merge do not meet that condition today.
 
-Hermes Delivery Mode is currently an external operator procedure: when the user explicitly asks Hermes to finish delivery, the operator may perform ordinary Git/GitHub actions only after litmus/pre-PR-equivalent checks, local verification, latest-head PR checks/reviews/comments, bounded reviewer-bot waits, actionable fix rounds, and a clean PR-grind-equivalent result. That procedure is not a relay executor API and does not authorize draft launchers or status helpers to mutate repositories.
+Hermes Delivery Mode remains a user-explicit operator path, but explicit intent does not override a policy blocker. The gated executor codifies checks and result envelopes without making blocked agent, verifier, push, PR-create, or merge operations executable. Direct commands must not bypass `agent_containment_and_credential_broker_unavailable`, `verifier_containment_unavailable`, `isolated_review_runtime_unavailable`, `atomic_push_base_binding_unavailable`, `atomic_pr_create_binding_unavailable`, or `atomic_merge_base_binding_unavailable`. It also does not authorize draft launchers, status helpers, marker helpers outside the trusted Busdriver writer path, deploy/release/publish flows, or any operation missing current evidence.
 
 `hermes-busdriver-finalization-readiness` exposes `finalization_guardrails.remaining_work` for deliberately missing mutating capabilities:
 
@@ -18,11 +18,11 @@ Hermes Delivery Mode is currently an external operator procedure: when the user 
 - `mutating-pr-grind-fix-push-loop`;
 - `busdriver-marker-interop`.
 
-Before any of those can move from policy-blocked to implementable, Busdriver must define and approve an integration surface that Hermes can verify fail-closed.
+The first gated executor/envelope slice records implementation evidence for `deliver-mutating-executor` and `mutating-final-result-envelope`, but those rows must still expose missing runtime authority sources and remain capability-denied until each requested operation proves current evidence. The other remaining-work items stay policy-blocked until Busdriver defines and approves an integration surface that Hermes can verify fail-closed.
 
 ## Decision
 
-Define a future **Busdriver-approved finalization authority contract**. Until an implementation proves this contract with tests, schemas, and live-source evidence, the relay remains read-only/non-mutating for finalization:
+Define a **Busdriver-approved finalization authority contract**. Status and readiness helpers remain read-only/non-mutating for finalization, and the default authority envelope remains deny-all unless a gated executor proves per-operation runtime evidence:
 
 ```json
 {
@@ -38,7 +38,7 @@ Define a future **Busdriver-approved finalization authority contract**. Until an
 }
 ```
 
-A future mutating finalization surface must be built around explicit, versioned authority evidence. It must never infer authority from marker filename presence, an agent self-report, a clean local test run, a stale README/ADR, or the mere availability of `git`, `gh`, Busdriver scripts, Codex, Claude Code, MCP tools, or relay role config.
+A mutating finalization surface must be built around explicit, versioned authority evidence. It must never infer authority from marker filename presence, an agent self-report, a clean local test run, a stale README/ADR, or the mere availability of `git`, `gh`, Busdriver scripts, Codex, Claude Code, MCP tools, or relay role config.
 
 ## Authority Sources
 
@@ -57,9 +57,9 @@ Relay-owned role configuration may select advisory Hermes/model equivalents for 
 
 ## Required Unlock Criteria by Surface
 
-### 1. Mutating commit/push/PR/merge executor and envelope
+### 1. Mutating pre-PR-review/commit/push/PR/merge executor and envelope
 
-Before `hermes-busdriver-deliver` or a successor can expose mutating `commit`, `push`, `pr_create`, or `merge` operations, the implementation must provide:
+Before `hermes-busdriver-deliver` or a successor can expose mutating `pre-pr-review`, `commit`, `push`, `pr_create`, or `merge` operations, the implementation must provide:
 
 - a versioned mutating run envelope distinct from the current verify/read-only `hermes-busdriver-delivery-run/v0` evidence;
 - per-operation authority flags and denial reasons, defaulting false/missing-deny;
@@ -73,6 +73,8 @@ Before `hermes-busdriver-deliver` or a successor can expose mutating `commit`, `
 - contract tests for dirty tree fail-closed, stale marker rejection, failed checks, review comments, head drift, lock conflict, schema invalidity, and missing Busdriver approval.
 
 A clean status or successful verifier alone cannot unlock this surface.
+
+The gated Delivery Mode executor slice supplies implementation evidence for this surface, including the mutating delivery-run envelope, trusted Busdriver pre-PR marker-writer handoff, fresh litmus/pre-PR/PR-grind evidence checks, finalization lock handling, redacted side-effect transcripts, and fail-closed contract tests. That is implementation evidence only: every concrete operation still requires current user intent, fresh repo/PR and gate evidence, lock authority, data-boundary approval, and postflight reconciliation before mutation.
 
 ### 2. Mutating PR-grind fix/push/re-poll loop
 
@@ -134,7 +136,7 @@ Future finalization authority must fail closed if any required authority source 
 
 ## Schemas and Evidence Required
 
-A future implementation must introduce contract-tested schemas before any mutating path is enabled. At minimum:
+A mutating implementation must introduce contract-tested schemas before any mutating path is enabled. At minimum:
 
 - `hermes-busdriver-finalization-authority/v0`: authority decision, requested operation, source approvals, operation flags, denial reasons, and freshness timestamps;
 - `hermes-busdriver-mutating-delivery-run/v0`: durable executor run envelope with authority evidence, lock evidence, preflight/postflight state, side-effect transcript, verifier evidence, artifact references, and redaction metadata;
@@ -166,16 +168,16 @@ This ADR does not approve or implement:
 
 ## Retiring `finalization_guardrails.remaining_work`
 
-Each remaining-work item may be retired only by a later, explicit implementation slice that satisfies this ADR for that item and updates tests/docs in the same change:
+Each remaining-work item may be retired only by a later, explicit implementation slice that satisfies this ADR for that item and updates tests/docs in the same change. A row may be marked `implemented_gated` before it is retired, but only if status helpers still keep capability flags false and expose missing runtime authority sources:
 
-- `deliver-mutating-executor`: retire only after a Busdriver-approved mutating executor exists with authority, lock, preflight, side-effect transcript, postflight, and fail-closed contract tests.
-- `mutating-final-result-envelope`: retire only after the mutating delivery run schema is versioned, durable, redacted, and rejected on malformed or authority-positive nested evidence.
+- `deliver-mutating-executor`: the aggregate surface may be marked implemented-gated only when operation-specific status is also reported; `pre-pr-review` remains `policy_blocked` by `isolated_review_runtime_unavailable` before delivery-status/lock handling, `push` by `atomic_push_base_binding_unavailable`, and `merge` by `atomic_merge_base_binding_unavailable`. Retire the row only after the repo intentionally stops reporting it as remaining work and every operation proves authority, lock, preflight, side-effect transcript, postflight, and fail-closed contract tests.
+- `mutating-final-result-envelope`: mark implemented only for the gated mutating delivery-run envelope; retire only after the schema is versioned, durable, redacted, and rejected on malformed or authority-positive nested evidence.
 - `programmatic-litmus-pre-pr-dual-review`: retire only after Busdriver-approved role mappings/invocation seams, independence rules, data-egress controls, review schemas, and aggregation tests exist.
 - `mutating-pr-grind-fix-push-loop`: retire only after fix/push/re-poll integration proves latest-head tracking, bounded budgets, actionable feedback handling, required-check semantics, and post-push reconciliation.
 - `busdriver-marker-interop`: retire only after Busdriver defines marker write ownership, schemas, atomicity, audit, freshness, and trust semantics, and Hermes implements only that approved surface.
 
-Retiring any one item does not imply the others are approved. Until the relevant item is retired, `hermes-busdriver-finalization-readiness` must continue to expose it as remaining work and all finalization/marker-write flags must remain false.
+Retiring or implementing any one item does not imply the others are approved. Until the relevant item is retired, `hermes-busdriver-finalization-readiness` must continue to expose it as remaining work and all status/readiness finalization/marker-write flags must remain false.
 
 ## Consequences
 
-This ADR gives future work a concrete unlock contract while preserving the current safe state. The next safe dogfood work remains documentation, status, fixtures, and fail-closed evidence. Mutating finalization must wait for a separate approved implementation slice with Busdriver authority and contract tests.
+This ADR gives finalization work a concrete unlock contract while preserving the safe default state. The gated Delivery Mode executor may perform only an explicit operation with fresh runtime evidence and no operation-specific policy blocker. Push and merge are currently non-dispatchable for the atomic base-binding reasons above; all other finalization surfaces remain blocked until separate approved implementation slices add Busdriver authority and contract tests.
