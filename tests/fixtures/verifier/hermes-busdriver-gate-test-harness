@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Contract-test-only verifier dependency injection for the gate.
+
+Production has no parser flag or environment variable that enables verifier
+execution. This non-installed harness preserves legacy verifier behavior for
+contract tests while production remains policy-blocked.
+"""
+from pathlib import Path
+import os
+import subprocess
+import tempfile
+
+
+def run_verifiers(repo, verifiers):
+    """Run legacy verifier commands for this non-production test harness only."""
+    results = []
+    verifiers = verifiers or []
+    with tempfile.TemporaryDirectory(prefix="hermes-gate-test-verifier-home-") as home:
+        verifier_env = {
+            "HOME": home,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LC_ALL": os.environ.get("LC_ALL", ""),
+            "TMPDIR": os.environ.get("TMPDIR", tempfile.gettempdir()),
+        }
+        for item in verifiers:
+            if "=" in item:
+                name, command = item.split("=", 1)
+            else:
+                name, command = "verifier", item
+            cp = subprocess.run(
+                ["/bin/bash", "-c", command],
+                cwd=repo,
+                env=verifier_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            results.append({
+                "name": name,
+                "cmd": command,
+                "returncode": cp.returncode,
+                "ok": cp.returncode == 0,
+                "stdout_tail": gate_tail(cp.stdout),
+                "stderr_tail": gate_tail(cp.stderr),
+            })
+    return results
+
+ROOT = Path(__file__).resolve().parents[3]
+gate_path = ROOT / "scripts" / "hermes-busdriver-gate"
+gate_source = gate_path.read_text()
+dormant_branch = """    else:\n        # Fail closed even if the policy function is accidentally relaxed: production has no\n        # verifier command executor until a contained, non-shell implementation exists.\n        verifier_results = []\n"""
+test_branch = """    else:\n        verifier_results = run_verifiers(repo, args.verifier or [])\n"""
+if gate_source.count(dormant_branch) != 1:
+    raise RuntimeError("production verifier branch no longer matches the test harness")
+ns = {"__name__": "<run_path>", "__file__": str(gate_path)}
+exec(compile(gate_source.replace(dormant_branch, test_branch), str(gate_path), "exec"), ns)
+gate_tail = ns["tail"]
+# The HERMES_TEST_PRIVATE_TRUSTED_BIN override is gone with the global it pointed at. The gate no
+# longer has a PRIVATE_TRUSTED_BIN to redirect: it validates /usr/bin/git against its own frozen
+# root-owned table, which is a source no test needs to substitute and no test is able to.
+ns["cmd_postflight"].__globals__["verifier_dispatch_blocker"] = lambda: None
+ns["cmd_postflight"].__globals__["run_verifiers"] = run_verifiers
+ns["decision"].__globals__["agent_dispatch_blocker"] = lambda: None
+raise SystemExit(ns["main"]())

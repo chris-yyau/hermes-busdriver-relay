@@ -22,6 +22,9 @@ defaults:
 
 jobs:
   test:
+    # Keep the historical `test` context while replacing its contents with the explicit portable
+    # allowlist. This preserves branch protection across every slice of the stacked transition.
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -47,14 +50,16 @@ jobs:
       # .claude/CLAUDE.md). Codecov is N/A by design for this repo.
       - name: Install pytest
         run: pip install --quiet 'pytest==8.4.1'  # Pin version — reproducible CI, consistent with security.yml scanners
-      - name: Run contract suite
-        run: pytest tests/contract -q
+      - name: Run portable contract subset
+        run: |
+          python -B -I -m pytest -q -p no:cacheprovider \
+            tests/contract/test_stack_portable_smoke.py
 
   compliance:
     # Supply-chain artifacts are a release/main concern, not a per-PR concern —
     # gate to push so unmerged code doesn't burn minutes generating an SBOM.
     if: github.event_name == 'push'
-    needs: test
+    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -1,11 +1,11 @@
 {
   "_doc": ["see scripts/check-required-checks.sh and helmet SKILL.md B1c"],
   "required": [
-    { "name": "test",             "source_app": "github-actions", "workflow": ".github/workflows/tests.yml",    "job": "test" },
-    { "name": "Actions security", "source_app": "github-actions", "workflow": ".github/workflows/security.yml", "job": "zizmor" },
-    { "name": "Code security",    "source_app": "github-actions", "workflow": ".github/workflows/security.yml", "job": "semgrep" },
-    { "name": "Dependency CVEs",  "source_app": "github-actions", "workflow": ".github/workflows/security.yml", "job": "trivy" },
-    { "name": "IaC misconfig",    "source_app": "github-actions", "workflow": ".github/workflows/security.yml", "job": "checkov" }
+    { "name": "test",             "source_app": "github-actions", "app_id": 15368, "workflow": ".github/workflows/tests.yml", "job": "test" },
+    { "name": "Actions security", "source_app": "github-actions", "app_id": 15368, "workflow": ".github/workflows/security.yml", "job": "zizmor" },
+    { "name": "Code security",    "source_app": "github-actions", "app_id": 15368, "workflow": ".github/workflows/security.yml", "job": "semgrep" },
+    { "name": "Dependency CVEs",  "source_app": "github-actions", "app_id": 15368, "workflow": ".github/workflows/security.yml", "job": "trivy" },
+    { "name": "IaC misconfig",    "source_app": "github-actions", "app_id": 15368, "workflow": ".github/workflows/security.yml", "job": "checkov" }
   ],
   "advisory": []
 }

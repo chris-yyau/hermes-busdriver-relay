@@ -2,55 +2,30 @@
 
 ## Status
 
-Accepted for the Hermes Busdriver Relay v2 direction.
+**Superseded for production agent execution.** Retained as historical target-state design for preflight/postflight state checks.
 
-## Context
+## Current production truth
 
-The user wants Hermes to continue implementation work when Claude Code quota is unavailable. The active relay surface is Pi-default for draft implementation, with OpenCode configured as fallback/comparison route metadata that remains non-programmatic until adapter proof exists and Codex kept review/backstop-focused by default.
-
-However, Hermes terminal commands do not automatically run inside Claude Code's Busdriver hook runtime. If Hermes launches agents directly and then commits/pushes/opens PRs, it can bypass Busdriver's strongest gates.
-
-## Decision
-
-Introduce a Hermes-side equivalent gate runner:
+The production relay does not launch Pi, OpenCode, Codex, custom workers, or caller-provided verifier commands. Agent execution is policy-blocked before worker, repository, HOME, or credential handling with:
 
 ```text
-hermes-busdriver-gate preflight
-  → Pi implementation draft
-  → hermes-busdriver-gate postflight
-  → report / review / later finalization gate
+agent_containment_and_credential_broker_unavailable
 ```
 
-This runner does not pretend to be Claude Code. It explicitly checks the subset of Busdriver-equivalent invariants Hermes can enforce outside Claude Code.
+Local verifier execution is independently policy-blocked with:
 
-## v1 Capabilities
+```text
+verifier_containment_unavailable
+```
 
-### Preflight
-
-- resolves repo root, branch, HEAD, dirty tree, merge/rebase/cherry-pick state;
-- reads Busdriver plugin root and `hooks/hooks.json`;
-- verifies gate-like hook events are declared;
-- records `.git/hooks` baseline;
-- records gitignored file baseline;
-- captures active freeze/careful/review marker summary;
-- stores scope include/exclude patterns in a Hermes-owned baseline file.
-
-### Postflight
-
-- collects changed tracked/untracked paths without requiring commits;
-- checks changed files against scope include/exclude patterns;
-- detects `.git/hooks` add/change/remove tampering;
-- detects new or changed gitignored files such as `.env`;
-- runs optional verifier commands;
-- emits an explicit decision object.
-
-## Current Decision Contract
-
-When checks pass:
+Accordingly, production status and role envelopes must keep:
 
 ```json
 {
-  "agent_implementation_draft_allowed": true,
+  "programmatic_dispatch_allowed": false,
+  "adapter_verified": false,
+  "dispatch_allowed": false,
+  "agent_implementation_draft_allowed": false,
   "commit_allowed": false,
   "push_allowed": false,
   "pr_allowed": false,
@@ -59,43 +34,53 @@ When checks pass:
 }
 ```
 
-This means Hermes may call an implementation agent to produce a working-tree diff, but finalization remains blocked until a stronger commit/PR gate exists.
+A prior adapter proof or historical smoke is not containment or credential-broker evidence and cannot change these flags.
 
-## Why Draft First
+## Historical target-state design
 
-Draft mode is enough to satisfy the near-term quota-fallback goal:
+The original proposal was an equivalent state-checking sequence:
 
 ```text
-Claude quota exhausted
-  → Hermes follows Busdriver routing
-  → Hermes calls Pi to implement a draft (Codex only if Pi is blocked or unsuited)
-  → Hermes runs postflight/verifiers
-  → Hermes reports diff + evidence
-  → Busdriver/Claude or a later equivalent finalization gate reviews/commits
+hermes-busdriver-gate preflight
+  → constrained draft worker
+  → hermes-busdriver-gate postflight
+  → report / review / later finalization gate
 ```
 
-It avoids the false claim that a Hermes-launched agent has passed Claude Code hooks.
+The implemented gate still provides useful non-authorizing checks:
 
-## Future Work
+### Preflight
 
-1. `hermes-busdriver-agent-draft`: Pi-default launcher wrapper using this gate runner; OpenCode requires separate adapter proof before fallback use, and Codex remains review/backstop-focused by default.
-2. Additional adapters only if the deferred scope is explicitly reopened.
-3. Commit-capable gate:
-   - litmus-equivalent review;
-   - blueprint/design marker freshness;
-   - freeze/scope binding;
-   - secret/data-egress checks;
-   - commit message + file contract;
-   - lock ownership + reconciliation.
-4. PR-capable gate:
-   - CI status;
-   - PR review/comment ack ledger;
-   - merge policy;
-   - external side-effect approvals.
+- resolves repo root, branch, HEAD, dirty tree, and in-progress git operations;
+- reads the Busdriver plugin manifest and records hook declarations;
+- records `.git/hooks`, ignored-file, marker, and scope baselines.
+
+### Postflight
+
+- collects tracked and untracked changes;
+- checks scope and ignored-file policy;
+- detects hook tampering;
+- emits a fail-closed decision object.
+
+These checks are evidence surfaces only. They do not sandbox an agent, broker credentials, authorize dispatch, or prove Claude Code hook-runtime equivalence. Optional verifier execution described by the original design is available only in non-installed test fixtures; production refuses it with `verifier_containment_unavailable`.
+
+## Requirements before any future promotion
+
+A future ADR may supersede the production block only after all of the following are implemented and independently reviewed:
+
+1. enforceable process/container containment;
+2. explicit credential brokering with no ambient-secret inheritance;
+3. scoped filesystem and network policy;
+4. complete process-tree teardown and side-effect reconciliation;
+5. mutation-resistant contracts and real negative sentinels;
+6. truthful status, docs, and role metadata updated in the same change.
+
+Preflight/postflight alone are insufficient.
 
 ## Non-goals
 
 - Do not vendor Busdriver into this repo.
-- Do not copy Claude Code plugins/MCP state into Hermes.
+- Do not copy Claude Code plugins, MCP state, or credentials into Hermes.
 - Do not forge Busdriver markers.
 - Do not claim hook-runtime equivalence where none exists.
+- Do not treat route preference or adapter proof as production dispatch authority.
