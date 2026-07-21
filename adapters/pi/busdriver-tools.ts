@@ -1,9 +1,25 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { appendFileSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "fs";
-import { dirname, relative, resolve } from "path";
+import { relative, resolve } from "path";
 import { execFileSync } from "child_process";
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
+
+// No `fs` import, deliberately, and this is the whole of the r30 fix. Every path-based call —
+// lstatSync/readFileSync/mkdirSync/openSync — resolves its pathname AGAIN at the moment it acts,
+// so a parent swapped for a symlink after our check redirected the effect out of the repo, and
+// O_NOFOLLOW never helped because it constrains only the last component. Node has no openat(2)
+// (no dir_fd on fs.open, no *at family, no descriptor on fs.Dir), so the traversal cannot be made
+// race-free here at all. It moves to busdriver-fs-broker.py, which has the syscall and walks every
+// component bound to its parent's descriptor. Not importing `fs` is what keeps that true: there is
+// no filesystem call in this file to get the ordering wrong in.
+//
+// r31 finishes the same thought for git. `execFileSync("git", ...)` was PATH-resolved — the
+// ambient PATH chose the binary that then ran against the repo — and argv-shaped, so every call
+// site was one string away from a mutating verb, guarded only by a denylist of env names somebody
+// had to remember to keep complete. Read-only git inspection is a question about the repository
+// root, and the root is the broker's descriptor, so it moves there too: the broker holds the
+// wrapper-authenticated retained git and a fixed table of argv templates, and this file names a
+// VERB. The only child process left in this file is the broker itself.
 
 const AUTHORITY_FLAGS = {
   finalization_allowed: false,
@@ -30,32 +46,11 @@ const FORBIDDEN_MARKER_PARTS = [
   "blueprint-review-passed.local",
 ];
 
-const GIT_ENV_DENYLIST = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_INDEX_FILE",
-  "GIT_COMMON_DIR",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_EXTERNAL_DIFF",
-  "GIT_DIFF_OPTS",
-  "GIT_CONFIG_GLOBAL",
-  "GIT_CONFIG_SYSTEM",
-  "GIT_CONFIG_NOSYSTEM",
-  "GIT_LITERAL_PATHSPECS",
-  "GIT_GLOB_PATHSPECS",
-  "GIT_NOGLOB_PATHSPECS",
-  "GIT_ICASE_PATHSPECS",
-  "GIT_TRACE",
-  "GIT_TRACE2",
-  "GIT_TRACE2_EVENT",
-  "GIT_TRACE2_PERF",
-  "GIT_ASKPASS",
-  "GIT_SSH_COMMAND",
-  "GIT_SSH",
-  "GIT_PROXY_COMMAND",
-  "GIT_EXEC_PATH",
-];
+// GIT_ENV_DENYLIST used to live here: ~24 env names scrubbed before handing the rest of our own
+// environment to git. A denylist over an inherited env is the wrong shape — it has to name every
+// variable that could matter, so the one nobody thought of is inherited — and it is gone with the
+// execFileSync it protected. The broker builds git's whole environment from a fixed table instead
+// (see git_env()), which is an allowlist by construction and cannot be short.
 
 const COMMON_SECRET_PATH = /(^|\/)(\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|\.aws\/credentials|\.aws\/config|\.ssh\/[^/]+|\.docker\/config\.json|(?:gcloud|\.config\/gcloud)\/application_default_credentials\.json|id_rsa|id_ed25519|[^/]*\.(?:pem|key|p12|pfx))(\/|$)/i;
 const GIT_IGNORE_RULE_PATH = /(^|\/)\.gitignore$/i;
@@ -64,17 +59,72 @@ function repoRoot(): string {
   return resolve(process.env.BD_REPO_ROOT || process.cwd());
 }
 
-function hashFile(path: string): string | null {
-  if (!existsSync(path)) return null;
-  const h = createHash("sha256");
-  h.update(readFileSync(path));
-  return h.digest("hex");
+type BrokerRequest =
+  | { op: "read"; root: "repo" | "run"; rel: string }
+  | { op: "write" | "append"; root: "repo" | "run"; rel: string; content: string }
+  | { op: "git"; root: "repo" | "run"; verb: GitVerb; rel: string };
+
+// The verbs the broker will run, and the only git this file can reach. There is no argv here to
+// smuggle a subcommand through: the broker owns the templates, so this side names an intent.
+type GitVerb = "check_ignore" | "status" | "branch" | "head" | "diff" | "diff_name_only" | "diff_stat" | "log";
+
+// Non-git effects contain no child process, so their short deadline bounds a wedged broker. Git
+// gets a separate deadline longer than the Python broker's 120s deadline plus its 5s group reap:
+// killing Python first would skip that cleanup and orphan Git. Neither deadline is caller-tunable.
+const BROKER_TIMEOUT_MS = 5_000;
+const BROKER_GIT_TIMEOUT_MS = 130_000;
+
+// One `python3 -I broker` per effect. A long-lived broker holding the root fd would save the
+// process spawn, but a draft run makes tens of these, not thousands, and a daemon buys a lifecycle
+// and a socket to get wrong. Upgrade if a real run is ever measured to care.
+function broker(request: BrokerRequest): any {
+  const python = process.env.BD_BROKER_PYTHON;
+  const script = process.env.BD_BROKER_SCRIPT;
+  // Default-deny: unconfigured means uncontained, and uncontained is exactly what r30 removed.
+  if (!python || !script) throw new Error("broker_unconfigured");
+  // The broker's env carries the root paths and NOTHING else — it is handed no credential it could
+  // leak, and the roots are named by label in the request so this side cannot widen its own reach.
+  // Every value here was resolved by the trusted parent wrapper. BD_BROKER_GIT is deliberately not
+  // among them any more: naming git's pathname in the environment made the executable the broker
+  // ran a value that a writer of this process's environment could choose. The broker resolves it
+  // from its own frozen root-owned table.
+  const env: Record<string, string> = {};
+  for (const key of ["BD_BROKER_ROOT_REPO", "BD_BROKER_ROOT_RUN"]) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+  let raw: string;
+  try {
+    raw = execFileSync(python, ["-I", script], {
+      input: JSON.stringify(request),
+      encoding: "utf8",
+      env,
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: request.op === "git" ? BROKER_GIT_TIMEOUT_MS : BROKER_TIMEOUT_MS,
+    });
+  } catch {
+    throw new Error("broker_unavailable");
+  }
+  const response = JSON.parse(raw);
+  if (!response || response.ok !== true) throw new Error(String(response?.error || "broker_refused"));
+  return response;
+}
+
+function runRel(abs: string): string {
+  // The event log and the artifact are the adjacent escape: same pathname pattern, same swap, so
+  // they are contained under the run root rather than written by absolute path.
+  const root = process.env.BD_BROKER_ROOT_RUN;
+  if (!root) throw new Error("broker_unconfigured");
+  const rel = relative(root, resolve(abs));
+  if (rel === "" || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
+    throw new Error("run_root_escape");
+  }
+  return rel;
 }
 
 function log(kind: string, payload: Record<string, unknown>) {
   const logPath = process.env.PI_BD_EVENT_LOG || resolve(process.cwd(), ".pi-bd-events.jsonl");
-  mkdirSync(dirname(logPath), { recursive: true });
-  appendFileSync(logPath, JSON.stringify({ ts: Date.now(), kind, ...payload }) + "\n");
+  broker({ op: "append", root: "run", rel: runRel(logPath), content: JSON.stringify({ ts: Date.now(), kind, ...payload }) + "\n" });
 }
 
 function asText(obj: Record<string, unknown>) {
@@ -82,27 +132,21 @@ function asText(obj: Record<string, unknown>) {
 }
 
 function normalizeRel(abs: string, root: string): string {
-  const rel = relative(root, abs).split("\\").join("/");
-  if (rel === "" || rel.startsWith("..") || rel.startsWith("/")) {
+  // No backslash fold. On POSIX `a\b.py` is ONE file whose name contains a backslash; folding it
+  // to `a/b.py` matched it against an allowlist of `a/*.py` the real file was never in — and it
+  // folded the character away before scopeTokenRejected() could ever see it.
+  const rel = relative(root, abs);
+  if (rel === "" || rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
     throw new Error("path_escape");
   }
   return rel;
 }
 
-function assertNoSymlinkEscape(abs: string, rel: string, root: string) {
-  // Symlink refusal is explicit: even an existing final symlink is blocked.
-  const parts = rel.split("/").filter(Boolean);
-  let cur = root;
-  for (const part of parts) {
-    cur = resolve(cur, part);
-    if (existsSync(cur) && lstatSync(cur).isSymbolicLink()) {
-      throw new Error(`symlink_escape_refused:${part}`);
-    }
-  }
-  if (existsSync(abs) && lstatSync(abs).isSymbolicLink()) {
-    throw new Error("symlink_escape_refused:target");
-  }
-}
+// assertNoSymlinkEscape() used to live here: it walked the components with existsSync/lstatSync
+// and then every caller re-resolved the same string. That is the check/use pair itself, and a
+// tighter or repeated version of it is still a pathname check — which is why r30 deletes it rather
+// than hardening it. Symlink refusal is now the broker's, where the check IS the use: the fd it
+// returns is the directory it proved.
 
 function escapeRegExpChar(ch: string): string {
   // `?` is intentionally handled as a single-segment glob wildcard in globToRegExp()
@@ -110,10 +154,11 @@ function escapeRegExpChar(ch: string): string {
   return /[.+^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch;
 }
 
-function safePath(input: string): { abs: string; rel: string } {
+function safePath(input: string): { rel: string } {
+  // Policy only — marker paths, secret paths, ignore-rule freezes. Containment is the broker's:
+  // this returns a repo-relative name, never an absolute path for a caller to act on.
   const root = repoRoot();
-  const abs = resolve(root, input);
-  const rel = normalizeRel(abs, root);
+  const rel = normalizeRel(resolve(root, input), root);
   const relLower = rel.toLowerCase();
   const parts = relLower.split("/");
   if (parts.some((p) => FORBIDDEN_MARKER_PARTS.includes(p))) {
@@ -127,18 +172,30 @@ function safePath(input: string): { abs: string; rel: string } {
   if (GIT_IGNORE_RULE_PATH.test(rel)) {
     throw new Error(`git_ignore_rule_path_blocked:${rel}`);
   }
-  assertNoSymlinkEscape(abs, rel, root);
-  return { abs, rel };
+  return { rel };
+}
+
+// Parity with scope_token_rejected() in the gate and the two draft wrappers. POSIX pathnames are
+// bytes up to a NUL, so LF/CR/VT/FF, the C1 block, U+2028/U+2029 and a backslash are all creatable
+// filename characters that the glob metacharacters read inconsistently. They are refused outright
+// rather than matched: a declared scope is a reviewed list, and no legitimate entry needs one.
+// eslint-disable-next-line no-control-regex
+const SCOPE_FORBIDDEN_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\\]/;
+
+function scopeTokenRejected(value: string): boolean {
+  return SCOPE_FORBIDDEN_CHARS.test(value);
 }
 
 function globToRegExp(glob: string): RegExp {
   let pattern = "";
   for (let i = 0; i < glob.length;) {
     if (glob.slice(i, i + 3) === "**/") {
-      pattern += "(?:.*/)?";
+      pattern += "(?:[\\s\\S]*/)?";
       i += 3;
     } else if (glob.slice(i, i + 2) === "**") {
-      pattern += ".*";
+      // [\s\S]*, not .*: `.` skips newlines, so an exclude of `**/secrets/**` failed to match a
+      // path with an embedded newline. `**` means "any characters", newlines included.
+      pattern += "[\\s\\S]*";
       i += 2;
     } else if (glob[i] === "*") {
       pattern += "[^/]*";
@@ -151,22 +208,37 @@ function globToRegExp(glob: string): RegExp {
       i += 1;
     }
   }
-  return new RegExp(`^${pattern}$`);
+  // JavaScript `$` also matches immediately before a final line terminator. A negative
+  // any-character lookahead is the actual end-of-input assertion, independent of flags.
+  return new RegExp(`^${pattern}(?![\\s\\S])`);
 }
 
-function splitList(value: string | undefined): string[] {
-  return (value || "")
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function sanitizedGitEnv(): Record<string, string | undefined> {
-  const env = { ...process.env };
-  for (const key of GIT_ENV_DENYLIST) {
-    delete env[key];
+// The scope arrives as a JSON array, and the reason is the transport it replaces. A newline-joined
+// list has no way to say "this pattern contains a newline" — so a single declared scope of
+// `safe\n**` did not arrive as one rejected pattern, it arrived as TWO: `safe`, and `**`. The
+// wrapper's own scope_token_rejected() refused the character, and the split then re-admitted it as
+// a separate, unrejected, repo-wide allow. The framing has to be unambiguous BEFORE anything
+// interprets it, and JSON is: a newline inside an element stays inside that element, where
+// scopeTokenRejected() can see it and refuse it.
+function parseScopeList(value: string | undefined): string[] {
+  if (!value) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    // Default-deny: an unparseable scope is not an empty scope, it is an unknown one. Returning []
+    // from here would make pathAllowed() deny everything, which is the direction we want, but the
+    // throw says so out loud rather than leaving it to a caller's convention.
+    throw new Error("scope_transport_invalid");
   }
-  return env;
+  if (!Array.isArray(parsed)) throw new Error("scope_transport_invalid");
+  for (const item of parsed) {
+    if (typeof item !== "string") throw new Error("scope_transport_invalid");
+    // Rejected at the boundary, not at match time: a pattern carrying a control character is a
+    // reviewed list that does not say what it appears to say.
+    if (scopeTokenRejected(item)) throw new Error("scope_pattern_rejected");
+  }
+  return (parsed as string[]).filter((s) => s !== "");
 }
 
 function isCommonSecretPath(rel: string): boolean {
@@ -174,29 +246,37 @@ function isCommonSecretPath(rel: string): boolean {
 }
 
 function isGitIgnored(rel: string): boolean {
-  try {
-    execFileSync("git", ["-c", "core.fsmonitor=false", "check-ignore", "-q", "--", rel], { cwd: repoRoot(), env: sanitizedGitEnv(), stdio: ["ignore", "ignore", "ignore"] });
-    return true;
-  } catch (error: any) {
-    if (error && error.status === 1) return false;
-    throw new Error("git_ignore_check_failed");
-  }
+  // A broker refusal throws, and every caller of this treats a throw as a denial — so an
+  // unanswerable ignore question denies the path rather than admitting it, as it always did.
+  return broker({ op: "git", root: "repo", verb: "check_ignore", rel }).ignored === true;
+}
+
+function scopeMatches(rel: string, pat: string): boolean {
+  // Strict, full-string, and identical for allow and deny patterns alike. Rejection answers false
+  // in BOTH directions, so pathAllowed() rejects the path outright rather than letting a rejected
+  // path read as "nothing denies it, therefore allow it".
+  if (scopeTokenRejected(rel) || scopeTokenRejected(pat)) return false;
+  return rel === pat || globToRegExp(pat).test(rel);
 }
 
 function pathAllowed(rel: string): boolean {
-  const allow = splitList(process.env.PI_BD_ALLOWED_WRITES);
+  if (scopeTokenRejected(rel)) return false;
+  const allow = parseScopeList(process.env.PI_BD_ALLOWED_WRITES);
   if (!allow.length) return false;
-  return allow.some((pat) => rel === pat || globToRegExp(pat).test(rel));
+  return allow.some((pat) => scopeMatches(rel, pat));
 }
 
 function pathDenied(rel: string): boolean {
-  const deny = splitList(process.env.PI_BD_DENIED_WRITES);
-  return deny.some((pat) => rel === pat || globToRegExp(pat).test(rel));
+  const deny = parseScopeList(process.env.PI_BD_DENIED_WRITES);
+  return deny.some((pat) => scopeMatches(rel, pat));
 }
 
-function git(args: string[]): string {
-  const safeArgs = args[0] === "-c" && args[1] === "core.fsmonitor=false" ? args : ["-c", "core.fsmonitor=false", ...args];
-  return execFileSync("git", safeArgs, { cwd: repoRoot(), env: sanitizedGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+function git(verb: GitVerb): string {
+  // `-c core.fsmonitor=false` used to be prepended here, because core.fsmonitor names a command
+  // git runs on index refresh and it is settable from the REPO-LOCAL config — the very repo an
+  // untrusted draft worker just wrote to. It is the broker's fixed argv now, alongside
+  // core.hooksPath and GIT_OPTIONAL_LOCKS, where no caller can forget it.
+  return broker({ op: "git", root: "repo", verb, rel: "" }).output.trim();
 }
 
 function baseEnvelope(tool: string, extra: Record<string, unknown>) {
@@ -217,11 +297,11 @@ function authorityEnvelope() {
 }
 
 function currentBranch(): string {
-  try { return git(["branch", "--show-current"]); } catch { return ""; }
+  try { return git("branch"); } catch { return ""; }
 }
 
 function currentHead(): string {
-  try { return git(["rev-parse", "HEAD"]); } catch { return ""; }
+  try { return git("head"); } catch { return ""; }
 }
 
 export default function(pi: ExtensionAPI) {
@@ -238,7 +318,7 @@ export default function(pi: ExtensionAPI) {
     execute: async () => {
       log("execute", { toolName: "bd_status" });
       let status = "";
-      try { status = git(["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"]); } catch (error: any) { status = `ERROR:${error.message}`; }
+      try { status = git("status"); } catch (error: any) { status = `ERROR:${error.message}`; }
       return {
         content: asText(baseEnvelope("bd_status", {
           ok: true,
@@ -263,21 +343,16 @@ export default function(pi: ExtensionAPI) {
     execute: async (_toolCallId, params: { path: string }) => {
       log("execute", { toolName: "bd_read", path: params.path });
       try {
-        const { abs, rel } = safePath(params.path);
+        const { rel } = safePath(params.path);
         if (isCommonSecretPath(rel)) {
           return { content: asText(baseEnvelope("bd_read", { ok: false, read_only: true, denied: true, reason: "common_secret_path_blocked", path: rel })), details: { denied: true } };
         }
         if (isGitIgnored(rel)) {
           return { content: asText(baseEnvelope("bd_read", { ok: false, read_only: true, denied: true, reason: "gitignored_path_blocked", path: rel })), details: { denied: true } };
         }
-        const stat = lstatSync(abs);
-        if (stat.size > MAX_BD_FILE_BYTES) {
-          return { content: asText(baseEnvelope("bd_read", { ok: false, read_only: true, denied: true, reason: "read_size_limit", path: rel })), details: { denied: true } };
-        }
-        const content = readFileSync(abs, "utf8");
-        if (Buffer.byteLength(content, "utf8") > MAX_BD_FILE_BYTES) {
-          return { content: asText(baseEnvelope("bd_read", { ok: false, read_only: true, denied: true, reason: "read_size_limit", path: rel })), details: { denied: true } };
-        }
+        // The broker enforces the size bound on the descriptor it read, so the stat-then-read pair
+        // that used to bound this is gone with every other pathname round trip.
+        const content = broker({ op: "read", root: "repo", rel }).content;
         return {
           content: asText(baseEnvelope("bd_read", { ok: true, read_only: true, mutation_allowed: false, path: rel, content })),
           details: { path: rel, bytes: Buffer.byteLength(content, "utf8") },
@@ -302,7 +377,7 @@ export default function(pi: ExtensionAPI) {
       log("execute", { toolName: "bd_write_draft", path: params.path, operation_id });
       const mode = process.env.PI_BD_MODE || "readonly";
       try {
-        const { abs, rel } = safePath(params.path);
+        const { rel } = safePath(params.path);
         if (isCommonSecretPath(rel)) {
           return { content: asText(baseEnvelope("bd_write_draft", { ok: false, read_only: false, denied: true, reason: "common_secret_path_blocked", path: rel, operation_id })), details: { denied: true } };
         }
@@ -322,18 +397,12 @@ export default function(pi: ExtensionAPI) {
         if (contentBytes > MAX_BD_FILE_BYTES) {
           return { content: asText(baseEnvelope("bd_write_draft", { ok: false, read_only: false, denied: true, reason: "write_size_limit", path: rel, operation_id, bytes: contentBytes })), details: { denied: true } };
         }
-        const before_hash = hashFile(abs);
-        mkdirSync(dirname(abs), { recursive: true });
-        assertNoSymlinkEscape(abs, rel, repoRoot());
-        const writeFlags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW || 0);
-        let fd: number | null = null;
-        try {
-          fd = openSync(abs, writeFlags, 0o600);
-          writeFileSync(fd, params.content, "utf8");
-        } finally {
-          if (fd !== null) closeSync(fd);
-        }
-        const after_hash = hashFile(abs);
+        // One brokered op, not four pathname round trips: the parent walk, the before hash, the
+        // create/truncate/write and the after hash all happen under descriptors the broker proved
+        // and holds. Both hashes are of the inode it wrote — not of whatever the name resolved to
+        // by the time a second call got there.
+        const written = broker({ op: "write", root: "repo", rel, content: params.content });
+        const { before_hash, after_hash } = written;
         const audit = { toolName: "bd_write_draft", path: rel, operation_id, before_hash, after_hash, bytes: contentBytes };
         log("write_audit", audit);
         return {
@@ -378,20 +447,27 @@ export default function(pi: ExtensionAPI) {
       if (finalizationForbidden.test(controlJoined) || markerForbidden.test(joined) || cmd === "bash" || cmd === "sh") {
         return { content: asText(baseEnvelope("bd_bash", { ok: false, read_only: true, denied: true, reason: "argv_or_finalization_blocked", cmd, args })), details: { denied: true } };
       }
-      const allowedGit = [
-        ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
-        ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv"],
-        ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--name-only"],
-        ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--stat"],
-        ["rev-parse", "HEAD"],
-        ["log", "--oneline"],
+      // The allowlist is now a MAPPING, not a permission slip. It used to decide whether `args`
+      // was safe and then hand that same `args` to execFileSync — so the allowlist had to be
+      // exhaustively right about argv, forever. Here a match only selects a broker verb whose argv
+      // the broker owns; nothing the caller typed is ever executed. An unmatched argv is refused
+      // exactly as before, so the tool contract is unchanged.
+      const allowedGit: Array<{ args: string[]; verb: GitVerb }> = [
+        { args: ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"], verb: "status" },
+        { args: ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv"], verb: "diff" },
+        { args: ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--name-only"], verb: "diff_name_only" },
+        { args: ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--stat"], verb: "diff_stat" },
+        { args: ["rev-parse", "HEAD"], verb: "head" },
+        { args: ["log", "--oneline"], verb: "log" },
       ];
-      const allowed = cmd === "git" && allowedGit.some((pat) => pat.length === args.length && pat.every((v, i) => v === args[i]));
+      const allowed = cmd === "git"
+        ? allowedGit.find((pat) => pat.args.length === args.length && pat.args.every((v, i) => v === args[i]))
+        : undefined;
       if (!allowed) {
         return { content: asText(baseEnvelope("bd_bash", { ok: false, read_only: true, denied: true, reason: "command_not_allowlisted", cmd, args })), details: { denied: true } };
       }
       try {
-        const output = execFileSync(cmd, args, { cwd: repoRoot(), env: sanitizedGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+        const output = git(allowed.verb);
         return { content: asText(baseEnvelope("bd_bash", { ok: true, read_only: true, mutation_allowed: false, cmd, args, output })), details: { output } };
       } catch (error: any) {
         return { content: asText(baseEnvelope("bd_bash", { ok: false, read_only: true, cmd, args, error: error.message })), details: { error: true } };
@@ -442,8 +518,7 @@ export default function(pi: ExtensionAPI) {
         ...AUTHORITY_FLAGS,
       };
       const artifactPath = process.env.PI_BD_ARTIFACT_PATH || resolve(process.cwd(), "pi-result.json");
-      mkdirSync(dirname(artifactPath), { recursive: true });
-      writeFileSync(artifactPath, JSON.stringify(artifact, null, 2) + "\n", "utf8");
+      broker({ op: "write", root: "run", rel: runRel(artifactPath), content: JSON.stringify(artifact, null, 2) + "\n" });
       return { content: asText(baseEnvelope("bd_artifact", { ok: true, read_only: true, mutation_allowed: false, status, artifact_path: artifactPath })), details: { artifact_path: artifactPath } };
     },
   });
