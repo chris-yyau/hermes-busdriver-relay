@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Contract-test-only dependency injection for finalization-readiness.
+
+This file is not installed or referenced by production entrypoints.
+"""
+from pathlib import Path
+import argparse
+import runpy
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+DELIVERY_STATUS_HARNESS = ROOT / "tests" / "fixtures" / "delivery-status-test-harness"
+
+# v16-r33 A: readiness FORWARDED the caller's --*-result-file straight through to its
+# delivery-status child, which made it a second production entrypoint accepting caller-authored
+# evidence — one that laundered the affordance through a child rather than owning it. Production
+# now has neither the flags nor the forwarding; the harness parses them and re-attaches them to the
+# child's argv, where the delivery-status harness (not production) is what honours them.
+#
+# allow_abbrev=False for the same reason as the delivery-status harness: with only these two flags
+# declared, `--pr` is an unambiguous prefix of `--pr-grind-result-file` and argparse would swallow
+# it, so the PR number would silently become a fixture path.
+fixtures = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+fixtures.add_argument("--pr-grind-result-file")
+fixtures.add_argument("--litmus-status-result-file")
+injected, remaining = fixtures.parse_known_args(sys.argv[1:])
+sys.argv[1:] = remaining
+
+ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-finalization-readiness"))
+globals_ = ns["main"].__globals__
+globals_["custom_helper_refusal"] = lambda custom: None
+globals_["FIXTURE_MODE"] = True
+
+_python_child = globals_["python_child"]
+
+
+def _virtual_path(script):
+    return script[0] if isinstance(script, tuple) else script
+
+
+def python_child(script: Path, *args: str) -> "list[str]":
+    """Route the delivery-status child through its own harness, re-attaching the fixture flags.
+
+    A forwarded --*-script only means something to a child that honours it, and production
+    delivery-status refuses every one. The bundled copy readiness authenticated is byte-identical
+    to the repo's, which is exactly what its digest proves — so loading the repo's through the
+    harness runs the same code the bundle holds, with the doubles injected.
+    """
+    virtual = _virtual_path(script)
+    if Path(virtual).name == "hermes-busdriver-delivery-status":
+        forwarded = list(args)
+        if injected.pr_grind_result_file:
+            forwarded += ["--pr-grind-result-file", injected.pr_grind_result_file]
+        if injected.litmus_status_result_file:
+            forwarded += ["--litmus-status-result-file", injected.litmus_status_result_file]
+        return [sys.executable, "-I", str(DELIVERY_STATUS_HARNESS), *forwarded]
+    return _python_child(script, *args)
+
+
+globals_["python_child"] = python_child
+raise SystemExit(ns["main"]())

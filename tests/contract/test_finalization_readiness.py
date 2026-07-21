@@ -1,15 +1,20 @@
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pr_grind_fixtures import bind_github_origin, pr_grind_payload
 
 
 ROOT = Path(__file__).resolve().parents[2]
 READINESS = ROOT / "scripts" / "hermes-busdriver-finalization-readiness"
+# Source-separated, never installed: the only entrypoint that can inject a helper double.
+READINESS_HARNESS = ROOT / "tests" / "fixtures" / "finalization-readiness-test-harness"
 PHASE0_STATUS = ROOT / "scripts" / "hermes-busdriver-status"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 AUTHORITY_KEYS = [
@@ -40,13 +45,11 @@ UNSAFE_BOOLEAN_KEYS = [
     "marker_writes_performed",
     "repo_mutations_performed",
     "safe_to_execute_by_this_helper",
-    "implemented",
-    "retired",
 ]
 
 
-def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False, timeout=timeout)
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 30, env_override: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=False, timeout=timeout, env=env_override)
 
 
 def init_repo(path: Path) -> Path:
@@ -210,11 +213,31 @@ def drift_baseline_fixture(path: Path, plugin: Path) -> Path:
     return path
 
 
+CUSTOM_HELPER_SCRIPT_FLAGS = ("--pr-grind-check-script", "--litmus-status-script", "--agent-balance-plan-script")
+# v16-r33 A: a caller-supplied RESULT file is the same declaration of a double as a caller-named
+# script, so it routes to the harness too. Production no longer parses OR forwards these.
+FIXTURE_RESULT_FLAGS = ("--pr-grind-result-file", "--litmus-status-result-file")
+FIXTURE_ROUTED_FLAGS = CUSTOM_HELPER_SCRIPT_FLAGS + FIXTURE_RESULT_FLAGS
+
+
+def readiness_entrypoint(extra: tuple[str, ...]) -> Path:
+    """Naming a helper script IS declaring a fixture double, so these helpers route accordingly.
+
+    v16-r32 item 1: production readiness has no path to a caller-named executable — not its own
+    --agent-balance-plan-script, and not the ones it forwards to delivery-status. The doubles live
+    behind the source-separated harness instead. Tests that mean to exercise the production
+    refusal build their argv against READINESS directly and never pass through here.
+    """
+    if any(flag in extra for flag in FIXTURE_ROUTED_FLAGS):
+        return READINESS_HARNESS
+    return READINESS
+
+
 def invoke(repo: Path, plugin: Path, user_config: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], dict]:
     cp = run(
         [
             sys.executable,
-            str(READINESS),
+            str(readiness_entrypoint(extra)),
             "--repo",
             str(repo),
             "--plugin-root",
@@ -331,12 +354,14 @@ def test_clean_idle_repo_reports_no_finalization_candidate_despite_stale_litmus(
     assert data["delivery_status"]["decision"]["stage"] == "no_local_changes"
     assert data["delivery_status"]["repo"]["dirty"] is False
     assert data["readiness"]["ready"] is False
-    assert data["readiness"]["status"] == "no_finalization_candidate"
+    # r24: the idle-repo rule still strips litmus_status_not_fresh; the fixture provenance
+    # blocker is a separate concern and survives it.
+    assert data["readiness"]["status"] == "blocked"
     assert "litmus_status_not_fresh" in data["delivery_status"]["decision"]["blockers"]
     assert "litmus_status_not_fresh" not in data["readiness"]["blockers"]
+    assert data["readiness"]["blockers"] == ["fixture_evidence_not_authoritative"]
     assert data["handoff_envelope"]["ready_for_handoff"] is False
-    assert data["handoff_envelope"]["readiness_status"] == "no_finalization_candidate"
-    assert data["decision"]["status"] == "no_finalization_candidate"
+    assert data["decision"]["status"] == "blocked"
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
     assert_no_positive_finalization_authority(data)
@@ -358,10 +383,10 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
     assert guardrails["schema"] == "hermes-busdriver-finalization-guardrails/v0"
     assert guardrails["version"] == 0
     assert guardrails["read_only"] is True
-    assert guardrails["status"] == "non_mutating_relay_only"
+    assert guardrails["status"] == "gated_delivery_mode_executor"
     assert contract["schema"] == "hermes-busdriver-finalization-contract-status/v0"
     assert contract["read_only"] is True
-    assert contract["current_policy"] == "non_mutating_relay_only"
+    assert contract["current_policy"] == "gated_delivery_mode_executor"
     assert contract["contract_adrs"] == [
         "ADRs/0005-finalization-authority-integration-contract.md",
         "ADRs/0006-programmatic-dual-review-marker-interop.md",
@@ -369,10 +394,11 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
     assert contract["related_design_adrs"] == ["ADRs/0006-programmatic-dual-review-marker-interop.md"]
     assert contract["summary"] == {
         "remaining_work_count": 5,
-        "policy_blocked_count": 5,
+        "policy_blocked_count": 3,
+        "implemented_count": 2,
         "retired_count": 0,
         "capability_allowed_count": 0,
-        "finalization_flags_policy": "non_mutating_relay_only",
+        "finalization_flags_policy": "gated_delivery_mode_executor",
     }
     assert data["finalization_contract_status_returncode"] == 0
     assert data["handoff_envelope"]["finalization_contract_status"] == contract
@@ -391,9 +417,19 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
     }
     assert contract_by_id["programmatic-litmus-pre-pr-dual-review"]["contract_adrs"] == contract["contract_adrs"]
     assert contract_by_id["busdriver-marker-interop"]["contract_adrs"] == contract["contract_adrs"]
-    assert all(item["status"] == "policy_blocked" for item in work)
+    guardrail_by_id = {item["id"]: item for item in work}
+    assert guardrail_by_id["deliver-mutating-executor"]["status"] == "implemented_gated"
+    assert guardrail_by_id["deliver-mutating-executor"]["implemented"] is True
+    assert guardrail_by_id["mutating-final-result-envelope"]["status"] == "implemented_gated"
+    assert guardrail_by_id["mutating-final-result-envelope"]["implemented"] is True
+    assert all(
+        item["status"] == "policy_blocked"
+        for item in work
+        if item["id"] not in {"deliver-mutating-executor", "mutating-final-result-envelope"}
+    )
     assert all(item["safe_to_execute_by_this_helper"] is False for item in work)
     assert set(guardrails["unsupported_mutating_operations"]) == {
+        "pre_pr_review",
         "commit",
         "push",
         "pr_create",
@@ -816,11 +852,14 @@ def test_readiness_handoff_propagates_litmus_status_evidence(tmp_path: Path):
     cp, data = invoke(repo, plugin, user_config, "--litmus-status-result-file", str(litmus))
 
     assert cp.returncode == 0, cp.stderr
-    assert data["readiness"]["status"] == "ready_for_commit_or_pr_handoff"
+    # r24: fixture-sourced evidence blocks handoff, but the litmus summary still propagates
+    # verbatim into the envelope — now WITH the provenance the summary alone dropped.
+    assert data["readiness"]["status"] == "blocked"
     assert "litmus_pre_pr_stale_or_missing" in data["readiness"]["warnings"]
     litmus_summary = data["delivery_status"]["litmus_status"]["summary"]
     handoff_litmus = data["handoff_envelope"]["evidence"]["litmus_status"]
     assert handoff_litmus == litmus_summary
+    assert data["handoff_envelope"]["evidence"]["litmus_status_source"] == "fixture"
     assert handoff_litmus["decision"]["status"] == "stale_or_missing"
     assert handoff_litmus["decision"]["finalization_allowed"] is False
     assert handoff_litmus["decision"]["marker_write_allowed"] is False
@@ -1280,22 +1319,28 @@ def test_readiness_handoff_includes_non_dispatchable_relay_role_warning(tmp_path
 
 
 def test_clean_pr_grind_fixture_generates_merge_handoff_but_no_merge_authority(tmp_path: Path):
-    repo = init_repo(tmp_path / "repo")
+    repo = bind_github_origin(init_repo(tmp_path / "repo"))
     plugin = fake_busdriver(tmp_path / "busdriver")
     user_config = fake_user_config(tmp_path / "busdriver.json")
     pr_result = tmp_path / "pr-clean.json"
-    pr_result.write_text(json.dumps({"status": "clean", "clean": True, "checks": {"failed": 0, "pending": 0}, "actionable_comments": []}))
+    pr_result.write_text(json.dumps(pr_grind_payload()))
 
     cp, data = invoke(repo, plugin, user_config, "--pr", "7", "--pr-grind-result-file", str(pr_result))
 
     assert cp.returncode == 0, cp.stderr
-    assert data["readiness"]["status"] == "ready_for_merge_handoff"
+    # r24: a --pr-grind-result-file is a test diagnostic. However well it validates, it is
+    # content its own author wrote, so it must never reach ready_for_merge_handoff. The PR
+    # summary stays readable as a diagnostic and provenance is stated in the envelope.
+    assert data["readiness"]["status"] == "blocked"
+    assert "fixture_evidence_not_authoritative" in data["readiness"]["blockers"]
     assert data["readiness"]["target"] == "merge"
-    assert data["handoff_envelope"]["ready_for_handoff"] is True
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
     assert data["handoff_envelope"]["pr"]["number"] == "7"
     assert data["handoff_envelope"]["pr"]["status"] == "clean"
+    assert data["handoff_envelope"]["evidence"]["pr_grind_source"] == "fixture"
+    assert data["handoff_envelope"]["evidence"]["fixture_sourced_evidence"] is True
     assert data["decision"] == {
-        "status": "ready_for_merge_handoff",
+        "status": "blocked",
         "reason": "read_only_finalization_readiness",
         **{key: False for key in ["finalization_allowed", "commit_allowed", "push_allowed", "pr_allowed", "merge_allowed", "deploy_allowed", "release_allowed", "publish_allowed", "marker_write_allowed"]},
     }
@@ -1305,11 +1350,11 @@ def test_clean_pr_grind_fixture_generates_merge_handoff_but_no_merge_authority(t
 
 
 def test_non_clean_pr_fixture_reports_delivery_blocker(tmp_path: Path):
-    repo = init_repo(tmp_path / "repo")
+    repo = bind_github_origin(init_repo(tmp_path / "repo"))
     plugin = fake_busdriver(tmp_path / "busdriver")
     user_config = fake_user_config(tmp_path / "busdriver.json")
     pr_result = tmp_path / "pr-wait.json"
-    pr_result.write_text(json.dumps({"status": "wait", "clean": False, "checks": {"failed": 0, "pending": 1}, "actionable_comments": []}))
+    pr_result.write_text(json.dumps(pr_grind_payload(status="wait", checks={"failed": 0, "pending": 1})))
 
     cp, data = invoke(repo, plugin, user_config, "--pr", "7", "--pr-grind-result-file", str(pr_result))
 
@@ -1318,6 +1363,54 @@ def test_non_clean_pr_fixture_reports_delivery_blocker(tmp_path: Path):
     assert data["readiness"]["status"] == "blocked"
     assert "pr_checks_or_reviewer_bots_pending" in data["readiness"]["blockers"]
     assert_no_finalization_authority(data["readiness"])
+
+
+def test_forged_pr_grind_fixture_cannot_reach_merge_handoff(tmp_path: Path):
+    # r23: readiness inherits the delivery decision, so an unvalidated clean claim would be
+    # laundered all the way into `ready_for_merge_handoff` — the last state before a human or a
+    # finalizer is told the PR is good to merge.
+    repo = bind_github_origin(init_repo(tmp_path / "repo-forged-merge-handoff"))
+    plugin = fake_busdriver(tmp_path / "busdriver-forged-merge-handoff")
+    user_config = fake_user_config(tmp_path / "busdriver-forged.json")
+    pr_result = tmp_path / "pr-forged.json"
+    pr_result.write_text(json.dumps({"status": "clean", "clean": True}))
+
+    cp, data = invoke(repo, plugin, user_config, "--pr", "7", "--pr-grind-result-file", str(pr_result))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["status"] == "blocked"
+    assert data["readiness"]["status"] != "ready_for_merge_handoff"
+    assert data["readiness"]["ready"] is False
+    assert "pr_grind_result_invalid" in data["readiness"]["blockers"]
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
+
+
+def test_stale_finalization_lock_blocks_handoff_readiness(tmp_path: Path):
+    # r23: `acquire` refuses a stale lock until manual recovery, so readiness over one promises a
+    # handoff that will fail closed with `finalization_lock_not_acquired`.
+    repo = init_repo(tmp_path / "repo-stale-lock-readiness")
+    plugin = fake_busdriver(tmp_path / "busdriver-stale-lock-readiness")
+    user_config = fake_user_config(tmp_path / "busdriver-stale-lock.json")
+    relay_state = tmp_path / "relay-state-stale-lock"
+    assert run([
+        sys.executable, str(LOCK), "acquire", "--repo", str(repo),
+        "--state-dir", str(relay_state), "--operation", "finalization", "--ttl-seconds", "1",
+    ]).returncode == 0
+    time.sleep(1.5)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--relay-state-dir", str(relay_state))
+
+    assert cp.returncode == 0, cp.stderr
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] == "blocked"
+    assert "relay_finalization_lock_stale_manual_recovery" in data["readiness"]["blockers"]
+    assert data["delivery_status"]["finalization_lock"]["stale_for_repo_count"] == 1
+    assert data["delivery_status"]["finalization_lock"]["active_for_repo_count"] == 0
+    assert_no_finalization_authority(data["readiness"])
+    assert_no_finalization_authority(data["decision"])
 
 
 def test_pr_supplied_without_blockers_gets_pr_not_clean_next_action():
@@ -1425,14 +1518,14 @@ def test_default_delivery_status_timeout_covers_forwarded_pr_grind_and_litmus_bu
     args = mod["parse_args"]()
     captured = {"cmd": [], "timeout": 0}
 
-    def fake_run_json(cmd: list[str], timeout: int) -> tuple[dict, int]:
+    def fake_run_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict, int]:
         captured["cmd"] = cmd
         captured["timeout"] = timeout
         return {"ok": True}, 0
 
     mod["load_delivery_status"].__globals__["run_json"] = fake_run_json
 
-    mod["load_delivery_status"](args)
+    mod["load_delivery_status"](args, Path("/private/copy/hermes-busdriver-delivery-status"))
 
     assert "--pr-grind-timeout" in captured["cmd"]
     assert "--litmus-status-timeout" in captured["cmd"]
@@ -1462,14 +1555,14 @@ def test_delivery_status_timeout_covers_and_forwards_nested_phase0_status_budget
     args = mod["parse_args"]()
     captured = {"cmd": [], "timeout": 0}
 
-    def fake_run_json(cmd: list[str], timeout: int) -> tuple[dict, int]:
+    def fake_run_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict, int]:
         captured["cmd"] = cmd
         captured["timeout"] = timeout
         return {"ok": True}, 0
 
     mod["load_delivery_status"].__globals__["run_json"] = fake_run_json
 
-    mod["load_delivery_status"](args)
+    mod["load_delivery_status"](args, Path("/private/copy/hermes-busdriver-delivery-status"))
 
     assert captured["cmd"][captured["cmd"].index("--phase0-status-timeout") + 1] == "17"
     assert captured["timeout"] == args.pr_grind_timeout + args.litmus_status_timeout + args.phase0_status_timeout + 30
@@ -1500,14 +1593,14 @@ def test_delivery_status_timeout_covers_and_forwards_nested_relay_role_budget(mo
     args = mod["parse_args"]()
     captured = {"cmd": [], "timeout": 0}
 
-    def fake_run_json(cmd: list[str], timeout: int) -> tuple[dict, int]:
+    def fake_run_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict, int]:
         captured["cmd"] = cmd
         captured["timeout"] = timeout
         return {"ok": True}, 0
 
     mod["load_delivery_status"].__globals__["run_json"] = fake_run_json
 
-    mod["load_delivery_status"](args)
+    mod["load_delivery_status"](args, Path("/private/copy/hermes-busdriver-delivery-status"))
 
     assert captured["cmd"][captured["cmd"].index("--relay-role-timeout") + 1] == expected_timeout
     assert captured["timeout"] == args.pr_grind_timeout + args.litmus_status_timeout + args.relay_role_timeout + 30
@@ -1547,3 +1640,851 @@ def test_active_finalization_lock_blocks_handoff_readiness(tmp_path: Path):
     assert data["delivery_status"]["finalization_lock"]["active_for_repo_count"] == 1
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
+
+
+def test_phase0_status_child_argv_disables_the_external_resolver(tmp_path):
+    # r20 defense in depth: readiness reads Phase-0 status; it never needs resolver bytes run.
+    import runpy
+
+    mod = runpy.run_path(str(READINESS))
+    captured: dict[str, Any] = {}
+
+    def fake_run_json(cmd: list[str], timeout: int, *, credentials: bool = False) -> tuple[dict, int]:
+        captured["cmd"] = list(cmd)
+        return {}, 0
+
+    mod["load_phase0_status"].__globals__["run_json"] = fake_run_json
+    args = __import__("argparse").Namespace(
+        repo=str(tmp_path), state_dir=".claude", relay_state_dir=None, plugin_root=None,
+        user_config=None, relay_config=None, drift_baseline=None, phase0_status_timeout=60,
+    )
+
+    private_copy = tmp_path / "private" / "hermes-busdriver-status"
+    mod["load_phase0_status"](args, private_copy)
+
+    # The script is now a retained private copy of the authenticated bytes rather than the source
+    # path (v16-r26A item 1), so assert the identity and the flags, not the source pathname.
+    assert captured["cmd"][0] == "/usr/bin/python3"
+    assert captured["cmd"][1] == "-I"
+    assert Path(captured["cmd"][2]).name == PHASE0_STATUS.name
+    assert Path(captured["cmd"][2]) != PHASE0_STATUS
+    assert captured["cmd"][3:] == [
+        "--repo", str(tmp_path), "--state-dir", ".claude",
+        "--operation", "repo-mutation", "--no-external-resolver",
+    ]
+
+
+# --- v16-r21: ambient execution containment ---
+
+def test_finalization_readiness_child_env_is_allowlisted_and_drops_loader_injection(monkeypatch):
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+    for key, value in {
+        "PYTHONPATH": "/tmp/evil-pythonpath",
+        "PYTHONHOME": "/tmp/evil-pythonhome",
+        "BASH_ENV": "/tmp/evil-bash-env",
+        "ENV": "/tmp/evil-env",
+        "ZDOTDIR": "/tmp/evil-zdotdir",
+        "LD_PRELOAD": "/tmp/evil.so",
+        "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+        "GIT_DIR": "/tmp/evil-git-dir",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    env = ns["child_env"]()
+
+    assert env["PATH"] == ns["CONTAINED_PATH"]
+    for key in ("PYTHONPATH", "PYTHONHOME", "BASH_ENV", "ENV", "ZDOTDIR", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES"):
+        assert key not in env
+    assert not [key for key in env if key.startswith("GIT_")]
+
+
+def test_finalization_readiness_python_children_run_isolated(monkeypatch, tmp_path):
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+    captured: list[list[str]] = []
+
+    def fake_run_json(cmd, timeout, *, credentials=False):
+        captured.append(list(cmd))
+        return {"ok": False, "error": "stub"}, 1
+
+    monkeypatch.setitem(ns["main"].__globals__, "run_json", fake_run_json)
+    monkeypatch.setattr(sys, "argv", ["hermes-busdriver-finalization-readiness", "--repo", str(tmp_path)])
+    try:
+        ns["main"]()
+    except SystemExit:
+        pass
+
+    assert captured, "no child commands were dispatched"
+    for cmd in captured:
+        assert cmd[0] == "/usr/bin/python3", f"child not launched via frozen production Python: {cmd}"
+        assert cmd[1] == "-I", f"child not isolated with -I: {cmd}"
+
+
+def test_finalization_readiness_run_json_returns_rc_127_on_launch_oserror(tmp_path):
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+    not_a_program = tmp_path / "file.txt"
+    not_a_program.write_text("x\n")
+
+    payload, code = ns["run_json"]([str(not_a_program)], timeout=10)
+
+    assert code == 127
+    assert payload["ok"] is False
+
+
+def test_handoff_envelope_never_carries_a_release_token(tmp_path: Path):
+    """r24 H1: the envelope is designed to be handed to another actor as evidence.
+
+    Publishing the holder's release capability alongside that evidence hands every downstream
+    reader — and every log and transcript the envelope lands in — the ability to release it.
+    """
+    repo = init_repo(tmp_path / "repo-token")
+    plugin = fake_busdriver(tmp_path / "busdriver-token")
+    user_config = fake_user_config(tmp_path / "busdriver-token.json")
+    relay_state = tmp_path / "relay-state-token"
+    acquired = json.loads(run([
+        sys.executable, str(LOCK), "acquire", "--repo", str(repo),
+        "--state-dir", str(relay_state), "--operation", "finalization",
+    ]).stdout)
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--relay-state-dir", str(relay_state))
+
+    assert acquired["token"] not in cp.stdout
+    lock_evidence = data["handoff_envelope"]["evidence"]["finalization_lock"]
+    assert lock_evidence["active_for_repo_count"] == 1
+    assert "token" not in lock_evidence["active_for_repo"][0]
+
+
+# --- v16-r25 B5: readiness forwards GitHub tokens to children, so its tails must redact ---
+
+
+def test_readiness_tail_redacts_and_bounds():
+    ns = load_readiness_module()
+    secret = "ghp_" + "r" * 36
+
+    out = ns["tail"]("child failed: " + secret + " " + "x" * 9000)
+
+    assert secret not in out
+    assert len(out) <= 4000
+
+
+@pytest.mark.parametrize("prefix_len", [0, 3990, 3999, 4000, 4200])
+def test_readiness_secrets_redacted_across_truncation_boundary(prefix_len: int):
+    ns = load_readiness_module()
+    secret = "ghp_" + "s" * 36
+
+    out = ns["tail"]("p" * prefix_len + " " + secret + " " + "z" * 50)
+
+    assert "ghp_" not in out
+
+
+def test_readiness_tail_redacts_credential_env_values(monkeypatch):
+    ns = load_readiness_module()
+    monkeypatch.setenv("GH_ENTERPRISE_TOKEN", "opaque-readiness-credential")
+
+    assert "opaque-readiness-credential" not in ns["tail"]("boom: opaque-readiness-credential")
+
+
+def test_readiness_child_failure_envelope_redacts_stderr(tmp_path: Path, monkeypatch):
+    """run_json copies child stderr into the envelope; r24 bounded it but never redacted."""
+    ns = load_readiness_module()
+    secret = "ghp_" + "p" * 36
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.stderr.write('auth failed {secret}')\n"
+        "print('{}')\n"
+        "sys.exit(3)\n"
+    )
+
+    data, code = ns["run_json"]([sys.executable, str(script)], 30)
+
+    assert code == 3
+    assert secret not in json.dumps(data)
+
+
+# --- v16-r26A item 1: helper authentication + balance-plan fixture provenance ---
+
+
+VALID_BALANCE_PLAN_SOURCE = (
+    "#!/usr/bin/env python3\n"
+    "import json, os\n"
+    "print(json.dumps({\n"
+    "    'schema': 'hermes-busdriver-agent-balance-plan/v0',\n"
+    "    'ok': True,\n"
+    "    'read_only': True,\n"
+    "    'execution': {'subprocess_dispatch_called': False, 'repo_mutations_performed': False},\n"
+    "    'saw_token': os.environ.get('GH_TOKEN'),\n"
+    "}))\n"
+)
+
+
+def _custom_plan(tmp_path: Path, source: str = VALID_BALANCE_PLAN_SOURCE) -> Path:
+    plan = tmp_path / "custom-agent-balance-plan"
+    plan.write_text(source)
+    plan.chmod(0o755)
+    return plan
+
+
+def test_forged_valid_balance_plan_cannot_clear_blockers_or_reach_handoff(tmp_path: Path):
+    """A caller-named script that merely PRINTS the right shape is provenance-free.
+
+    r25 accepted it as authoritative: structural validation proves shape, never origin, so a
+    forged-but-valid plan cleared `agent_balance_plan_unavailable` and let readiness reach a
+    ready handoff state. This is the same demotion delivery-status already applies to a
+    caller-named --pr-grind-check-script.
+    """
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(repo, plugin, user_config, "--agent-balance-plan-script", str(_custom_plan(tmp_path)))
+
+    plan = data["agent_balance_plan"]
+    assert plan["source"] == "fixture"
+    assert plan["authoritative"] is False
+    assert "agent_balance_plan_fixture_not_authoritative" in data["readiness"]["blockers"]
+    assert data["readiness"]["ready"] is False
+    assert data["readiness"]["status"] != "ready_for_commit_or_pr_handoff"
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert_no_positive_finalization_authority(data)
+
+
+def test_custom_balance_plan_script_receives_no_github_credentials(tmp_path: Path):
+    """child_env() forwarded GH_TOKEN to an arbitrary caller-named executable."""
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    env = dict(os.environ)
+    env["GH_TOKEN"] = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    cp = run(
+        [
+            sys.executable, str(READINESS_HARNESS), "--repo", str(repo), "--plugin-root", str(plugin),
+            "--user-config", str(user_config),
+            "--agent-balance-plan-script", str(_custom_plan(tmp_path)),
+        ],
+        env_override=env,
+    )
+    data = json.loads(cp.stdout)
+
+    assert data["agent_balance_plan"].get("saw_token") in (None, "[REDACTED]"), "GH_TOKEN reached a custom script"
+    assert "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" not in cp.stdout
+
+
+def test_custom_balance_plan_successful_json_is_redacted(tmp_path: Path):
+    """r25 redacted only failure tails; a successful custom payload was emitted verbatim."""
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+    leaky = _custom_plan(tmp_path, (
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({\n"
+        "    'schema': 'hermes-busdriver-agent-balance-plan/v0',\n"
+        "    'ok': True,\n"
+        "    'read_only': True,\n"
+        "    'note': 'pushed via https://" + "x-access-token:" + "ghp_BBBBBBBBBBBBBBBBBBBBBBBB@github.com/o/r',\n"
+        "}))\n"
+    ))
+
+    cp, data = invoke(repo, plugin, user_config, "--agent-balance-plan-script", str(leaky))
+
+    assert "ghp_BBBBBBBBBBBBBBBBBBBBBBBB" not in cp.stdout, "custom plan JSON leaked a token"
+
+
+def test_default_helpers_are_digest_authenticated(tmp_path: Path):
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+
+    for relative in (
+        "scripts/hermes-busdriver-delivery-status",
+        "scripts/hermes-busdriver-status",
+        "scripts/hermes-busdriver-finalization-contract-status",
+        "scripts/hermes-busdriver-agent-balance-plan",
+    ):
+        assert relative in ns["TRUSTED_READINESS_HELPER_DIGESTS"], f"{relative} is not pinned"
+
+
+def test_default_helper_integrity_failure_fails_closed(tmp_path: Path, monkeypatch):
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+    # @contextmanager wraps the function, so its __globals__ is contextlib's; reach the original.
+    globals_ = ns["authenticated_helper"].__wrapped__.__globals__
+    monkeypatch.setitem(
+        globals_,
+        "TRUSTED_READINESS_HELPER_DIGESTS",
+        {key: "0" * 64 for key in ns["TRUSTED_READINESS_HELPER_DIGESTS"]},
+    )
+
+    with pytest.raises(OSError):
+        with ns["authenticated_helper"]("scripts/hermes-busdriver-agent-balance-plan"):
+            pass
+
+
+def test_default_balance_plan_executes_retained_bytes_not_swappable_private_path(monkeypatch, tmp_path: Path):
+    """Readiness default helper execution identity is retained bytes, not its private pathname."""
+    import runpy
+
+    ns = runpy.run_path(str(READINESS))
+    helper_globals = ns["authenticated_helper"].__wrapped__.__globals__
+    run_globals = ns["run_json"].__globals__
+    trusted_root = tmp_path / "trusted-readiness-root"
+    relative = "scripts/hermes-busdriver-agent-balance-plan"
+    trusted = trusted_root / relative
+    trusted.parent.mkdir(parents=True)
+    payload = {"schema": ns["AGENT_BALANCE_PLAN_SCHEMA"], "ok": True, "read_only": True}
+    trusted.write_text("import json\nprint(json.dumps(%r))\n" % payload)
+    trusted.chmod(0o500)
+    attacker_ran = tmp_path / "readiness-balance-plan-attacker-ran"
+    attacker = (
+        "import json, pathlib\n"
+        f"pathlib.Path({str(attacker_ran)!r}).write_text('pwned')\n"
+        f"print(json.dumps({payload!r}))\n"
+    )
+
+    monkeypatch.setitem(helper_globals, "ROOT", trusted_root)
+    monkeypatch.setitem(helper_globals, "TRUSTED_READINESS_HELPER_DIGESTS", {relative: hashlib.sha256(trusted.read_bytes()).hexdigest()})
+    monkeypatch.setitem(run_globals, "trusted_executable_path", lambda name: Path(sys.executable) if name == "python3" else pytest.fail(f"unexpected trusted executable {name}"))
+    original_run_bounded = run_globals["run_bounded"]
+
+    def swap_retained_path_then_exec(cmd, *args, **kwargs):
+        for value in cmd:
+            candidate = Path(str(value))
+            if candidate.name == "hermes-busdriver-agent-balance-plan" and candidate.exists():
+                candidate.unlink()
+                candidate.write_text(attacker)
+                candidate.chmod(0o500)
+                break
+        return original_run_bounded(cmd, *args, **kwargs)
+
+    monkeypatch.setitem(run_globals, "run_bounded", swap_retained_path_then_exec)
+    args = __import__("argparse").Namespace(agent_balance_plan_script=None, agent_balance_plan_timeout=10)
+
+    with ns["authenticated_helper"](relative) as retained:
+        plan, rc = ns["load_agent_balance_plan"](args, retained)
+
+    assert rc == 0
+    assert plan["ok"] is True
+    assert not attacker_ran.exists(), "readiness executed attacker-replaced default helper path"
+
+
+# --- v16-r27 item 1: forwarding a caller-named helper must not forward the credentials with it ---
+
+SENTINEL_TOKEN = "ghp_" + "s3nt1nel" * 5
+
+
+def env_dump_helper(path: Path, dump: Path, stdout: str) -> Path:
+    """A custom helper that records the environment it was handed, then prints a valid payload."""
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os\n"
+        f"open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))\n"
+        f"print({stdout!r})\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def credential_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update({key: SENTINEL_TOKEN for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")})
+    return env
+
+
+def assert_no_credentials(dump: Path) -> None:
+    assert dump.exists(), "the custom helper never ran, so the test proves nothing"
+    handed = json.loads(dump.read_text())
+    leaked = sorted(key for key, value in handed.items() if SENTINEL_TOKEN in value)
+    assert not leaked, f"custom helper received GitHub credentials via {leaked}"
+
+
+def invoke_with_credentials(repo: Path, plugin: Path, user_config: Path, *extra: str) -> dict:
+    cp = run(
+        [sys.executable, str(readiness_entrypoint(extra)), "--repo", str(repo), "--plugin-root", str(plugin), "--user-config", str(user_config), *extra],
+        timeout=120,
+        env_override=credential_env(),
+    )
+    return json.loads(cp.stdout)
+
+
+def test_custom_balance_plan_script_receives_no_credentials(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    dump = tmp_path / "balance-env.json"
+    script = env_dump_helper(
+        tmp_path / "balance",
+        dump,
+        json.dumps({"schema": "hermes-busdriver-agent-balance-plan/v0", "ok": True, "read_only": True}),
+    )
+
+    invoke_with_credentials(
+        repo, fake_busdriver(tmp_path / "busdriver"), fake_user_config(tmp_path / "busdriver.json"),
+        "--agent-balance-plan-script", str(script),
+    )
+
+    assert_no_credentials(dump)
+
+
+def test_forwarded_custom_pr_grind_check_script_receives_no_credentials(tmp_path: Path):
+    """Readiness hands delivery-status the credentials AND the caller's `--pr-grind-check-script`.
+
+    The boundary has to hold at the point of execution, not at the point of forwarding: r26's
+    delivery-status passed its own credential-bearing environment straight to that arbitrary
+    executable, so readiness leaked the operator's token through a child it never ran itself.
+    """
+    repo = init_repo(tmp_path / "repo")
+    bind_github_origin(repo)
+    dump = tmp_path / "pr-env.json"
+    script = env_dump_helper(tmp_path / "checker", dump, json.dumps(pr_grind_payload(pr=7, status="clean")))
+
+    invoke_with_credentials(
+        repo, fake_busdriver(tmp_path / "busdriver"), fake_user_config(tmp_path / "busdriver.json"),
+        "--pr", "7", "--pr-grind-check-script", str(script),
+    )
+
+    assert_no_credentials(dump)
+
+
+def test_forwarded_custom_litmus_status_script_receives_no_credentials(tmp_path: Path):
+    repo = init_repo(tmp_path / "repo")
+    dump = tmp_path / "litmus-env.json"
+    script = env_dump_helper(
+        tmp_path / "litmus",
+        dump,
+        json.dumps({"schema": "hermes-busdriver-litmus-status/v0", "ok": True, "read_only": True, "decision": {"status": "stale_or_missing"}}),
+    )
+
+    invoke_with_credentials(
+        repo, fake_busdriver(tmp_path / "busdriver"), fake_user_config(tmp_path / "busdriver.json"),
+        "--litmus-status-script", str(script),
+    )
+
+    assert_no_credentials(dump)
+
+
+# --- v16-r28 item 2: caller-selected helpers are fixture doubles, never live children ---
+
+
+def _spawn_witness(path: Path, witness: Path, payload: dict) -> Path:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        f"open({str(witness)!r}, 'w').write('spawned')\n"
+        f"print(json.dumps({payload!r}))\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+READINESS_CUSTOM_HELPERS = {
+    "agent_balance_plan": ("--agent-balance-plan-script",),
+    "pr_grind_check": ("--pr", "7", "--pr-grind-check-script"),
+    "litmus_status": ("--litmus-status-script",),
+}
+
+
+@pytest.mark.parametrize("helper", sorted(READINESS_CUSTOM_HELPERS))
+def test_readiness_never_spawns_a_custom_helper_in_live_mode(tmp_path: Path, helper: str):
+    """The gate must precede the spawn, including for the flags readiness only forwards."""
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "plugin")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    witness = tmp_path / f"{helper}-spawned"
+    script = _spawn_witness(tmp_path / helper, witness, {"ok": True})
+    *flags, script_flag = READINESS_CUSTOM_HELPERS[helper]
+
+    cp = run(
+        [
+            sys.executable, str(READINESS), "--repo", str(repo), "--plugin-root", str(plugin),
+            "--user-config", str(user_config), *flags, script_flag, str(script),
+        ]
+    )
+
+    assert cp.returncode == 2, "production readiness accepted a caller-selected helper"
+    error = json.loads(cp.stdout)
+    assert error["ok"] is False
+    assert error["error"] == "custom_helper_execution_not_permitted"
+    assert not witness.exists(), "the caller's program was spawned by production readiness"
+
+
+def test_production_readiness_refuses_custom_helper_under_every_flag_combination(tmp_path: Path):
+    """r32 item 1: no argv reaches a caller-named executable through production readiness.
+
+    r28's --fixture-mode is the specific bypass this closes, so it leads the list — but the point
+    is that production offers no opt-in at all, not that one particular spelling is refused.
+    """
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "plugin")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+
+    for index, combination in enumerate((["--fixture-mode"], ["--fixture-mode=true"], ["--pretty"], [])):
+        witness = tmp_path / f"combination-{index}-spawned"
+        script = _spawn_witness(tmp_path / f"probe-{index}", witness, {"ok": True})
+        cp = run(
+            [
+                sys.executable, str(READINESS), "--repo", str(repo), "--plugin-root", str(plugin),
+                "--user-config", str(user_config), *combination,
+                "--agent-balance-plan-script", str(script),
+            ]
+        )
+
+        assert cp.returncode == 2, f"production readiness accepted {combination}: {cp.stdout}"
+        assert not witness.exists(), f"the caller's program was spawned under {combination}"
+
+
+def test_production_readiness_cli_does_not_expose_fixture_mode(tmp_path: Path):
+    """The flag is gone from the surface, not merely ignored — argparse must not know it."""
+    cp = run([sys.executable, str(READINESS), "--help"])
+
+    assert cp.returncode == 0, cp.stderr
+    assert "--fixture-mode" not in cp.stdout
+
+
+def test_readiness_harness_reaches_the_delivery_status_double(tmp_path: Path):
+    """A forwarded helper flag only means something to a child that honours it.
+
+    Production forwards nothing (it refuses the flags outright), so this proves the harness's
+    child routing works end to end — the double runs, and the child envelope says it was a
+    fixture run.
+    """
+    repo = init_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "plugin")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    witness = tmp_path / "forwarded-spawned"
+    script = _spawn_witness(tmp_path / "litmus", witness, {"ok": True})
+
+    cp, data = invoke(
+        repo, plugin, user_config, "--litmus-status-script", str(script)
+    )
+
+    assert witness.exists(), "the forwarded double never ran"
+    assert data["delivery_status"]["fixture_mode"] is True
+
+
+def test_readiness_fixture_mode_is_authority_negative(tmp_path: Path):
+    """Fixture mode buys the double the right to run, never the right to be believed."""
+    repo = init_uncommitted_repo(tmp_path / "repo")
+    plugin = fake_busdriver(tmp_path / "busdriver")
+    user_config = fake_user_config(tmp_path / "busdriver.json")
+    (repo / "work.txt").write_text("draft\n")
+
+    cp, data = invoke(
+        repo, plugin, user_config,
+        "--agent-balance-plan-script", str(_custom_plan(tmp_path)),
+    )
+
+    assert data["fixture_mode"] is True
+    assert data["agent_balance_plan"]["source"] == "fixture"
+    assert data["agent_balance_plan"]["authoritative"] is False
+    assert "agent_balance_plan_fixture_not_authoritative" in data["readiness"]["blockers"]
+    assert data["readiness"]["ready"] is False
+    assert data["handoff_envelope"]["ready_for_handoff"] is False
+    assert_no_positive_finalization_authority(data)
+
+
+# --- v16-r33g / r32 High 1: every child object crosses one recursive sanitizing funnel ---
+#
+# These are deliberately in-process (runpy + injected children) rather than end-to-end `invoke()`:
+# three pinned helpers are stale on this branch, so every subprocess path fails closed at
+# `readiness_runtime_integrity_failed` and could never witness a redaction either way.
+
+OPAQUE_CAPABILITY = "opaque-enterprise-capability-value-no-shape"
+SHAPED_CAPABILITY = "ghp_" + "H" * 36
+
+
+def hostile_capabilities(sentinel: str) -> dict[str, Any]:
+    """Every shape an unknown capability can arrive in, none of which a value pattern can see."""
+    return {
+        "token": sentinel,
+        "access_token": sentinel,
+        "secret": sentinel,
+        "secrets": [sentinel, {"credential": sentinel}],
+        "credentials": {"deeply": {"nested": {"capability": sentinel}}},
+        "authorization": sentinel,
+        "api_key": sentinel,
+        "password": sentinel,
+        "private_key": sentinel,
+        "unknown_extra_field": {"list_of": [{"token": sentinel}, [{"secret": sentinel}]]},
+    }
+
+
+def echoing_child(path: Path, payload: dict[str, Any], *, exit_code: int = 0, stderr: str = "") -> Path:
+    """A child that authors its own stdout — the whole reason its payload is untrusted."""
+    path.write_text(
+        "import json, sys\n"
+        f"sys.stderr.write({stderr!r})\n"
+        f"print(json.dumps({payload!r}))\n"
+        f"sys.exit({exit_code})\n"
+    )
+    return path
+
+
+def sanitizer(name: str = "sanitized_payload"):
+    return load_readiness_module()[name]
+
+
+# --- the funnel itself ---
+
+
+@pytest.mark.parametrize("sentinel", [OPAQUE_CAPABILITY, SHAPED_CAPABILITY])
+def test_sanitizer_redacts_capability_shaped_keys_at_every_depth(sentinel: str):
+    """Unknown nested data must not bypass the funnel — including keys nobody enumerated."""
+    out = sanitizer()(hostile_capabilities(sentinel))
+
+    assert sentinel not in json.dumps(out)
+    assert out["token"] == "[REDACTED]"
+    assert out["unknown_extra_field"]["list_of"][0]["token"] == "[REDACTED]"
+    assert out["credentials"] == "[REDACTED]"
+
+
+def test_sanitizer_redacts_an_opaque_capability_duplicated_under_ordinary_keys():
+    """The collect-before-strip requirement, and the whole reason one pass is not enough.
+
+    An opaque credential matches no shape pattern. The KEY that names it is the only thing that
+    identifies it — so stripping that key first destroys the evidence needed to find the copies
+    sitting under keys that name nothing.
+    """
+    out = sanitizer()({
+        "config": {"token": OPAQUE_CAPABILITY},
+        "note": f"worker failed while using {OPAQUE_CAPABILITY}",
+        "trace": ["ordinary", [{"detail": OPAQUE_CAPABILITY}]],
+    })
+
+    assert OPAQUE_CAPABILITY not in json.dumps(out)
+    assert out["config"]["token"] == "[REDACTED]"
+    assert out["note"] == "worker failed while using [REDACTED]"
+    assert out["trace"][1][0]["detail"] == "[REDACTED]"
+
+
+def test_sanitizer_keeps_facts_about_capabilities_typed():
+    """`token_redacted: true` is a fact ABOUT a capability, not one: no secret fits in one bit."""
+    out = sanitizer()({"token_redacted": True, "has_secret": False, "token": None, "value_length": 12})
+
+    assert out["token_redacted"] is True
+    assert out["has_secret"] is False
+    assert out["token"] is None
+    assert out["value_length"] == 12
+
+
+def test_sanitizer_keeps_authority_negative_capability_counts_typed():
+    """`capability_allowed_count: 0` is the contract's authority-negative signal, not a credential.
+
+    It is capability-shaped by key and numeric by value, so the funnel must carve it out explicitly
+    or the envelope loses the one field that says no capability is allowed.
+    """
+    out = sanitizer()({
+        "summary": {"capability_allowed_count": 0, "remaining_work_count": 5},
+        "capability_allowed": False,
+    })
+
+    assert out["summary"]["capability_allowed_count"] == 0
+    assert out["summary"]["remaining_work_count"] == 5
+    assert out["capability_allowed"] is False
+
+
+def test_sanitizer_keeps_required_typed_and_decision_fields_useful():
+    """The envelope's own contract fields must survive the funnel intact and typed."""
+    envelope = {
+        "schema": "hermes-busdriver-finalization-readiness/v0",
+        "read_only": True,
+        "ok": False,
+        "relay_capabilities": {"gate": {"path": "/x/scripts/hermes-busdriver-gate", "available": True}},
+        "readiness": {"ready": False, "status": "blocked", "blockers": ["phase0_status_failed"]},
+        "decision": {"status": "blocked", "merge_allowed": False},
+        "delivery_status_returncode": 0,
+    }
+
+    assert sanitizer()(envelope) == envelope, "the funnel rewrote a field the envelope's readers depend on"
+
+
+def test_sanitizer_redacts_our_own_credential_env_values_under_unknown_keys(monkeypatch):
+    """An opaque env credential matches no shape pattern, but we know our own value."""
+    monkeypatch.setenv("GH_TOKEN", "an-opaque-enterprise-credential-value")
+
+    out = sanitizer()({"unknown": {"nested": ["remote: rejected using an-opaque-enterprise-credential-value"]}})
+
+    assert "an-opaque-enterprise-credential-value" not in json.dumps(out)
+
+
+def test_sanitizer_is_bounded_against_a_hostile_depth_bomb():
+    """A child authors this structure, so its depth is the child's choice, not ours."""
+    bomb: dict[str, Any] = {"token": OPAQUE_CAPABILITY}
+    for _ in range(400):
+        bomb = {"nest": bomb}
+
+    out = sanitizer()(bomb)
+
+    assert OPAQUE_CAPABILITY not in json.dumps(out)
+
+
+# --- ingestion boundary: run_json is the single funnel every child crosses ---
+
+
+@pytest.mark.parametrize("sentinel", [OPAQUE_CAPABILITY, SHAPED_CAPABILITY])
+def test_run_json_sanitizes_a_hostile_child_payload(tmp_path: Path, sentinel: str):
+    """Every load_* helper reaches its child through run_json, so the guard belongs there."""
+    payload = {"schema": "x/v0", "ok": True, "read_only": True, **hostile_capabilities(sentinel)}
+    child = echoing_child(tmp_path / "child.py", payload)
+
+    data, rc = load_readiness_module()["run_json"]([sys.executable, str(child)], 10)
+
+    assert rc == 0
+    assert sentinel not in json.dumps(data)
+    assert data["schema"] == "x/v0"
+    assert data["ok"] is True
+    assert data["read_only"] is True
+
+
+def test_run_json_sanitizes_the_invalid_json_error_path(tmp_path: Path):
+    """The rejected payload is the one most likely to be hostile, and it is echoed as a diagnostic."""
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import sys\n"
+        f"sys.stdout.write('not json, token: {OPAQUE_CAPABILITY} {SHAPED_CAPABILITY}')\n"
+        f"sys.stderr.write('boom {SHAPED_CAPABILITY}')\n"
+        "sys.exit(3)\n"
+    )
+
+    data, rc = load_readiness_module()["run_json"]([sys.executable, str(child)], 10)
+
+    assert rc == 3
+    assert data["error"] == "invalid_json"
+    assert SHAPED_CAPABILITY not in json.dumps(data)
+    assert OPAQUE_CAPABILITY not in json.dumps(data)
+
+
+def test_run_json_sanitizes_a_nonzero_child_that_still_returned_json(tmp_path: Path):
+    """rc != 0 rewrites ok/returncode/stderr onto the child's own object — which is still untrusted."""
+    payload = {"schema": "x/v0", "ok": True, "detail": {"token": SHAPED_CAPABILITY}}
+    child = echoing_child(tmp_path / "child.py", payload, exit_code=2, stderr=f"fail {SHAPED_CAPABILITY}")
+
+    data, rc = load_readiness_module()["run_json"]([sys.executable, str(child)], 10)
+
+    assert rc == 2
+    assert data["ok"] is False
+    assert data["returncode"] == 2
+    assert SHAPED_CAPABILITY not in json.dumps(data)
+
+
+# --- final envelope / stdout boundary ---
+
+
+def readiness_stdout(monkeypatch, capsys, children: dict[str, Any] | None = None, raise_os_error: str | None = None):
+    """Run main() in-process over injected children, returning its parsed stdout.
+
+    load_all() is the seam: it owns the authenticated bundle, which is exactly what a stale pin
+    makes unavailable, so doubling it is what keeps this test about redaction.
+    """
+    mod = load_readiness_module()
+    monkeypatch.setattr(sys, "argv", [str(READINESS), "--repo", "/tmp/repo"])
+    children = children or {}
+
+    def fake_load_all(args):
+        if raise_os_error is not None:
+            raise OSError(raise_os_error)
+        return (
+            (children.get("delivery", {"schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True}), 0),
+            (children.get("phase0", {"status_schema": "hermes-busdriver-status/v0", "ok": True}), 0),
+            (children.get("contract", {"schema": "hermes-busdriver-finalization-contract-status/v0", "read_only": True, "ok": True}), 0),
+            (children.get("plan", {"schema": "hermes-busdriver-agent-balance-plan/v0", "read_only": True, "ok": True}), 0),
+        )
+
+    mod["main"].__globals__["load_all"] = fake_load_all
+    mod["main"]()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("sentinel", [OPAQUE_CAPABILITY, SHAPED_CAPABILITY])
+@pytest.mark.parametrize("child", ["delivery", "phase0", "contract", "plan"])
+def test_main_stdout_never_carries_any_child_capability(monkeypatch, capsys, child: str, sentinel: str):
+    """r32 High 1: a fully-bound child payload with one extra nested `token` was printed raw."""
+    base = {
+        "delivery": {"schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True},
+        "phase0": {"status_schema": "hermes-busdriver-status/v0", "ok": True},
+        "contract": {"schema": "hermes-busdriver-finalization-contract-status/v0", "read_only": True, "ok": True},
+        "plan": {"schema": "hermes-busdriver-agent-balance-plan/v0", "read_only": True, "ok": True},
+    }
+    base[child] = {**base[child], **hostile_capabilities(sentinel)}
+
+    data = readiness_stdout(monkeypatch, capsys, {child: base[child]})
+
+    assert sentinel not in json.dumps(data)
+    assert data["schema"] == "hermes-busdriver-finalization-readiness/v0"
+    assert data["read_only"] is True
+    assert_no_positive_finalization_authority(data)
+
+
+def test_main_stdout_redacts_a_capability_one_child_named_and_another_duplicated(monkeypatch, capsys):
+    """Cross-child duplication: only the child that NAMES the value can identify it.
+
+    delivery-status embeds its own phase-0 view, so the same opaque bytes genuinely do arrive twice
+    — once under a key that names them, once under a key that says nothing. Stripping the naming
+    key at ingestion is what leaves the second copy unfindable unless what was learned is retained.
+    """
+    data = readiness_stdout(monkeypatch, capsys, {
+        "delivery": {
+            "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+            "lock": {"token": OPAQUE_CAPABILITY},
+        },
+        "phase0": {
+            "status_schema": "hermes-busdriver-status/v0", "ok": True,
+            "active_markers": {"preview": f"marker says {OPAQUE_CAPABILITY}"},
+        },
+    })
+
+    assert OPAQUE_CAPABILITY not in json.dumps(data)
+
+
+def test_main_stdout_sanitizes_the_runtime_integrity_error_path(monkeypatch, capsys):
+    """The failure that fires when a pin is stale still prints an OS message we did not author."""
+    data = readiness_stdout(monkeypatch, capsys, raise_os_error=f"helper_digest_invalid token={SHAPED_CAPABILITY}")
+
+    assert SHAPED_CAPABILITY not in json.dumps(data)
+    assert data["ok"] is False
+    assert data["readiness"]["ready"] is False
+    assert_no_positive_finalization_authority(data)
+
+
+def test_main_stdout_keeps_the_contract_summary_counts_typed_and_useful(monkeypatch, capsys):
+    """Sanitizing must not cost the reader the authority-negative counters it exists to publish."""
+    data = readiness_stdout(monkeypatch, capsys, {
+        "contract": {
+            "schema": "hermes-busdriver-finalization-contract-status/v0", "read_only": True, "ok": True,
+            "summary": {"capability_allowed_count": 0, "remaining_work_count": 5, "policy_blocked_count": 3},
+        },
+    })
+
+    summary = data["finalization_contract_status"]["summary"]
+    assert summary["capability_allowed_count"] == 0
+    assert summary["remaining_work_count"] == 5
+    assert summary["policy_blocked_count"] == 3
+
+
+@pytest.mark.parametrize("sentinel", [OPAQUE_CAPABILITY, SHAPED_CAPABILITY])
+def test_handoff_envelope_never_carries_child_capabilities(sentinel: str):
+    """The handoff envelope re-projects child objects, so it is a second place to leak them."""
+    mod = load_readiness_module()
+    args = type("Args", (), {"target": "auto", "pr": None})()
+    delivery = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": "/tmp/repo", "dirty": True},
+        "litmus_status": {"summary": {"markers": hostile_capabilities(sentinel)}},
+    }
+    phase0 = {"status_schema": "hermes-busdriver-status/v0", "ok": True, "active_markers": hostile_capabilities(sentinel)}
+    ready = mod["readiness"](args, delivery, phase0, {"ok": True}, {"ok": True})
+
+    envelope = mod["sanitized_payload"](
+        mod["handoff_envelope"](args, delivery, phase0, ready, {"ok": True}, {"ok": True}, {}, {})
+    )
+
+    assert sentinel not in json.dumps(envelope)
