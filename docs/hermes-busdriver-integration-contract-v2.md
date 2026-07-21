@@ -210,7 +210,7 @@ Before Hermes can use any launcher for repo-changing work, the launcher must pro
 
 If this cannot be proven, Hermes may use the launcher only for read-only or non-mutating operations.
 
-For v1 draft launchers, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`. The later `busdriver-relay` skill supersedes this contract for one operator-level case: when the user explicitly asks Hermes to complete the whole delivery, Hermes may run branch/commit/push/PR/merge only through Hermes Delivery Mode with litmus/pre-PR plus pr-grind-equivalent checks. Deploy/release/publish and raw repo-mutating `codex exec` remain forbidden.
+For v1 draft launchers, Hermes must not directly run `git commit`, `git push`, `gh pr create`, `gh pr merge`, deploy, release, publish, or raw repo-mutating `codex exec`. The later `busdriver-relay` skill supersedes this contract only for an operation with no active blocker. Production Pi/OpenCode dispatch is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; caller-supplied verifier execution by `verifier_containment_unavailable`; pre-PR review by `isolated_review_runtime_unavailable` before delivery-status or lock handling; push by `atomic_push_base_binding_unavailable`; PR creation by `atomic_pr_create_binding_unavailable`; and merge by `atomic_merge_base_binding_unavailable`. Direct commands must not bypass those guards. Deploy/release/publish and raw repo-mutating `codex exec` remain forbidden.
 
 ## 10. Direct Command Ban
 

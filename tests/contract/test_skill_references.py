@@ -72,6 +72,8 @@ PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
     REFERENCE_DIR / "pr118-skill-sync-delivery-lessons.md"
 )
 LOCK_CLI_USAGE_PITFALLS_REFERENCE = REFERENCE_DIR / "lock-cli-usage-pitfalls.md"
+OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE = REFERENCE_DIR / "opencode-fallback-proof-audit-lessons.md"
+GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE = REFERENCE_DIR / "gated-finalization-executor-opencode-lessons.md"
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -154,7 +156,8 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             '"relay.litmus.reviewer": ["codex"]',
             '"relay.pr.backstop": ["claude-code"]',
             "Authority constraints remain false for all router/status roles",
-            "Use Pi as the primary implementation draft worker",
+            "Pi remains the preferred future implementation route, but production dispatch is currently blocked",
+            "agent_containment_and_credential_broker_unavailable",
             "primary-controller agent",
         ],
         RELAY_ROUTER_ROLE_POLICY_REFERENCE: [
@@ -333,7 +336,8 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "not through the ResourceLoader itself" in reference_text
     assert "Launch Pi with built-in mutating tools disabled" in reference_text
     assert "Only after the in-repo schema/wrapper/smoke/contract tests pass" in reference_text
-    assert "Since the user has confirmed Pi as the chosen tool-harness direction" in reference_text
+    assert "Pi is preferred route metadata but production dispatch remains non-programmatic" in reference_text
+    assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "bd_bash` must be argv-only and allowlist-only" in reference_text
     assert "Any allowed `git status` form must inject `-c core.fsmonitor=false`" in reference_text
     assert "Any allowed `git diff` form must include `--no-ext-diff` and `--no-textconv`" in reference_text
@@ -341,12 +345,12 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "avoid double Busdriver workflow" in reference_text
     assert "Use `pi --mode json`" in reference_text
     assert "gated draft runtime candidate" in reference_text
-    assert "The formal `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` gated draft launcher has now passed" in reference_text
+    assert "historical `hermes-busdriver-agent-draft → preflight → Pi adapter → postflight` fixture passed" in reference_text
     assert "Still not validated:" in reference_text
     assert "hermes-busdriver-agent-draft --agent custom" in reference_text
-    assert "generic OpenCode-under-Hermes-gate" in reference_text
-    assert "configured-but-non-programmatic for Busdriver-plugin fallback/comparison" in reference_text
-    assert "OpenCode comparison remains optional future evidence" in reference_text
+    assert "generic OpenCode fixture" in reference_text
+    assert "configured-but-non-programmatic for production dispatch" in reference_text
+    assert "OpenCode comparison remains optional historical evidence" in reference_text
     assert "by explicitly selecting `--agent summary`" not in reference_text
     assert "A formal `hermes-busdriver-gate preflight → Pi → postflight` launcher." not in reference_text
     assert "$SPACIOUS_RUNTIME_VOLUME/.hermes-runtime/pi-busdriver-smoke/" in reference_text
@@ -364,12 +368,14 @@ def test_pi_adapter_implementation_lessons_are_durable_skill_reference():
     assert "Pi adapter implementation-specific workflow lessons" in skill_text
     assert "separate git worktree for the Pi adapter slice" in reference_text
     assert "Implementation belongs in the Hermes relay repo, not Pi upstream/source" in reference_text
-    assert "A successful Pi draft result should be `needs_busdriver_review`" in reference_text
+    assert "Superseded for production execution" in reference_text
+    assert "agent_containment_and_credential_broker_unavailable" in reference_text
+    assert "A future successful Pi draft result would still be `needs_busdriver_review`" in reference_text
     assert "`bd_bash` should be argv-only and allowlist-only" in reference_text
     assert "`bd_write_draft` should enforce repo-root containment" in reference_text
-    assert "Add fake-Pi tests before real Pi smoke" in reference_text
-    assert "hermes-busdriver-agent-draft --agent pi" in reference_text
-    assert "hermes-busdriver-agent-smoke --agent pi" in reference_text
+    assert "Fake-Pi tests remain useful only as fixture provenance" in reference_text
+    assert "parser and authority-negative production responses" in reference_text
+    assert "do not prove production descendant containment, credential brokering, or dispatch authority" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
@@ -381,7 +387,8 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
 
     assert "references/coding-workflow-authority-map-v0.1.md" in skill_text
     assert "implementation.primary.current            = Pi" in reference_text
-    assert "OpenCode lane = configured fallback/comparison route" in reference_text
+    assert "OpenCode lane = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked." in reference_text
+    assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
     assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in reference_text
@@ -450,9 +457,21 @@ def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
     references = {
         FULL_ROLE_MAP_DISPATCHABILITY_REFERENCE: [
             "Resolver-ready is not the same as dispatchable",
-            "OpenCode fallback/comparison roles need non-dispatchable metadata",
-            "opencode_adapter_not_verified",
+            "OpenCode fallback/comparison roles stay non-dispatchable until the complete production safety proof exists",
+            "agent_containment_and_credential_broker_unavailable",
             "After repo skill-source merges, check installed skill drift",
+        ],
+        OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE: [
+            "OpenCode fallback proof audit lessons",
+            "Requirements before any future promotion",
+            "every reusable authority flag false",
+            "configured fallback/comparison **route**, not a production programmatic lane",
+        ],
+        GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE: [
+            "Gated finalization executor + OpenCode fallback lessons",
+            "per-operation authority surface",
+            "Do not raw-write `.claude/*` trusted markers",
+            "update all status surfaces in the same slice",
         ],
         FULL_ROLE_MAP_RESOLVER_SLICE_REFERENCE: [
             "Do not stop at resolver-known subset restoration",
@@ -706,3 +725,14 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
         if reference == PR78_SKILL_SYNC_PRE_PR_REFERENCE:
             assert "/Volumes/" not in reference_text
             assert "~/.claude/plugins" not in reference_text
+
+
+def test_git_observation_skill_keeps_submodules_visible():
+    sources = (
+        SKILL,
+        REFERENCE_DIR / "git-observation-sandbox-lessons.md",
+    )
+    for source in sources:
+        text = source.read_text()
+        assert "--ignore-submodules=none" in text
+        assert "--ignore-submodules=all" not in text

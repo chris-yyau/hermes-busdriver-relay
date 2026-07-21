@@ -122,13 +122,14 @@ direct MCP/plugin routing · any claim that Hermes bare-shell execution is gate-
 This is a **public** repo (`chris-yyau/hermes-busdriver-relay`) running the full helmet
 pipeline. CI lives in `.github/workflows/` (tracked):
 
-- **`tests.yml`** — `test` job runs the contract suite (`pytest tests/contract`) on push/PR;
-  push-only `compliance` job emits an SBOM (Syft) + Trivy license/vuln scans. **Codecov is
+- **`tests.yml`** — `test` job runs the slice-1 stack-portable AST/core-surface smoke on push/PR;
+  the full contract suite remains separate exact-tree delivery authority. The push-only
+  `compliance` job emits an SBOM (Syft) + Trivy license/vuln scans. **Codecov is
   N/A by design** — subprocess contract tests aren't line-traced, so the contract assertions
   are the signal, not a coverage %.
 - **`security.yml`** — backstop scanners on push/PR: Semgrep (Code security), Checkov
-  (IaC misconfig), Zizmor + SHA-pin check (Actions security), Trivy (Dependency CVEs). A
-  `changes` job gates them so they skip cleanly on irrelevant PRs (skipped = passing).
+  (IaC misconfig), Zizmor + SHA-pin check (Actions security), Trivy (Dependency CVEs).
+  All four required scanner jobs run on every pull request; a skipped scanner is not passing evidence.
 - **`scorecard.yml`** — weekly OpenSSF Scorecard (`publish_results: true`).
 - **`pinact.yml`** — auto-pins actions to full SHA on push to `main`.
 - **`dependabot.yml`** + **`dependabot-auto-merge.yml`** — weekly github-actions + pip

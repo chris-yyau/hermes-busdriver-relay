@@ -15,15 +15,17 @@ It is **not** a Busdriver clone and must not vendor Claude plugins, MCP configs,
 ## Boundary
 
 ```text
-Hermes = intake, Phase 0 discovery, JIT source reads, read-only status, non-mutating draft/gate/handoff envelopes, notification
-Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, execution, commits, PRs, merges
+Hermes = intake, Phase 0 discovery, JIT source reads, read-only status, non-finalizing draft/gate/handoff envelopes, notification, explicit gated Delivery Mode execution
+Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, trusted marker semantics, canonical finalization policy
 ```
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
 
-Current status: the read-only/non-mutating relay surface is complete for the current policy scope, including advisory pre-PR dual-review evidence classification, recursive fail-closed authority checks, machine-readable finalization guardrails whose remaining-work rows report `status=policy_blocked`, a machine-readable finalization contract status/capability matrix, embedded contract-status evidence inside finalization-readiness so downstream consumers do not need a second helper call, a read-only balanced agent work planning envelope for one gated mutating draft lane plus parallel read-only review/status lanes, and strict delivery-status child-envelope validation before finalization-readiness can produce handoff-ready evidence. Delivery-status now emits a top-level `read_only: true` contract marker, and finalization-readiness fails closed with `delivery_status_schema_invalid` when the child envelope has the wrong schema, is not read-only, or carries a non-boolean `ok`. Finalization-readiness embeds balance-plan output as validated advisory evidence only; it still does not dispatch agents or grant programmatic execution authority. Remaining finalization surfaces (mutating commit/push/PR/merge executor/envelope, mutating PR-grind fix loop, programmatic dual review, and marker interop/writes) are intentionally policy-blocked unless a stronger Busdriver-approved integration surface is explicitly added later. ADR 0005 documents the future finalization authority integration contract required before any of those surfaces can be implemented; ADR 0006 is a non-mutating design/spike pointer for programmatic dual-review and marker-interop contracts only.
+Current status: the read-only/status relay surface is complete, draft launchers remain non-finalizing, and explicit Hermes Delivery Mode has narrow parser/result-envelope surfaces for `pre-pr-review`, `commit`, `push`, `pr-create`, and `merge`. Parser exposure is not dispatchability. Production Pi/OpenCode draft dispatch is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; functional adapter execution remains available only through non-installed test harnesses. Caller-supplied verifier execution is `policy_blocked` by `verifier_containment_unavailable`. `pre-pr-review` is `policy_blocked` by `isolated_review_runtime_unavailable` before delivery-status, repository/state/lock, artifact, credential, or trusted-writer handling. `push` is `policy_blocked` by `atomic_push_base_binding_unavailable`, `pr-create` by `atomic_pr_create_binding_unavailable`, and `merge` by `atomic_merge_base_binding_unavailable`. Delivery-status still emits a top-level `read_only: true` contract marker; finalization-readiness remains a read-only handoff helper with advisory evidence only. Hermes still must not raw-write `.claude/*` trusted markers, bypass any blocker with direct Git/GitHub commands, or treat a draft/test harness as finalization authority.
 
 ## Contents
+
+Current policy authority: [coding workflow authority map](docs/coding-workflow-authority-map.md).
 
 ```text
 ADRs/                                      Lightweight architecture decisions
@@ -32,6 +34,8 @@ ADRs/0005-finalization-authority-integration-contract.md
 ADRs/0006-programmatic-dual-review-marker-interop.md
                                            Non-mutating programmatic dual-review / marker-interop design spike
 ADRs/0007-pi-tool-harness-adapter.md       Pi target-state draft-only tool-harness adapter boundary
+ADRs/0008-gated-delivery-executor-and-opencode-adapter.md
+                                           Gated Delivery Mode executor and OpenCode adapter proof
 docs/coding-workflow-authority-map.md      Cross-agent authority boundary map v0.1
 docs/CURRENT_STATUS.md                     Current completion/verification state
 docs/hermes-busdriver-integration-contract-v2.md
@@ -43,15 +47,17 @@ scripts/hermes-busdriver-status            Read-only status probe
 scripts/hermes-busdriver-relay-role        Read-only relay equivalent role resolver
 scripts/hermes-busdriver-lock              Hermes-owned single-flight lock
 scripts/hermes-busdriver-runtime-check     H13 hook-runtime checker
-scripts/hermes-busdriver-gate              Equivalent preflight/postflight gate runner
-scripts/hermes-busdriver-agent-draft       Generic draft agent launcher
-scripts/pi/run-pi-busdriver-draft          Pi constrained tool-harness adapter wrapper
+scripts/hermes-busdriver-gate              State checker; production agent/verifier dispatch blocked
+scripts/hermes-busdriver-agent-draft       Fail-closed draft parser; production agent dispatch blocked
+scripts/pi/run-pi-busdriver-draft          Pi adapter contract wrapper; production launch blocked
+scripts/opencode/run-opencode-busdriver-draft
+                                           OpenCode adapter contract wrapper; production launch blocked
 adapters/pi/                               Pi Busdriver-shaped tools and result schema
 scripts/hermes-busdriver-agent-balance-plan
                                            Read-only balanced agent lane planning envelope
-scripts/hermes-busdriver-agent-smoke       Optional real-agent adapter smoke
+scripts/hermes-busdriver-agent-smoke       Parser/authority-negative agent smoke
 scripts/hermes-busdriver-delivery-status   Read-only Delivery Mode status envelope
-scripts/hermes-busdriver-deliver           Fail-closed verify-only Delivery Mode dispatcher + run status lookup
+scripts/hermes-busdriver-deliver           Operation-specific dispatcher; verifier/push/PR-create/merge blocked
 scripts/hermes-busdriver-litmus-status     Read-only litmus / pre-PR marker freshness status
 scripts/hermes-busdriver-finalization-readiness
                                            Read-only finalization handoff envelope
@@ -61,6 +67,7 @@ scripts/hermes-busdriver-relay-brief      Read-only compact roadmap/status brief
 scripts/hermes-busdriver-pr-grind-check    Read-only PR-grind readiness checker
 scripts/hermes-busdriver-pr-grind-loop     Read-only bounded PR-grind polling loop
 scripts/hermes-busdriver-smoke             Safe smoke runner
+scripts/check-required-checks.sh           Required-check lock verifier
 tests/contract/                            Contract tests
 ```
 
@@ -97,7 +104,7 @@ scripts/hermes-busdriver-lock status --pretty
 scripts/hermes-busdriver-lock release --repo /path/to/repo --operation repo-mutation --token <token>
 ```
 
-Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo. Use operation `finalization` for explicit finalization handoff/Delivery Mode single-flight coordination; read-only delivery-status/finalization-readiness report an active per-repo `finalization` lock as a blocker and still keep all finalization authority false.
+Locks live under `~/.hermes/busdriver-relay/locks` by default, not inside `.claude/` or the target repo. Release always requires the original token; there is no force bypass. Release atomically retires the current pathname to a non-active tombstone, revalidates the moved token/generation, and guarantees no recursive pathname deletion; a non-cooperative replacement is restored or preserved. Use operation `finalization` for explicit finalization handoff/Delivery Mode single-flight coordination; read-only delivery-status/finalization-readiness report an active per-repo `finalization` lock as a blocker and still keep all finalization authority false.
 
 ### Hook-runtime equivalence check
 
@@ -108,45 +115,42 @@ scripts/hermes-busdriver-runtime-check \
   --pretty
 ```
 
-This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result for the current relay. Bare-shell mutating finalization remains policy-blocked unless a stronger Busdriver-approved equivalence/finalization surface is explicitly added later.
+This is a read-only H13 checker. Normal Hermes execution should report `mutating_launcher_allowed: false`; that is the safe expected result for the current relay. Bare-shell mutating finalization remains blocked; explicit mutating work must use the gated Delivery Mode executor or Busdriver/Claude.
 
-### Equivalent gate runner
+### Equivalent gate runner production status
 
 ```bash
 BASELINE="$HOME/.hermes/busdriver-relay/gates/example.baseline.json"
 
+# Expected production result: nonzero / blocked. This is a state-policy probe,
+# not authorization to launch a worker.
 scripts/hermes-busdriver-gate preflight \
   --plugin-root /path/to/busdriver \
   --repo /path/to/repo \
   --baseline-file "$BASELINE" \
   --scope-include 'src/**'
-
-# Run Pi in constrained draft mode here. Other implementation agents require separate adapter proof.
-
-scripts/hermes-busdriver-gate postflight \
-  --repo /path/to/repo \
-  --baseline-file "$BASELINE" \
-  --verifier 'tests=uvx --from pytest pytest -q'
 ```
 
-The gate runner is the first Hermes-side equivalent gate layer. Passing v1 gates allows agent implementation draft work only. It explicitly keeps `commit_allowed`, `push_allowed`, `pr_allowed`, `merge_allowed`, and `deploy_allowed` false.
+The production gate performs state checks but deliberately returns a blocked agent decision with `agent_containment_and_credential_broker_unavailable`; it does not authorize or launch Pi/OpenCode. Production caller-supplied verifier execution is likewise non-dispatchable under `verifier_containment_unavailable`. Non-installed test harnesses exercise the adapter and verifier contracts without creating a production unlock. Commit, push, PR, merge, and deploy authority remains false.
 
-### Draft agent launcher
+### Draft agent launcher production status
 
 ```bash
+# Expected production result: nonzero / blocked before worker or credential handling.
 scripts/hermes-busdriver-agent-draft \
   --plugin-root /path/to/busdriver \
   --repo /path/to/repo \
   --agent pi \
   --prompt-file /path/to/task.md \
   --scope-include 'src/**' \
-  --verifier 'tests=uvx --from pytest pytest -q' \
   --pretty
 ```
 
-Currently `--agent pi` is the normal constrained draft lane: built-in Pi tools are disabled, only `bd_*` tools are exposed, and the run must emit `pi-result.json` with all authority flags false. `noop` and `custom` are for tests. Codex remains available only as a legacy/exception override, not the default implementation fallback.
+The Pi and OpenCode adapter contracts are implemented and exercised only through non-installed test harnesses. Production `--agent pi`, `--agent opencode`, and `noop` probes stop immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`. Schema, scope, authority-negative, executable-pin, and reconciliation tests therefore prove adapter behavior, not production containment or dispatch capability. Codex/custom mutation routes are absent.
 
-A successful run means `status=needs_busdriver_review`. It may leave a working-tree diff, but it does not allow commit/push/PR/merge/deploy. It acquires a Hermes-owned `agent-draft` lock, runs gate preflight, runs the agent under a best-effort PATH guard, runs gate postflight, releases the lock, and writes artifacts under `~/.hermes/busdriver-relay/agent-runs/`.
+If production containment and credential brokering are implemented in a future slice, a successful draft would still have to end at `status=needs_busdriver_review` with all finalization authority false. That is target-state wording, not a current production capability.
+
+`config/trusted-runtime-manifest.json` is the reviewed trust inventory: it currently pins Busdriver package version **`1.90.0`** and the corresponding commit, independently of any newer plugin bytes observed in a local smoke environment. It also binds authenticated external executables/plugin scripts, embedded helper pins, and every side-effect-capable or agent-facing production entrypoint under `production_entrypoints`. `tests/contract/test_trusted_runtime_manifest.py` rejects identity or entrypoint digest drift; update the manifest and all embedded consumers in the same reviewed change.
 
 ### Balanced agent work plan
 
@@ -156,17 +160,9 @@ scripts/hermes-busdriver-agent-balance-plan --pretty
 
 This read-only helper emits `hermes-busdriver-agent-balance-plan/v0`: a deterministic planning-only envelope for one gated mutating draft implementation lane and parallel read-only review/status lanes. It does not dispatch agents, call Codex or GitHub, mutate repos, write markers, or grant commit/push/PR/merge/deploy/release/publish authority.
 
-### Optional real-agent smoke
+### Agent smoke status
 
-```bash
-scripts/hermes-busdriver-agent-smoke \
-  --plugin-root /path/to/busdriver \
-  --agent pi \
-  --pi-bin /path/to/pi \
-  --pretty
-```
-
-This creates a throwaway git repo and calls the selected real agent through `hermes-busdriver-agent-draft`. It may consume provider quota/tokens, so it is not part of the default contract test suite. The Codex adapter has been verified with this pattern against a temp repo: Codex created `src/codex_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`. The constrained Pi adapter has also been verified with this pattern: Pi ran with built-ins disabled, used only the relay `bd_*` tools, created `src/pi_smoke.txt`, postflight scope/verifier passed, and status remained `needs_busdriver_review`.
+`hermes-busdriver-agent-smoke` is currently a parser/authority-negative surface. Production Pi/OpenCode dispatch is policy-blocked, so historical real-agent smoke is superseded provenance only and does not prove current containment, credential brokering, or production launch capability.
 
 ### Delivery status
 
@@ -191,6 +187,10 @@ scripts/hermes-busdriver-deliver \
   --pr 123 \
   --pretty
 
+# Parser surface only: verify returns `verifier_containment_unavailable` immediately after
+# argument parsing — before run identity, delivery-status, and artifact handling — so the
+# verifier never runs, no run identity is synthesized, and no artifact is written. A later
+# `--mode status --run-id local-verify-001` therefore has nothing to find.
 scripts/hermes-busdriver-deliver \
   --repo /path/to/repo \
   --plugin-root /path/to/busdriver \
@@ -211,13 +211,24 @@ scripts/hermes-busdriver-deliver \
   --poll-interval 30 \
   --pretty
 
+# This status invocation is a fail-closed CROSS-PROCESS demonstration, not a successful
+# retrieval. The pr-grind run above persists an artifact, but it signs it with a writer key held
+# only in that process's memory; this second shell command is a new process with an empty key
+# table, so no MAC can authenticate and the lookup truthfully returns run_not_found rather than
+# treating unverifiable bytes as evidence. Only a lookup inside the SAME process, while the writer key is still
+# live, can authenticate a persisted artifact. If that process has more than one valid artifact
+# for the same run id, the winner is the largest HMAC-covered process-local artifact_sequence;
+# mutable mtime/ctime and filename order carry no freshness authority. Until a trusted external key
+# broker exists there is no supported cross-process retrieval. Early-blocked
+# operations (verify, pre-PR review, push, PR create, merge) persist no artifact at all, so status
+# has no semantics for their run ids.
 scripts/hermes-busdriver-deliver \
   --mode status \
-  --run-id local-verify-001 \
+  --run-id pr-grind-001 \
   --pretty
 ```
 
-This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps finalization disabled. Every result now carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute --operation verify` runs local verifier commands in the target repo without shell expansion, captures bounded/redacted output tails, writes a Hermes-owned JSON artifact under `~/.hermes/busdriver-relay/delivery-runs/` (or `HERMES_BUSDRIVER_DELIVERY_RUNS_DIR`), and returns nonzero if delivery-status or any verifier fails. Delivery wrappers forward nested helper timeouts and `--busdriver-state-dir-name` to delivery-status / litmus-status. `execute --operation pr-grind` requires `--pr`, invokes the read-only bounded PR-grind loop, validates the loop envelope schema/version/read-only flag and fail-closed nested authority flags before accepting `clean`, embeds the loop envelope under `pr_grind_loop`, writes the same Hermes-owned run artifact, and returns nonzero for unsafe loop output / `needs_fix` / `wait` / `blocked`; even a clean loop result only sets dispatcher status `pr_grind_clean` and keeps commit/push/PR/merge/marker-write authority false. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus a timestamp/PID for uniqueness. `--mode status --run-id <id>` is a read-only lookup that finds the latest valid persisted artifact with the same run identity and returns its path plus sanitized metadata (`artifact_run`, decision, schema, ok flag) as `status_lookup` evidence without writing a new artifact or probing the target repo; it does not echo verifier output tails from the persisted artifact. Matching artifacts must carry versioned deliver and nested delivery-run envelopes with fail-closed decision/authority metadata, and the returned status envelope preserves the artifact's repo/PR identity. Commit, push, PR creation, merge, marker write, deploy, release, and publish authority remain false in every mode.
+This is the first fail-closed dispatcher envelope for executable Delivery Mode. Default `plan` still only calls the read-only delivery-status probe and keeps standing finalization authority disabled. Every result carries a nested durable `hermes-busdriver-delivery-run/v0` envelope with `run_id`, `phase`, `status`, `reason`, repo/PR identity, authority flags, and artifact references. `execute --operation verify` refuses with `verifier_containment_unavailable` immediately after argument parsing — before run identity, delivery-status, artifact handling, PR-grind, GitHub auth, repo helper, or caller-command paths — so it launches no caller-supplied verifier and writes no run artifact; executable-verifier behavior exists only in a non-installed test harness. Delivery wrappers forward nested helper timeouts and `--busdriver-state-dir-name` to delivery-status / litmus-status. `execute --operation pr-grind` requires `--pr`, invokes the read-only bounded PR-grind loop, validates the loop envelope schema/version/read-only flag and fail-closed nested authority flags before accepting `clean`, embeds the loop envelope under `pr_grind_loop`, writes the same Hermes-owned run artifact, and returns nonzero for unsafe loop output / `needs_fix` / `wait` / `blocked`; even a clean loop result only sets dispatcher status `pr_grind_clean` and keeps reusable commit/push/PR/merge/marker-write authority false. `execute --operation pre-pr-review` is non-dispatchable and returns `isolated_review_runtime_unavailable` before delivery-status, repository/state/lock, artifact, credential, or trusted-writer handling. The dormant Busdriver-writer adapter is not executed; Hermes does not raw-write `.claude/*` markers. Fixed early blockers do not synthesize `run_id`/`created_at` state and do not persist a run artifact. `execute --operation commit` is a gated side-effect executor. `push`, `pr-create`, and `merge` are non-dispatchable and fail closed with `atomic_push_base_binding_unavailable`, `atomic_pr_create_binding_unavailable`, and `atomic_merge_base_binding_unavailable`; parser/envelope code for those operations does not constitute production capability. `--run-id` may be supplied to give operator/subagent/cron handoff a stable run identity; artifact filenames include that token plus timestamp/PID discoverability fields and a random UUID for collision resistance. `--mode status --run-id <id>` is a read-only SAME-process lookup: it returns the freshest valid artifact only when the current process still holds the writer key and the full path-bound MAC authenticates; freshness among authenticated matches is the HMAC-covered process-local `artifact_sequence`. Unverifiable, forged, and cross-process bytes all produce `run_not_found`, and mtime/ctime/filename order are never authority. A successful same-process lookup returns the artifact path plus sanitized metadata (`artifact_run`, decision, schema, ok flag) as `status_lookup` evidence without writing a new artifact or probing the target repo; it does not echo verifier output tails from the persisted artifact. Matching artifacts must carry versioned deliver and nested delivery-run envelopes with fail-closed decision/authority metadata, so malformed, authority-positive, schema-spoofed, non-JSON, wrong-run, or stale artifacts are ignored.
 
 ### Litmus / pre-PR marker freshness status
 
@@ -252,7 +263,7 @@ This helper is read-only and has no execute mode. It combines `hermes-busdriver-
 scripts/hermes-busdriver-finalization-contract-status --pretty
 ```
 
-This read-only helper emits `hermes-busdriver-finalization-contract-status/v0`: a machine-readable ADR 0005 status/capability matrix for the same `finalization_guardrails.remaining_work` IDs surfaced by finalization-readiness. It keeps legacy `contract_adr` compatibility while also exposing `contract_adrs` and `related_design_adrs`, and now adds top-level read-only ADR0005 `authority_sources` rows for the eight required authority sources alongside the existing `remaining_work` rows. Every row remains `status=policy_blocked`, `retired=false`, and `capability_allowed=false`, with missing unlock criteria such as Busdriver-approved seams, mutating schemas, hook-runtime/equivalent proof, programmatic-review contracts, reviewer independence/freshness/egress-redaction evidence, PR-grind mutation contracts, and marker ownership/atomicity/fsync-rename/path-symlink/trust semantics. It does not inspect or mutate target repos, write markers, run dispatchers, retire remaining work, or grant finalization authority.
+This read-only helper emits `hermes-busdriver-finalization-contract-status/v0`: a machine-readable ADR 0005 status/capability matrix for the same `finalization_guardrails.remaining_work` IDs surfaced by finalization-readiness. It keeps legacy `contract_adr` compatibility while also exposing `contract_adrs` and `related_design_adrs`, including ADR 0006 design/spike evidence for programmatic dual-review and marker-interop rows, and includes top-level read-only ADR0005 `authority_sources` rows. The deliver executor and mutating run envelope rows now report `status=implemented_gated` with `implemented=true`, while programmatic dual-review execution, autonomous PR-grind fix/push/re-poll, and marker interop/write rows remain `policy_blocked`. All rows keep `safe_to_execute_by_this_helper=false`, `capability_allowed=false`, and authority flags false: this helper does not inspect or mutate target repos, write markers, run dispatchers, or grant standing finalization authority.
 
 ### Compact relay brief
 
@@ -261,7 +272,7 @@ scripts/hermes-busdriver-relay-brief --pretty
 scripts/hermes-busdriver-relay-brief --brief
 ```
 
-This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the five current roadmap tasks: ADR0005 unlock contract, mutating PR-grind fix-loop design, marker interop contract, Pi adapter proof, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` stops cleanup loops when the repo and skill source are clean but finalization remains policy-blocked.
+This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the current roadmap posture: gated executor slice implemented, autonomous PR-grind fix-loop still blocked, marker interop contract still blocked, Pi/OpenCode draft adapter proofs, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` either points to gated Delivery Mode usage or the next blocked-surface contract work.
 
 ### PR-grind readiness check
 
@@ -306,20 +317,27 @@ Allowed now:
 2. maintain read-only `hermes-busdriver-status`;
 3. maintain Hermes-owned single-flight lock/status scaffolding;
 4. maintain safe smoke/contract tests;
-5. run `hermes-busdriver-gate` preflight/postflight around draft-mode agents;
-6. run `hermes-busdriver-agent-draft` and optional `hermes-busdriver-agent-smoke` for draft implementation/adapters;
-7. document decisions in ADRs.
+5. run production gate/agent commands only as fail-closed policy probes; use non-installed harnesses for Pi/OpenCode adapter contracts;
+6. use `hermes-busdriver-deliver execute --operation commit` only through its evidence checks and finalization lock; use `pre-pr-review` only as a fail-closed policy probe before evidence/status/lock;
+7. use read-only Delivery Mode status and PR-grind surfaces;
+8. document decisions in ADRs.
 
 Not allowed yet:
 
+- production Pi/OpenCode dispatch or credential copying while `agent_containment_and_credential_broker_unavailable` is active;
+- caller-supplied verifier execution while `verifier_containment_unavailable` is active;
+- push while `atomic_push_base_binding_unavailable` is active;
+- PR creation while `atomic_pr_create_binding_unavailable` is active;
+- merge while `atomic_merge_base_binding_unavailable` is active;
 - repo-mutating `hermes-busdriver-codex-goal` launcher;
 - `.claude/hermes/jobs` queue;
 - Busdriver `hermes-home` install target;
-- commit/PR/merge automation inside draft launchers or without litmus/pre-PR plus pr-grind-equivalent checks;
+- raw marker writes/forging/deletion by Hermes; marker trust remains Busdriver-owned writer commands only;
+- autonomous PR-grind fix/push/re-poll that invents fixes or bypasses draft-gate + litmus/pre-PR evidence;
 - deploy/release/publish automation;
 - direct MCP/plugin routing;
-- claims that Hermes shell execution is Busdriver-gate-safe.
+- claims that Hermes shell execution is Busdriver-gate-safe outside the dispatcher’s explicit evidence checks.
 
 ## Delivery mode
 
-Draft launchers still stop at `needs_busdriver_review`; this repo does not provide an autonomous mutating finalization launcher. Explicit operator-level Hermes Delivery Mode remains a narrow external procedure: when the user explicitly asks Hermes to finish the whole job, Hermes may perform ordinary Git/GitHub finalization only after litmus/pre-PR-equivalent checks, local verification, PR checks/status rollup, Busdriver `relevant-check-status.sh` when available, PR reviews/comments, bounded wait for advisory reviewer bots, fix rounds for actionable feedback, and a clean latest-head PR-grind result. That does **not** make mutating commit/push/PR/merge executor code, draft-launcher finalization, marker writes, deploy/release/publish, or direct MCP/plugin routing part of the relay surface. After merge, sync the PR base branch discovered from PR status rather than hard-coding `main`. GitHub issue/comment mutation remains separate and requires explicit user request for that side effect.
+Production draft launchers currently stop before worker launch with `agent_containment_and_credential_broker_unavailable`; `needs_busdriver_review` describes the future successful-draft state, not an enabled production path. Delivery Mode availability is operation-specific: `commit` is the only mutating operation that may reach gated evidence/lock handling. `pre-pr-review` is `policy_blocked` by `isolated_review_runtime_unavailable` before those paths, while `push`, `pr-create`, and `merge` are `policy_blocked` by `atomic_push_base_binding_unavailable`, `atomic_pr_create_binding_unavailable`, and `atomic_merge_base_binding_unavailable`. The dormant Busdriver-owned marker-writer adapter is not invoked by production `pre-pr-review`, and Hermes must not raw-write `.claude/*` trusted markers. No blocked operation may be advertised as dispatchable.

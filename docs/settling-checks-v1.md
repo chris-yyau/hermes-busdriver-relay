@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Relay v1 Settling Checks
 
 This file maps the Ultra Council H1-H13 checklist to what this repository currently implements.
