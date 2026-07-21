@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only bounded PR-grind polling loop for Hermes Delivery Mode.
 
 This helper repeatedly invokes `hermes-busdriver-pr-grind-check` until the latest
@@ -9,16 +9,450 @@ emits a deterministic envelope that an explicit operator finalizer can inspect.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
+import os
+import re
+import select
+import secrets
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# The most this process will hold of a pinned helper candidate, enforced BEFORE the memory is spent.
+# The digest below is the only thing that authenticates these bytes, and it necessarily runs last —
+# so a reader that loops to EOF has already paid whatever the file asked for by the time it learns
+# the file was never trusted. The largest helper this repo ships is a few hundred KB; the number is
+# ours because the file's is not. Restated across every copy of the reader, so a contract test is
+# what keeps them equal.
+MAX_AUTHENTICATED_HELPER_BYTES = 1024 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
+SF_RESTRICTED = 0x00080000
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> SystemExit:
+    payload = {"ok": False, "error": f"trusted_root_owned_source_{reason}", "executable": name}
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+def _trusted_identity(st: os.stat_result) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    try:
+        parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        root_st = os.fstat(parent_fd)
+        if not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != 0 or root_st.st_mode & _NON_OWNER_WRITABLE:
+            raise _trusted_source_refusal(name, "ancestry_untrusted", "/")
+        for component in path.parts[1:-1]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                  dir_fd=parent_fd)
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+            directory_st = os.fstat(parent_fd)
+            if (not stat.S_ISDIR(directory_st.st_mode) or directory_st.st_uid != 0
+                    or directory_st.st_mode & _NON_OWNER_WRITABLE):
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            reason = "metadata_invalid" if exc.errno == errno.ELOOP else "unavailable"
+            raise _trusted_source_refusal(name, reason, type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                    or opened.st_mode & _NON_OWNER_WRITABLE
+                    or not opened.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+                raise _trusted_source_refusal(name, "metadata_invalid")
+            if name in SHIM_BACKED_SOURCES:
+                if not getattr(opened, "st_flags", 0) & SF_RESTRICTED:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+            elif opened.st_nlink != 1:
+                raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+            chunks, total = [], 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _trusted_identity(os.fstat(fd)) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if _trusted_identity(final) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / "scripts" / "hermes-busdriver-pr-grind-check"
+
+RETAINED_PYTHON_STDIN_LOADER = (
+    "import sys\n"
+    "virtual = sys.argv[1]\n"
+    "program = sys.stdin.buffer.read()\n"
+    "sys.argv = [virtual, *sys.argv[2:]]\n"
+    "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+    "exec(compile(program, virtual, 'exec'), namespace)\n"
+)
+
+TRUSTED_CHECK_SHA256 = '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e'
+# No TRUSTED_EXECUTABLE_DIGESTS here any more. This loop never dispatched git/gh/jq itself — it only
+# digest-checked a `trusted-bin/` bundle its parent had copied them into, and that bundle is gone.
+# The checker it spawns pins them in its own frozen table. A pin kept here would be a pin nothing
+# reads, drifting quietly out of step with the manifest until someone trusted it.
 SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
+CHECK_SCHEMA = "hermes-busdriver-pr-grind-check/v0"
 FINALIZATION_FLAGS = {
     "finalization_allowed": False,
     "commit_allowed": False,
@@ -30,6 +464,27 @@ FINALIZATION_FLAGS = {
     "publish_allowed": False,
 }
 
+UNSAFE_AMBIENT_ENV = {
+    "GH_REPO", "GH_HOST", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+    "GIT_ASKPASS", "SSH_ASKPASS",
+}
+
+
+def safe_subprocess_env() -> dict[str, str]:
+    # /opt/homebrew/bin is gone from here deliberately. This env carries GH_TOKEN and SSH_AUTH_SOCK
+    # into a child that runs git/gh, and those resolve subcommands, credential helpers and ssh
+    # through PATH. /usr/bin winning the race for names that exist in both is not a defence: any
+    # name /usr/bin lacks — git-credential-*, for one — resolves straight into a uid=501 drwxrwxr-x
+    # directory. /usr/local/bin stays: root-owned 0755, and where the trusted gh lives.
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+    # HERMES_BUSDRIVER_PRIVATE_RUNTIME is not forwarded any more, because there is nothing left for
+    # it to select: the child re-derives git/gh/jq from its own frozen root-owned table.
+    return env
+
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Read-only bounded PR-grind polling loop")
@@ -37,17 +492,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--pr", required=True, help="Pull request number")
     ap.add_argument("--plugin-root", help="Busdriver plugin root passed through to the checker")
     ap.add_argument("--check-script", help="Path to hermes-busdriver-pr-grind-check")
+    ap.add_argument("--expected-repository", help="Expected GitHub owner/repo identity from the local origin")
+    ap.add_argument("--expected-head-repository")
+    ap.add_argument("--expected-head-ref")
+    ap.add_argument("--expected-base-repository")
+    ap.add_argument("--expected-base-ref")
+    ap.add_argument("--expected-head-sha")
+    ap.add_argument("--expected-base-sha")
     ap.add_argument("--check-timeout", type=float, default=180.0)
     ap.add_argument("--max-wait-seconds", type=float, default=300.0, help="Bounded wait budget for check/reviewer-bot pending states")
     ap.add_argument("--poll-interval", type=float, default=30.0, help="Seconds between wait polls; tests may pass 0")
     ap.add_argument("--max-polls", type=int, default=20, help="Safety cap on checker invocations")
     ap.add_argument("--max-fix-rounds", type=int, default=0, help="Recorded for policy visibility only; fixing is read-only/disabled")
-    ap.add_argument(
-        "--fixture-result-file",
-        action="append",
-        default=[],
-        help="Offline test fixture result JSON. May be repeated to simulate polling rounds.",
-    )
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
     if args.max_wait_seconds < 0:
@@ -58,51 +514,410 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(json.dumps({"ok": False, "error": "invalid_max_polls"}))
     if args.max_fix_rounds != 0:
         raise SystemExit(json.dumps({"ok": False, "error": "fix_rounds_not_supported_in_read_only_loop"}))
+    if args.check_script:
+        try:
+            trusted_check = CHECK.resolve(strict=True)
+            requested_check = Path(args.check_script).expanduser().resolve(strict=True)
+        except OSError:
+            trusted_check = CHECK
+            requested_check = Path(args.check_script).expanduser()
+        if requested_check != trusted_check:
+            print(json.dumps({"ok": False, "error": "check_script_untrusted"}), file=sys.stderr)
+            raise SystemExit(2)
+    require_identity_bindings(args)
     return args
 
 
+def require_identity_bindings(args: argparse.Namespace) -> None:
+    """Every run states the PR identity it expects up front, and now every run means every run.
+
+    r33 A: this used to be skipped whenever --fixture-result-file was passed, which is what made
+    that flag more than an offline convenience — one caller-named file both SUPPLIED the result and
+    WAIVED the identity binding that would have caught the result being about some other PR. Neither
+    half survives in production: there is no fixture flag left to waive it with, so the bindings are
+    unconditional here and the only thing that can relax them is the source-separated harness the
+    offline doubles moved to, which nothing installed can reach.
+    """
+    for field in ("expected_repository", "expected_head_repository", "expected_base_repository"):
+        if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", str(getattr(args, field) or "")):
+            raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+    for field in ("expected_head_ref", "expected_base_ref"):
+        if not isinstance(getattr(args, field), str) or not getattr(args, field):
+            raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+    for field in ("expected_head_sha", "expected_base_sha"):
+        if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(getattr(args, field) or "")):
+            raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+
+
+REDACTION = "[REDACTED]"
+# Kept byte-identical to the sibling relays (deliver, delivery-status, pr-grind-check,
+# pr-grind-loop, litmus-status, finalization-readiness). These are standalone executables with no
+# shared import path, so the block is restated rather than shared; a contract test asserts they
+# agree, which is what keeps one copy from drifting into a leak.
+SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
+def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input — including a URL-userinfo class with no length bound — so
+# a hostile subprocess returning 500MB of stderr, or a remote URL of the same size, costs that much
+# CPU and memory inside a helper whose entire job is to emit a few KB. Bounding after redaction, as
+# r25 did, means the bound never applies to the expensive step it exists to protect.
+#
+# 8192, not a tight bound: every shape pattern above matches far less than this, so the span exists
+# to keep a long-but-real match (a `token: <value>` with a verbose value, a long URL) whole inside
+# the budget. It costs 8KB of regex work and buys the guarantee below.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED — not sliced to its last `budget` bytes, which is what r26 did and
+# what leaked. The value classes for `token:`, `--token`, `"token":` and `Bearer` are unbounded, so
+# a long enough value has the very prefix that IDENTIFIES it as a secret cut away by that slice;
+# the remainder matches no shape pattern and the tail is emitted raw. No window size fixes it —
+# the prefix sits arbitrarily far from the tail. An unmatched fragment of a secret is still a
+# secret, and no diagnostic from an attacker-controlled 12KB+ of output is worth emitting one.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value or ""
+    if limit <= 0:
+        return ""
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
 def tail(value: str | bytes | None, limit: int = 4000) -> str:
-    text = value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
-    return text[-limit:]
+    """Redact, then bound — over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(value, limit)
 
 
-def run_check(args: argparse.Namespace, fixture_index: int) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    if args.fixture_result_file:
-        index = min(fixture_index, len(args.fixture_result_file) - 1)
-        path = Path(args.fixture_result_file[index]).expanduser()
+def _read_authenticated(path: Path, expected_digest: str, *, private: bool) -> bytes:
+    """Read the checker's bytes, proving identity and cost across the read rather than trusting the name.
+
+    Two things run after the open, and until r34 neither was proved. The READ was unbounded: the
+    candidate chose how much memory this process spent, and it chose before the digest that would
+    have rejected it. And identity was compared once, at open, so everything the read spans — a
+    truncation, a growth, a new hard link, a chmod, a rename away from the name — was covered by
+    nothing at all.
+
+    So the size is checked before the read, the read is capped one byte past the bound (reading
+    exactly the bound cannot distinguish "this file IS the bound" from "this is a prefix of a larger
+    one"), and the fd is re-examined afterwards against what it said at open. `st_size` is never
+    trusted as a stopping condition — it is read from the very file the check exists to doubt.
+
+    The closing lstat is the half no descriptor can see: the fd proves OUR inode is unchanged and
+    says nothing about where the NAME points, and the name is what the caller goes on to use.
+    """
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise OSError("checker_not_regular")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("checker_identity_changed")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+        ):
+            raise OSError("private_runtime_metadata_invalid")
+        if private and stat.S_IMODE(opened.st_mode) != 0o500:
+            raise OSError("private_runtime_metadata_invalid")
+        if opened.st_size > MAX_AUTHENTICATED_HELPER_BYTES:
+            # Refused without ever holding it. This is the whole point of the bound.
+            raise OSError("checker_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_HELPER_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_HELPER_BYTES:
+            raise OSError("checker_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            raise OSError("checker_changed_during_read")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("checker_replaced_during_read")
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise OSError("checker_digest_invalid")
+    return data
+
+
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def _unlink_created(path: Path, created: os.stat_result) -> None:
+    """Remove `path` only while it still names the inode `created` describes.
+
+    `Path.unlink(missing_ok=True)` resolves the name, and the name is exactly what an adversary can
+    re-point. Removing whatever answers now deletes their plant rather than our residue — the same
+    "second bug wearing the first one's cleanup" the writers below refuse to commit.
+    """
+    try:
+        parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return
+    try:
+        if _names_created_inode(parent_fd, path.name, created):
+            try:
+                os.unlink(path.name, dir_fd=parent_fd)
+            except OSError:
+                pass
+    finally:
+        os.close(parent_fd)
+
+
+def _write_exclusive(path: Path, data: bytes, mode: int) -> os.stat_result:
+    """Write the retained helper, then prove the descriptor still holds exactly what was authenticated.
+
+    The bytes reaching here were hashed against a pin, but the hash authenticated MEMORY. Without a
+    flush they need not be on disk when the child is launched to read them, and without a closing
+    re-read "we wrote it" and "the file holds it" stay separate claims — the second is the one the
+    execution below actually depends on. `os.chmod(path, ...)` was the same shape of gap: it names
+    the file a second time, and a second resolution can land somewhere else.
+
+    The digest proves OUR inode is intact and can prove nothing else; the closing identity check
+    proves the other direction — that `path` still REACHES it — which is the half no descriptor can
+    see. An adversary who renames our file aside and its own into place leaves every fd-visible
+    field (type, owner, link count, size, mode, digest) describing our inode exactly, and leaves the
+    name the child is about to execute pointing at theirs.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: _digest_fd reads the bytes back through THIS descriptor, and a
+        # write-only one cannot be read. Reopening the name would resolve it a second time.
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
         try:
-            data = json.loads(path.read_text())
-        except Exception as e:  # noqa: BLE001 - fixture parse errors should become structured policy gaps
-            return None, {"ok": False, "source": "fixture", "path": str(path), "error": "fixture_parse_failed", "detail": str(e)}
-        return data, {"ok": True, "source": "fixture", "path": str(path)}
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(data)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("retained_helper_metadata_invalid")
+            if _digest_fd(fd, st.st_size) != hashlib.sha256(data).hexdigest():
+                raise OSError("retained_helper_replaced_after_write")
+            if not _names_created_inode(parent_fd, path.name, created):
+                raise OSError("retained_helper_replaced_after_write")
+        except BaseException:
+            # Never leave a half-written helper for the next step to execute. But by now the name may
+            # belong to something else — the case the identity check above fails on — and deleting
+            # THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, path.name, created):
+                try:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+        # Handed back so a caller whose own later step fails can prove, before unlinking, that the
+        # name still reaches THIS inode. Without it the caller's cleanup resolves the name a second
+        # time — the very thing every check above refuses to do.
+        return created
+    finally:
+        os.close(parent_fd)
 
-    script = Path(args.check_script).expanduser() if args.check_script else CHECK
-    cmd = [sys.executable, str(script), "--repo", args.repo, "--pr", str(args.pr)]
+
+def _digest_fd(fd: int, size: int) -> str:
+    """sha256 of the bytes behind THIS descriptor. `pread` so it neither moves nor rides the offset."""
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(1 << 16, size - offset), offset)
+        if not chunk:
+            raise OSError("retained_helper_truncated")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def _retained_checker(source_script: Path, data: bytes, *, private: bool) -> tuple[Path, Callable[[], None]]:
+    temp: tempfile.TemporaryDirectory[str] | None = None
+    if private:
+        parent = source_script.parent
+        retained = parent / f".hermes-pr-grind-check-{os.getpid()}-{secrets.token_hex(12)}"
+    else:
+        temp = tempfile.TemporaryDirectory(prefix="hermes-pr-grind-check-")
+        parent = Path(temp.name)
+        parent.chmod(0o700)
+        retained = parent / "hermes-busdriver-pr-grind-check"
+    created: os.stat_result | None = None
+    try:
+        created = _write_exclusive(retained, data, 0o500)
+        _read_authenticated(retained, TRUSTED_CHECK_SHA256, private=True)
+    except OSError:
+        # `created is None` means the write itself failed, and it has already removed its own
+        # residue — and deliberately left any replacement alone, which this must not undo.
+        if created is not None:
+            _unlink_created(retained, created)
+        if temp is not None:
+            temp.cleanup()
+        raise
+
+    def cleanup() -> None:
+        # Same rule on the success path: by the time the checker has run, `retained` may name
+        # someone else's file, and this is the one caller that would otherwise delete it.
+        try:
+            _unlink_created(retained, created)
+        finally:
+            if temp is not None:
+                temp.cleanup()
+
+    return retained, cleanup
+
+
+def run_check(args: argparse.Namespace) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """One polling round's evidence, and the only source of it is the authenticated checker.
+
+    r33 A: the branch that read `--fixture-result-file` — a caller-named path, parsed with
+    json.loads, returned as a round's RESULT — is gone rather than gated. A file proves shape and
+    never provenance: every byte of a result that this loop then validates for schema, identity and
+    authority flags was authored by whoever wrote the file, so `checker_result_valid()` is
+    checking the forger's arithmetic. Labelling it `source: fixture` afterwards demoted the
+    verdict but left production shipping the parser, and a parser that exists is an affordance a
+    later caller can reach. The offline doubles moved to the source-separated harness, which is
+    never installed; production's evidence is only ever bytes it digest-checked and ran itself.
+    """
+    source_script = Path(args.check_script).expanduser() if args.check_script else CHECK
+    # There is no private-runtime bundle to detect any more. The flag selected a parent-supplied
+    # `trusted-bin/` of private git/gh/jq copies; the checker now derives those from its own frozen
+    # root-owned table, so the directory, the flag and the bundle validation are all gone. The
+    # source script is the installed 0755 file, which is what `private=False` describes.
+    try:
+        checker_bytes = _read_authenticated(source_script, TRUSTED_CHECK_SHA256, private=False)
+        script, cleanup = _retained_checker(source_script, checker_bytes, private=False)
+    except OSError as e:
+        return None, {
+            "ok": False,
+            "source": str(source_script),
+            "error": "checker_integrity_failed",
+            "detail": str(e) or type(e).__name__,
+        }
+    cmd = [str(trusted_executable_path("python3")), "-I", "-c", RETAINED_PYTHON_STDIN_LOADER, str(script), "--repo", args.repo, "--pr", str(args.pr)]
+    if args.expected_repository:
+        cmd += ["--expected-repository", args.expected_repository]
+    for field in ("head_repository", "head_ref", "base_repository", "base_ref", "head_sha", "base_sha"):
+        value = getattr(args, f"expected_{field}", None)
+        if value:
+            cmd += [f"--expected-{field.replace('_', '-')}", str(value)]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
     try:
-        cp = subprocess.run(cmd, text=True, capture_output=True, timeout=args.check_timeout, check=False)
-    except subprocess.TimeoutExpired as e:
-        return None, {
-            "ok": False,
-            "source": str(script),
-            "returncode": 124,
-            "error": "check_timeout",
-            "stdout_tail": tail(e.stdout),
-            "stderr_tail": tail(e.stderr),
-        }
-    except OSError as e:
-        return None, {"ok": False, "source": str(script), "returncode": 127, "error": type(e).__name__, "stderr_tail": tail(str(e))}
+        try:
+            bounded = run_bounded(cmd, timeout=args.check_timeout, env=safe_subprocess_env(), stdin_bytes=checker_bytes)
+            if bounded.overflowed:
+                raise SystemExit(json.dumps({"ok": False, "error": "check_output_too_large"}))
+            if bounded.timed_out:
+                raise subprocess.TimeoutExpired(cmd, args.check_timeout)
+            cp = subprocess.CompletedProcess(cmd, bounded.returncode, bounded.stdout, bounded.stderr)
+        except subprocess.TimeoutExpired as e:
+            return None, {
+                "ok": False,
+                "source": str(source_script),
+                "returncode": 124,
+                "error": "check_timeout",
+                "stdout_tail": tail(e.stdout),
+                "stderr_tail": tail(e.stderr),
+            }
+        except OSError as e:
+            return None, {"ok": False, "source": str(source_script), "returncode": 127, "error": type(e).__name__, "stderr_tail": tail(str(e))}
 
-    if cp.returncode != 0:
-        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_failed", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr)}
-    try:
-        data = json.loads(cp.stdout)
-    except json.JSONDecodeError as e:
-        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_invalid_json", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr), "detail": str(e)}
-    if not isinstance(data, dict):
-        return None, {"ok": False, "source": str(script), "returncode": cp.returncode, "error": "check_json_not_object"}
-    return data, {"ok": True, "source": str(script), "returncode": cp.returncode}
+        if cp.returncode != 0:
+            return None, {"ok": False, "source": str(source_script), "returncode": cp.returncode, "error": "check_failed", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr)}
+        try:
+            data = json.loads(cp.stdout)
+        except json.JSONDecodeError as e:
+            return None, {"ok": False, "source": str(source_script), "returncode": cp.returncode, "error": "check_invalid_json", "stdout_tail": tail(cp.stdout), "stderr_tail": tail(cp.stderr), "detail": str(e)}
+        if not isinstance(data, dict):
+            return None, {"ok": False, "source": str(source_script), "returncode": cp.returncode, "error": "check_json_not_object"}
+        return data, {"ok": True, "source": str(source_script), "returncode": cp.returncode}
+    finally:
+        cleanup()
 
 
 def summarize_iteration(result: dict[str, Any], meta: dict[str, Any], index: int, elapsed: float) -> dict[str, Any]:
@@ -136,6 +951,108 @@ def is_head_changed(result: dict[str, Any]) -> bool:
     return decision.get("reason") == "head_changed" or any(str(item).startswith("head_changed_during_collection:") for item in blockers)
 
 
+def authority_tree_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if (key.endswith("_allowed") or "authority" in key) and item is not False:
+                return False
+            if not authority_tree_safe(item):
+                return False
+    elif isinstance(value, list):
+        return all(authority_tree_safe(item) for item in value)
+    return True
+
+
+def checker_result_valid(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("schema") != CHECK_SCHEMA or value.get("version") != 1:
+        return False
+    status = value.get("status")
+    clean = value.get("clean")
+    checks = value.get("checks")
+    decision = value.get("decision")
+    blockers = value.get("blockers")
+    comments = value.get("actionable_comments")
+    if (
+        value.get("ok") is not True
+        or value.get("read_only") is not True
+        or status not in {"clean", "needs_fix", "wait", "blocked"}
+        or not isinstance(clean, bool)
+        or clean is not (status == "clean")
+        or not isinstance(value.get("repository"), str)
+        or not isinstance(value.get("pr"), int)
+        or isinstance(value.get("pr"), bool)
+        or value["pr"] < 1
+        or not isinstance(value.get("url"), str)
+        or not isinstance(value.get("head"), str)
+        or not isinstance(value.get("head_repository"), str)
+        or not isinstance(value.get("head_ref"), str)
+        or not isinstance(value.get("base_repository"), str)
+        or not isinstance(value.get("base"), str)
+        or not isinstance(value.get("base_sha"), str)
+        or not isinstance(blockers, list)
+        or any(not isinstance(item, str) for item in blockers)
+        or not isinstance(comments, list)
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), int)
+            or isinstance(item.get("id"), bool)
+            or not isinstance(item.get("user"), str)
+            or item.get("path") is not None and not isinstance(item.get("path"), str)
+            or item.get("line") is not None and (not isinstance(item.get("line"), int) or isinstance(item.get("line"), bool))
+            or item.get("commit_id") is not None and not isinstance(item.get("commit_id"), str)
+            or not isinstance(item.get("body_preview"), str)
+            or item.get("source") not in {"review_comment", "review", "issue_comment_after_head", "issue_comment_unbound", "bot_progress"}
+            for item in comments
+        )
+        or not isinstance(checks, dict)
+        or not isinstance(decision, dict)
+        or not authority_tree_safe(value)
+    ):
+        return False
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", value["head"]) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", value["base_sha"]):
+        return False
+    for field in ("failed", "pending", "kept"):
+        if not isinstance(checks.get(field), int) or isinstance(checks.get(field), bool) or checks[field] < 0:
+            return False
+    if (
+        not isinstance(checks.get("mode"), str)
+        or not isinstance(checks.get("source"), str)
+        or not isinstance(checks.get("failed_rows"), list)
+        or any(not isinstance(item, str) for item in checks.get("failed_rows", []))
+        or not isinstance(checks.get("pending_rows"), list)
+        or any(not isinstance(item, str) for item in checks.get("pending_rows", []))
+        or not isinstance(checks.get("relevance_unavailable"), bool)
+        or decision.get("status") != status
+        or decision.get("pr_grind_clean") is not (status == "clean")
+        or decision.get("merge_allowed") is not False
+        or decision.get("needs_fix") is not (status == "needs_fix")
+        or decision.get("wait") is not (status == "wait")
+        or decision.get("blocked") is not (status == "blocked")
+        or not isinstance(decision.get("reason"), str)
+    ):
+        return False
+    if status == "clean" and (blockers or comments or checks["failed"] != 0 or checks["pending"] != 0 or checks["kept"] < 1 or checks["relevance_unavailable"]):
+        return False
+    return True
+
+
+def checker_binding_mismatch(args: argparse.Namespace, value: dict[str, Any]) -> str | None:
+    expected = {
+        "pr": int(args.pr),
+        "url": f"https://github.com/{args.expected_repository}/pull/{int(args.pr)}" if getattr(args, "expected_repository", None) else None,
+        "head": getattr(args, "expected_head_sha", None),
+        "head_repository": getattr(args, "expected_head_repository", None),
+        "head_ref": getattr(args, "expected_head_ref", None),
+        "base_repository": getattr(args, "expected_base_repository", None),
+        "base": getattr(args, "expected_base_ref", None),
+        "base_sha": getattr(args, "expected_base_sha", None),
+    }
+    for field, expected_value in expected.items():
+        if expected_value is not None and value.get(field) != expected_value:
+            return field
+    return None
+
+
 def final_decision(status: str, reason: str, pr_clean: bool = False) -> dict[str, Any]:
     return {
         "status": status,
@@ -149,16 +1066,55 @@ def final_decision(status: str, reason: str, pr_clean: bool = False) -> dict[str
     }
 
 
+# False here and unreachable from the CLI: production has no flag, env var or file that can set it.
+# Only the non-installed test harness rebinds it, which is what keeps the demotion below honest —
+# an envelope claiming `authoritative: true` is one no fixture could have produced.
+FIXTURE_MODE = False
+
+
+def fixture_sourced() -> bool:
+    """True when results came from an offline double rather than the authenticated checker."""
+    return bool(FIXTURE_MODE)
+
+
+FIXTURE_EVIDENCE_BLOCKER = "fixture_evidence_not_authoritative"
+
+
 def result_envelope(args: argparse.Namespace, ok: bool, status: str, reason: str, iterations: list[dict[str, Any]], policy_gaps: list[str], latest: dict[str, Any] | None, started: float) -> dict[str, Any]:
+    # A harness result is a hand-authored JSON file: it proves shape, never origin, and the harness
+    # also waives every --expected-* identity binding, so nothing ties its content to a real PR.
+    # r25 still let it produce a top-level `status: "clean"` / `clean: true` / `pr_grind_clean: true`
+    # with exit 0 — provenance survived only in `iterations[0].source`, which no top-level reader
+    # consults. The demotion happens here, at the envelope boundary, so every exit path inherits it
+    # rather than each of the ten call sites having to remember. Nested iteration data stays intact:
+    # this is about authority, not about hiding what the fixture said.
+    # Only a `clean` verdict is demoted. A fixture-sourced wait/needs_fix/blocked already claims
+    # no authority, and stamping the gap onto those would bury the real diagnostic reason under a
+    # provenance note that changes nothing about the verdict.
+    fixture = fixture_sourced()
+    if fixture and status == "clean":
+        ok = False
+        status, reason = "blocked", FIXTURE_EVIDENCE_BLOCKER
+        if FIXTURE_EVIDENCE_BLOCKER not in policy_gaps:
+            policy_gaps = [*policy_gaps, FIXTURE_EVIDENCE_BLOCKER]
     return {
         "schema": SCHEMA,
         "version": 1,
         "ok": ok,
+        "source": "fixture" if fixture else "authenticated_checker",
+        "authoritative": not fixture,
         "repo": str(Path(args.repo).expanduser()),
+        "repository": args.expected_repository,
         "pr": int(args.pr) if str(args.pr).isdigit() else args.pr,
+        "url": latest.get("url") if isinstance(latest, dict) else None,
         "status": status,
         "clean": status == "clean",
         "latest_head": latest.get("head") if isinstance(latest, dict) else None,
+        "head_repository": latest.get("head_repository") if isinstance(latest, dict) else None,
+        "head_ref": latest.get("head_ref") if isinstance(latest, dict) else None,
+        "base_repository": latest.get("base_repository") if isinstance(latest, dict) else None,
+        "base": latest.get("base") if isinstance(latest, dict) else None,
+        "base_sha": latest.get("base_sha") if isinstance(latest, dict) else None,
         "iterations": iterations,
         "policy_gaps": policy_gaps,
         "limits": {
@@ -179,7 +1135,6 @@ def main() -> int:
     iterations: list[dict[str, Any]] = []
     policy_gaps: list[str] = []
     latest: dict[str, Any] | None = None
-    fixture_index = 0
 
     for index in range(1, args.max_polls + 1):
         now = time.monotonic()
@@ -188,8 +1143,7 @@ def main() -> int:
             envelope = result_envelope(args, False, "wait", "max_wait_exhausted", iterations, policy_gaps, latest, started)
             print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
             return 1
-        data, meta = run_check(args, fixture_index)
-        fixture_index += 1
+        data, meta = run_check(args)
         if data is None:
             policy_gaps.append(str(meta.get("error") or "check_unavailable"))
             envelope = result_envelope(args, False, "blocked", "checker_failed", iterations, policy_gaps, latest, started)
@@ -198,6 +1152,23 @@ def main() -> int:
             return 2
 
         latest = data
+        if not checker_result_valid(data):
+            policy_gaps.append("checker_schema_invalid")
+            envelope = result_envelope(args, False, "blocked", "checker_schema_invalid", iterations, policy_gaps, latest, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        if args.expected_repository and data.get("repository") != args.expected_repository:
+            policy_gaps.append("repository_binding_mismatch")
+            envelope = result_envelope(args, False, "blocked", "repository_binding_mismatch", iterations, policy_gaps, latest, started)
+            envelope["observed_repository"] = data.get("repository")
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
+        mismatch = checker_binding_mismatch(args, data)
+        if mismatch is not None:
+            policy_gaps.append(f"checker_binding_mismatch:{mismatch}")
+            envelope = result_envelope(args, False, "blocked", "checker_binding_mismatch", iterations, policy_gaps, data, started)
+            print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
+            return 1
         iterations.append(summarize_iteration(data, meta, index, elapsed))
         status = str(data.get("status") or "")
         if not status:
@@ -205,10 +1176,12 @@ def main() -> int:
             envelope = result_envelope(args, False, "blocked", "policy_gap", iterations, policy_gaps, latest, started)
             print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
             return 1
-        if data.get("clean") is True or status == "clean":
+        if data.get("clean") is True and status == "clean":
             envelope = result_envelope(args, True, "clean", "latest_pr_head_clean_read_only", iterations, policy_gaps, latest, started)
             print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
-            return 0
+            # Not a bare `return 0`: result_envelope demotes a fixture-sourced clean, and exit 0 is
+            # the coarsest possible claim that the PR is clean.
+            return 0 if envelope["ok"] else 1
         if status == "needs_fix":
             envelope = result_envelope(args, False, "needs_fix", "actionable_feedback_present_read_only_no_fix", iterations, policy_gaps, latest, started)
             print(json.dumps(envelope, indent=2 if args.pretty else None, sort_keys=True))
