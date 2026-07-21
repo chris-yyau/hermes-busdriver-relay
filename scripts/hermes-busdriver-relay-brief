@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Concise read-only relay briefing for Telegram/status surfaces.
 
 This helper intentionally does not contact GitHub, write Busdriver markers, run
@@ -8,16 +8,339 @@ finalization contract status, and the next safe roadmap posture.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
 import os
+import select
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# The most this process will hold of a pinned helper candidate, enforced BEFORE the memory is spent.
+# The digest below is the only thing that authenticates these bytes, and it necessarily runs last —
+# so a reader that loops to EOF has already paid whatever the file asked for by the time it learns
+# the file was never trusted. The largest helper this repo ships is a few hundred KB; the number is
+# ours because the file's is not. Restated across every copy of the reader, so a contract test is
+# what keeps them equal.
+MAX_AUTHENTICATED_HELPER_BYTES = 1024 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INSTALLED_SKILL = Path.home() / ".hermes" / "skills" / "autonomous-ai-agents" / "busdriver-relay"
 CONTRACT_STATUS_SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
+CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization-contract-status"
+# Pinned from config/trusted-runtime-manifest.json; test_trusted_runtime_manifest asserts they agree.
+TRUSTED_CONTRACT_STATUS_SHA256 = "d85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c"
 
 AUTHORITY_FALSE: dict[str, bool] = {
     "finalization_allowed": False,
@@ -38,12 +361,12 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     {
         "id": "adr0005-unlock-contract",
         "label": "ADR0005 finalization authority unlock contract",
-        "status": "contract_complete_authority_policy_blocked",
+        "status": "gated_executor_slice_implemented_remaining_authority_policy_blocked",
         "evidence": [
             "ADRs/0005-finalization-authority-integration-contract.md",
             "scripts/hermes-busdriver-finalization-contract-status",
         ],
-        "safe_next": "no_mutating_executor_until_busdriver_approved_surface",
+        "safe_next": "use_gated_deliver_executor_only_with_fresh_evidence_keep_other_surfaces_blocked",
     },
     {
         "id": "mutating-pr-grind-fix-loop",
@@ -68,13 +391,13 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     {
         "id": "pi-adapter-proof",
         "label": "Pi adapter proof",
-        "status": "target_state_requires_schema_wrapper_smoke_contract",
+        "status": "pi_primary_opencode_fallback_verified_non_finalizing",
         "evidence": [
             "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md",
             "skills/busdriver-relay/references/coding-workflow-authority-map-v0.1.md",
             "tests/contract/test_relay_brief.py",
         ],
-        "safe_next": "implement_pi_adapter_schema_wrapper_smoke_contract_before_mutating_draft_use",
+        "safe_next": "use_pi_primary_or_opencode_fallback_through_gated_draft_launcher",
     },
     {
         "id": "status-ux-layer",
@@ -96,10 +419,308 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+TRUSTED_EXECUTABLE_DIGESTS = {
+    # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
+    # inode). A supply-chain pin, not an identity check — the path is the identity.
+    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
+    "sandbox-exec": "2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a",
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+# Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
+# symlinked name is what this contract refuses. See _validated_root_owned_source().
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+    "git-real": Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+    "sandbox-exec": Path("/usr/bin/sandbox-exec"),
+    "python3": Path("/usr/bin/python3"),
+}
+
+
+def private_runtime_error(error: str, executable: "str | None" = None, detail: "str | None" = None) -> SystemExit:
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if executable:
+        payload["executable"] = executable
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+# =============================================================================================
+# Fixed root-owned source execution contract. Copy of the primitive in hermes-busdriver-deliver;
+# these are standalone executables with no shared import path, so a contract test asserts the
+# copies agree. The full rationale lives in the deliver copy; the short version:
+#
+# executing a private copy relocated the substitutable name instead of removing it. macOS has no
+# fexecve and will not exec /dev/fd/N, so the kernel re-resolves a *pathname* at exec time, and any
+# pathname we can write is one a same-UID adversary can rename first (r34's two-rename ABA leaves
+# st_nlink at 1 and every descriptor-visible field intact). The source therefore has to live where
+# the adversary cannot write at all: root-owned, non-group/world-writable, root to leaf. The walk
+# proves there is no race rather than trying to win one.
+#
+# /usr/bin/git is the CommandLineTools shim — same inode as /usr/bin/python3, nlink 78 — so nlink==1
+# is waived for it and SF_RESTRICTED (SIP; denies even root) required instead. That shim also
+# honours $DEVELOPER_DIR through xcrun, which no ancestry walk can see, so the child environment is
+# owned here too: see ENV_DENIED_FOR_TRUSTED_DISPATCH.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"git", "python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: "str | None" = None) -> SystemExit:
+    """gh gets its own top-level reason: a missing credential-bearing binary is an operational
+    state an administrator resolves by provisioning /usr/local/bin/gh, not an integrity failure."""
+    if reason == "unavailable" and name == "gh":
+        return private_runtime_error("trusted_root_owned_gh_unavailable", name, detail)
+    return private_runtime_error(f"trusted_root_owned_source_{reason}", name, detail)
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd, not the path: the leaf must be opened relative to the directory just validated.
+    Re-opening by full pathname would re-traverse every component and restore the TOCTOU.
+    """
     try:
-        return subprocess.run(argv, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Pure seam: production reaches this only via trusted_executable_path(), which supplies the
+    path from a frozen table. Tests pass harmless already-root-owned system binaries."""
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _trusted_source_refusal(name, "metadata_invalid", "symlink") from exc
+            raise _trusted_source_refusal(name, "unavailable", type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _identity(os.fstat(fd)) != _identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
+def _refusal_reason(exc: SystemExit) -> str:
+    """Lift the machine-readable token back out of the primitive's JSON payload."""
+    try:
+        payload = json.loads(str(exc))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "trusted_root_owned_source_unavailable"
+    if not isinstance(payload, dict):
+        return "trusted_root_owned_source_unavailable"
+    reason = str(payload.get("error") or "trusted_root_owned_source_unavailable")
+    detail = payload.get("detail")
+    return f"{reason}:{detail}" if detail else reason
+
+
+def trusted_git_path() -> Path:
+    """OSError, not SystemExit: repo_summary() folds the reason into its envelope, because a brief
+    that cannot authenticate git has failed to OBSERVE — which is a state this schema already
+    carries — rather than failed to run. The shared primitive raises SystemExit for parity with
+    every other copy, so the token is lifted out of its payload here."""
+    try:
+        return trusted_executable_path("git")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+
+
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def child_env() -> dict[str, str]:
+    """Explicit allowlist for this brief's git children.
+
+    r24 copied os.environ minus GIT_*, which is a denylist over the wrong axis: it left the
+    caller's PATH deciding which `git` ran, and forwarded PYTHONPATH/BASH_ENV/ENV/ZDOTDIR
+    (startup injection), LD_*/DYLD_* (loader injection) and the GIT_CONFIG_COUNT/KEY_n/VALUE_n
+    trio (arbitrary git config, including core.fsmonitor) untouched. Only the locale, temp and
+    home semantics the probe genuinely needs are forwarded; everything else is rebuilt.
+    """
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = CONTAINED_PATH
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    return git_observation_env(env)
+
+
+GIT_OBSERVATION_INERT_CONFIG = (
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "log.showSignature=false",
+    "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
+    "diff.external=", "core.pager=cat", "core.sshCommand=false", "core.editor=false",
+    "core.askPass=", "credential.helper=",
+    "protocol.allow=never", "protocol.file.allow=never", "protocol.ext.allow=never",
+    "submodule.recurse=false", "fetch.recurseSubmodules=false", "status.showUntrackedFiles=all",
+    "core.fileMode=true",
+)
+GIT_OBSERVATION_SANDBOX_PROFILE = (
+    '(version 1) (allow default) (deny network*) (deny file-write*) '
+    '(allow file-write* (literal "/dev/null")) (deny process-exec) '
+    '(allow process-exec (literal "/Library/Developer/CommandLineTools/usr/bin/git"))'
+)
+GIT_OBSERVATION_ENV_ALLOWLIST = {
+    "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "USER", "LOGNAME", "TERM", "NO_COLOR",
+}
+
+
+def git_observation_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    ambient = os.environ if source is None else source
+    env = {key: value for key, value in ambient.items() if key in GIT_OBSERVATION_ENV_ALLOWLIST or key.startswith("LC_")}
+    env.update({
+        "PATH": CONTAINED_PATH, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    })
+    return env
+
+
+def git_observation_argv(*args: str) -> list[str]:
+    safe_args = list(args)
+    if "status" in safe_args:
+        safe_args = [
+            arg for arg in safe_args
+            if not arg.startswith("--untracked-files") and not arg.startswith("--ignore-submodules")
+        ]
+        at = safe_args.index("status") + 1
+        safe_args[at:at] = ["--untracked-files=all", "--ignore-submodules=none"]
+    if "diff" in safe_args:
+        at = safe_args.index("diff") + 1
+        for flag in reversed(("--no-ext-diff", "--no-textconv")):
+            if flag not in safe_args:
+                safe_args.insert(at, flag)
+    try:
+        sandbox = trusted_executable_path("sandbox-exec")
+        git_real = trusted_executable_path("git-real")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+    global_options = ["--no-pager"]
+    for pin in GIT_OBSERVATION_INERT_CONFIG:
+        global_options.extend(("-c", pin))
+    return [str(sandbox), "-p", GIT_OBSERVATION_SANDBOX_PROFILE, str(git_real), *global_options, *safe_args]
+
+
+def git_observation_stderr_refused(argv: list[str], stderr: str | bytes | None) -> bool:
+    prefix = [
+        str(TRUSTED_EXECUTABLE_SOURCES["sandbox-exec"]), "-p",
+        GIT_OBSERVATION_SANDBOX_PROFILE, str(TRUSTED_EXECUTABLE_SOURCES["git-real"]),
+    ]
+    return bool(stderr) and argv[:4] == prefix
+
+
+def git_argv(*args: str) -> list[str]:
+    return git_observation_argv(*args)
+
+
+def run(
+    argv: list[str], cwd: Path, timeout: int = 20, *, stdin_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = child_env()
+    try:
+        p = run_bounded(argv, cwd=cwd, timeout=timeout, env=env, stdin_bytes=stdin_bytes)
+        if p.overflowed:
+            # No redaction helper in this file: raw stdout reached the payload and was printed.
+            return subprocess.CompletedProcess(argv, 125, "", "child_output_too_large")
+        if p.timed_out:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if git_observation_stderr_refused(argv, p.stderr):
+            return subprocess.CompletedProcess(argv, 126, "", "git_observation_stderr")
+        return subprocess.CompletedProcess(argv, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
@@ -110,8 +731,58 @@ def run(argv: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedPr
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
+# Enumerated from the CONSUMER, not restated by hand: every character `str.splitlines()` treats as
+# a line boundary can fabricate a porcelain record. git quotes C0 controls in a pathname even under
+# `core.quotePath=false`, but NOT the non-ASCII separators — and splitlines() splits on NEL
+# (U+0085), LS (U+2028) and PS (U+2029) all the same, so a repo-local `core.quotePath=false` plus a
+# directory named `evil<U+2028> M .claude` fabricated a marker record from one untracked file.
+# Framing is therefore taken from `-z` NUL, which the inspected repo cannot reconfigure.
+STATUS_PATH_DELIMITERS = frozenset(
+    {"\t"}
+    | {chr(code) for code in range(0x11000) if len(f"a{chr(code)}b".splitlines()) > 1}
+    | {chr(code) for code in range(0x00, 0x20)}
+    | {chr(0x7F)}
+    | {chr(code) for code in range(0x80, 0xA0)}
+)
+
+
+def escape_status_path(path: str) -> str:
+    """NUL framing protects this parser; escaping protects every consumer of the entry strings."""
+    return "".join(f"\\x{ord(char):02x}" if char in STATUS_PATH_DELIMITERS else char for char in path)
+
+
+def parse_porcelain_z(raw: str) -> list[tuple[str, list[str]]]:
+    """NUL-framed `status --porcelain=v1 -z` → [(xy, [paths])]; `-z` never quotes, so never unquote.
+
+    Text rather than bytes here because this file's git runs in text mode throughout; NUL survives
+    decoding, so the framing is intact either way.
+    """
+    fields = raw.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    records: list[tuple[str, list[str]]] = []
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if len(field) < 4 or field[2] != " ":
+            continue
+        xy, destination = field[:2], field[3:]
+        if xy[0:1] in {"R", "C"} and index < len(fields):
+            source = fields[index]
+            index += 1
+            records.append((xy, [source, destination]))
+            continue
+        records.append((xy, [destination]))
+    return records
+
+
+def porcelain_entries(raw: str) -> list[str]:
+    return [f"{xy} " + " -> ".join(escape_status_path(path) for path in paths) for xy, paths in parse_porcelain_z(raw)]
+
+
 def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | None:
-    proc = run(["git", "--no-optional-locks", *args], repo)
+    proc = run(git_argv(*args), repo)
     if proc.returncode != 0:
         return None
     if preserve_leading:
@@ -120,36 +791,102 @@ def git_value(repo: Path, *args: str, preserve_leading: bool = False) -> str | N
 
 
 def repo_summary(repo: Path) -> dict[str, Any]:
+    """Observe the repo, or say plainly which observation failed.
+
+    r25 checked only --show-toplevel. Every later call went through git_value(), which maps ANY
+    non-zero exit to None — so a timed-out `branch --show-current` and a genuinely detached HEAD
+    were the same value, and `decide()` could still return idle_clean off a tree it never
+    observed. A failed observation is not a fact about the repo; it is the absence of one.
+
+    An unauthenticatable trusted git is one more way the observation is absent, and it is reported
+    as exactly that rather than raised: `observed` stays false, so no caller can read a fact out of
+    a repo this never looked at.
+    """
+    try:
+        return _observed_repo_summary(repo)
+    except OSError as exc:
+        return {
+            "path": str(repo),
+            "git_ok": False,
+            "git_root": None,
+            "observed": False,
+            "status_available": False,
+            "branch": None,
+            "head": None,
+            "head_short": None,
+            "origin_main": None,
+            "synced_with_origin_main": None,
+            "dirty": None,
+            "porcelain": [],
+            "observation_failed": "trusted_git",
+            "stderr_tail": str(exc)[-500:],
+        }
+
+
+def _observed_repo_summary(repo: Path) -> dict[str, Any]:
     git_root = git_value(repo, "rev-parse", "--show-toplevel")
     git_ok = bool(git_root)
-    branch = git_value(repo, "branch", "--show-current") if git_ok else None
-    head = git_value(repo, "rev-parse", "HEAD") if git_ok else None
-    origin_main = git_value(repo, "rev-parse", "origin/main") if git_ok else None
-    porcelain = git_value(
-        repo,
-        "-c",
-        "status.showUntrackedFiles=all",
-        "-c",
-        "color.status=false",
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        preserve_leading=True,
-    ) if git_ok else None
-    status_available = porcelain is not None
-    state = {
+    state: dict[str, Any] = {
         "path": str(repo),
         "git_ok": git_ok,
         "git_root": git_root,
-        "status_available": status_available,
-        "branch": branch,
+        "observed": False,
+        "status_available": False,
+        "branch": None,
+        "head": None,
+        "head_short": None,
+        "origin_main": None,
+        "synced_with_origin_main": None,
+        "dirty": None,
+        "porcelain": [],
+    }
+    if not git_ok:
+        state["observation_failed"] = "git_root"
+        return state
+
+    observations = {
+        "branch": run(git_argv("branch", "--show-current"), repo),
+        "head": run(git_argv("rev-parse", "HEAD"), repo),
+        "status": run(
+            git_argv(
+                "-c", "status.showUntrackedFiles=all",
+                "-c", "color.status=false",
+                "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            ),
+            repo,
+        ),
+    }
+    failed = next((label for label, proc in observations.items() if proc.returncode != 0), None)
+    if failed is not None:
+        state["observation_failed"] = failed
+        state["returncode"] = observations[failed].returncode
+        state["stderr_tail"] = observations[failed].stderr[-500:]
+        return state
+
+    # `origin/main` is the one ref whose absence is a FACT, not a failure: a repo with no origin
+    # legitimately has no such ref. `--verify --quiet` separates the two — rc 1 with no output is
+    # "absent", any other non-zero code (124 timeout, 127 exec) is "could not observe".
+    origin_proc = run(git_argv("rev-parse", "--verify", "--quiet", "origin/main"), repo)
+    if origin_proc.returncode not in (0, 1) or (origin_proc.returncode == 1 and origin_proc.stderr.strip()):
+        state["observation_failed"] = "origin_main"
+        state["returncode"] = origin_proc.returncode
+        state["stderr_tail"] = origin_proc.stderr[-500:]
+        return state
+    origin_main = origin_proc.stdout.strip() if origin_proc.returncode == 0 else None
+
+    head = observations["head"].stdout.strip()
+    porcelain = porcelain_entries(observations["status"].stdout)
+    state.update({
+        "observed": True,
+        "status_available": True,
+        "branch": observations["branch"].stdout.strip(),
         "head": head,
         "head_short": head[:12] if head else None,
         "origin_main": origin_main,
         "synced_with_origin_main": bool(head and origin_main and head == origin_main),
-        "dirty": bool(porcelain) if status_available else None,
-        "porcelain": porcelain.splitlines() if porcelain else [],
-    }
+        "dirty": bool(porcelain),
+        "porcelain": porcelain,
+    })
     return state
 
 
@@ -190,11 +927,209 @@ def skill_compare(repo: Path, installed: Path) -> dict[str, Any]:
     }
 
 
-def contract_status_summary(repo_root: Path) -> dict[str, Any]:
-    contract_status = repo_root / "scripts" / "hermes-busdriver-finalization-contract-status"
-    if not contract_status.exists() or not contract_status.is_file():
-        return {"ok": False, "error": "contract_status_missing", "path": str(contract_status)}
-    proc = run([sys.executable, str(contract_status)], repo_root)
+def _read_authenticated(path: Path, expected_digest: str) -> bytes:
+    """Read a helper's bytes, proving identity and cost across the read rather than trusting the name.
+
+    Two things run after the open, and until r34 neither was proved. The READ was unbounded: the
+    candidate chose how much memory this process spent, and it chose before the digest that would
+    have rejected it. And identity was compared once, at open, so everything the read spans — a
+    truncation, a growth, a new hard link, a chmod, a rename away from the name — was covered by
+    nothing at all.
+
+    So the size is checked before the read, the read is capped one byte past the bound (reading
+    exactly the bound cannot distinguish "this file IS the bound" from "this is a prefix of a larger
+    one"), and the fd is re-examined afterwards against what it said at open. `st_size` is never
+    trusted as a stopping condition — it is read from the very file the check exists to doubt.
+
+    The closing lstat is the half no descriptor can see: the fd proves OUR inode is unchanged and
+    says nothing about where the NAME points, and the name is what the caller goes on to use.
+    """
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise OSError("helper_not_regular")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("helper_identity_changed")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+        ):
+            raise OSError("helper_metadata_invalid")
+        if opened.st_size > MAX_AUTHENTICATED_HELPER_BYTES:
+            # Refused without ever holding it. This is the whole point of the bound.
+            raise OSError("helper_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_HELPER_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_HELPER_BYTES:
+            raise OSError("helper_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            raise OSError("helper_changed_during_read")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("helper_replaced_during_read")
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise OSError("helper_digest_invalid")
+    return data
+
+
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def _write_exclusive(path: Path, data: bytes, mode: int) -> os.stat_result:
+    """Write the retained helper, then prove the descriptor still holds exactly what was authenticated.
+
+    The bytes reaching here were hashed against a pin, but the hash authenticated MEMORY. Without a
+    flush they need not be on disk when the child is launched to read them, and without a closing
+    re-read "we wrote it" and "the file holds it" stay separate claims — the second is the one the
+    execution below actually depends on. `os.chmod(path, ...)` was the same shape of gap: it names
+    the file a second time, and a second resolution can land somewhere else.
+
+    The digest proves OUR inode is intact and can prove nothing else; the closing identity check
+    proves the other direction — that `path` still REACHES it — which is the half no descriptor can
+    see. An adversary who renames our file aside and its own into place leaves every fd-visible
+    field (type, owner, link count, size, mode, digest) describing our inode exactly, and leaves the
+    name the child is about to execute pointing at theirs.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: _digest_fd reads the bytes back through THIS descriptor, and a
+        # write-only one cannot be read. Reopening the name would resolve it a second time.
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short_write")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(data)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("retained_helper_metadata_invalid")
+            if _digest_fd(fd, st.st_size) != hashlib.sha256(data).hexdigest():
+                raise OSError("retained_helper_replaced_after_write")
+            if not _names_created_inode(parent_fd, path.name, created):
+                raise OSError("retained_helper_replaced_after_write")
+        except BaseException:
+            # Never leave a half-written helper for the next step to execute. But by now the name may
+            # belong to something else — the case the identity check above fails on — and deleting
+            # THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, path.name, created):
+                try:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+        # Handed back so a caller whose own later step fails can prove, before unlinking, that the
+        # name still reaches THIS inode. Without it the caller's cleanup resolves the name a second
+        # time — the very thing every check above refuses to do.
+        return created
+    finally:
+        os.close(parent_fd)
+
+
+def _digest_fd(fd: int, size: int) -> str:
+    """sha256 of the bytes behind THIS descriptor. `pread` so it neither moves nor rides the offset."""
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(1 << 16, size - offset), offset)
+        if not chunk:
+            raise OSError("retained_helper_truncated")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def contract_status_summary() -> dict[str, Any]:
+    """Run THIS checkout's contract-status helper, never the one under `--repo`.
+
+    r25 built `<repo>/scripts/hermes-busdriver-finalization-contract-status` and ran it with
+    `sys.executable`. `--repo` names a repository this brief does not trust — it is a path an
+    operator passes to have its state SUMMARIZED — so any repo could execute arbitrary code from a
+    helper whose envelope claims read_only: true. The helper takes no --repo and answers for this
+    relay's own contract state, so the target repo never had a say in which bytes ran.
+
+    The bytes are authenticated against the runtime manifest pin and executed from a retained
+    private copy, so a swap between the digest check and the exec cannot substitute the payload.
+    """
+    if not CONTRACT_STATUS.exists():
+        return {"ok": False, "error": "contract_status_missing", "helper_path": str(CONTRACT_STATUS)}
+    try:
+        data = _read_authenticated(CONTRACT_STATUS, TRUSTED_CONTRACT_STATUS_SHA256)
+    except OSError as exc:
+        return {"ok": False, "error": "contract_status_integrity_failed", "detail": str(exc) or type(exc).__name__}
+    with tempfile.TemporaryDirectory(prefix="hermes-relay-brief-contract-") as temp:
+        parent = Path(temp)
+        parent.chmod(0o700)
+        retained = parent / "hermes-busdriver-finalization-contract-status"
+        try:
+            _write_exclusive(retained, data, 0o500)
+            _read_authenticated(retained, TRUSTED_CONTRACT_STATUS_SHA256)
+        except OSError as exc:
+            return {"ok": False, "error": "contract_status_integrity_failed", "detail": str(exc) or type(exc).__name__}
+        loader = (
+            "import sys\n"
+            "virtual = sys.argv[1]\n"
+            "program = sys.stdin.buffer.read()\n"
+            "sys.argv = [virtual, *sys.argv[2:]]\n"
+            "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+            "exec(compile(program, virtual, 'exec'), namespace)\n"
+        )
+        proc = run(
+            [str(trusted_executable_path("python3")), "-I", "-c", loader, str(retained)],
+            parent,
+            stdin_bytes=data,
+        )
+    return _contract_status_payload(proc)
+
+
+def _contract_status_payload(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     if proc.returncode != 0:
         return {"ok": False, "error": "contract_status_failed", "stderr_tail": proc.stderr[-500:]}
     try:
@@ -231,12 +1166,15 @@ def contract_status_summary(repo_root: Path) -> dict[str, Any]:
         "decision_status": decision.get("status"),
         "remaining_work_count": summary.get("remaining_work_count", len(matrix)),
         "policy_blocked_count": summary.get("policy_blocked_count", sum(1 for row in matrix if isinstance(row, dict) and row.get("status") == "policy_blocked")),
+        "implemented_count": summary.get("implemented_count", sum(1 for row in matrix if isinstance(row, dict) and row.get("implemented") is True)),
         "capability_allowed_count": summary.get("capability_allowed_count", sum(1 for row in matrix if isinstance(row, dict) and row.get("capability_allowed") is True)),
     }
 
 
 def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
-    if not repo_state.get("git_ok") or not repo_state.get("status_available"):
+    # `observed` covers every observation, not just `status`: an idle-clean verdict off an
+    # unobserved branch/HEAD/origin is the same fabrication as one off an unobserved worktree.
+    if not repo_state.get("git_ok") or not repo_state.get("observed") or not repo_state.get("status_available"):
         return {"status": "blocked_unverified_repo_state", "next_safe_slice": "inspect_repo_git_status"}
     if repo_state.get("dirty"):
         return {"status": "needs_local_reconciliation", "next_safe_slice": "inspect_and_reconcile_dirty_tree"}
@@ -250,6 +1188,8 @@ def decide(repo_state: dict[str, Any], skill_state: dict[str, Any], contract: di
         if skill_state.get("missing") and not skill_state.get("extra") and not skill_state.get("diffs"):
             return {"status": "needs_skill_source_sync", "next_safe_slice": "sync_installed_skill_reference_back_to_repo"}
         return {"status": "needs_skill_source_sync", "next_safe_slice": "reconcile_skill_source_drift"}
+    if contract.get("ok") and contract.get("implemented_count", 0) > 0 and contract.get("policy_blocked_count", 0) > 0:
+        return {"status": "idle_clean_partial_policy_blocked_finalization", "next_safe_slice": "use_gated_delivery_mode_or_pick_next_blocked_surface_contract"}
     if contract.get("ok") and contract.get("policy_blocked_count", 0) > 0:
         return {"status": "idle_clean_policy_blocked_finalization", "next_safe_slice": "none_stop_cleanup_loop_until_busdriver_approves_new_surface"}
     return {"status": "blocked_unknown_contract_state", "next_safe_slice": "inspect_contract_status_helper"}
@@ -261,10 +1201,15 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     repo_state = repo_summary(repo)
     skill_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
     skill_state = skill_compare(skill_root, installed)
-    contract_root = Path(repo_state["git_root"]) if repo_state.get("git_root") else repo
-    contract = contract_status_summary(contract_root)
+    contract = contract_status_summary()
     decision = decide(repo_state, skill_state, contract)
-    ok = bool(repo_state.get("git_ok")) and bool(repo_state.get("status_available")) and bool(contract.get("ok")) and bool(skill_state.get("checked"))
+    ok = (
+        bool(repo_state.get("git_ok"))
+        and bool(repo_state.get("observed"))
+        and bool(repo_state.get("status_available"))
+        and bool(contract.get("ok"))
+        and bool(skill_state.get("checked"))
+    )
     return {
         "schema": "hermes-busdriver-relay-brief/v0",
         "version": 0,
@@ -298,7 +1243,7 @@ def render_brief(payload: dict[str, Any]) -> str:
         "Hermes Busdriver Relay brief",
         f"repo: {repo.get('branch')} {repo.get('head_short')} dirty={repo.get('dirty')} synced={repo.get('synced_with_origin_main')}",
         f"skill-sync: {skill_text}",
-        f"contract: {contract.get('decision_status')} remaining={contract.get('remaining_work_count')} allowed={contract.get('capability_allowed_count')}",
+        f"contract: {contract.get('decision_status')} remaining={contract.get('remaining_work_count')} blocked={contract.get('policy_blocked_count')} implemented={contract.get('implemented_count')} allowed={contract.get('capability_allowed_count')}",
         "roadmap: " + ", ".join(task.get("label", task.get("id", "unknown")) for task in payload["roadmap_tasks"]) + " are represented as read-only/policy-blocked tasks",
         "authority: all false",
         f"next: {decision.get('next_safe_slice')}",

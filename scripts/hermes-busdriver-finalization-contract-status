@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only finalization contract status / capability matrix.
 
 This helper is deliberately informational. It translates ADR 0005 and the
@@ -18,13 +18,19 @@ CONTRACT_ADR = "ADRs/0005-finalization-authority-integration-contract.md"
 ADR_0006 = "ADRs/0006-programmatic-dual-review-marker-interop.md"
 CONTRACT_ADRS = [CONTRACT_ADR, ADR_0006]
 RELATED_DESIGN_ADRS = [ADR_0006]
-CURRENT_POLICY = "non_mutating_relay_only"
+CURRENT_POLICY = "gated_delivery_mode_executor"
 GUARDRAILS_SCHEMA = "hermes-busdriver-finalization-guardrails/v0"
 SOURCE_REMAINING_WORK = "scripts/hermes-busdriver-finalization-readiness:finalization_guardrails.remaining_work"
 POLICY = (
-    "Finalization expansion is policy-blocked until a later implementation slice proves the ADR 0005 "
-    "Busdriver-approved authority contract for the specific surface. This status helper is read-only "
-    "and does not retire remaining_work or authorize mutation."
+    "Explicit Hermes Delivery Mode now has a narrow gated executor surface for pre-PR-review/commit/push/PR/merge. "
+    "Operation availability is narrower: pre-PR review is policy-blocked by isolated_review_runtime_unavailable before delivery-status or lock handling; "
+    "verify-only command execution is policy-blocked by verifier_containment_unavailable; "
+    "push is policy-blocked by atomic_push_base_binding_unavailable; PR creation is policy-blocked by "
+    "atomic_pr_create_binding_unavailable; and merge is policy-blocked by atomic_merge_base_binding_unavailable. "
+    "This helper remains read-only and grants no standing authority: each dispatchable mutating operation must first pass its fixed policy blocker, then prove "
+    "fresh evidence at runtime, acquire a finalization lock, and write a redacted side-effect transcript. "
+    "Programmatic dual review, raw marker interop/writes, autonomous PR-grind fix loops, deploy, release, "
+    "and publish remain blocked."
 )
 
 AUTHORITY = {
@@ -50,6 +56,7 @@ NON_MUTATING_CAPABILITY_FLAGS = {
 }
 
 UNSUPPORTED_MUTATING_OPERATIONS = [
+    "pre_pr_review",
     "commit",
     "push",
     "pr_create",
@@ -233,56 +240,65 @@ CAPABILITY_MATRIX = [
     {
         "id": "deliver-mutating-executor",
         "surface": "mutating commit/push/PR/merge executor",
-        "current_relay_surface": "read_only_delivery_status_verify_only_dispatch_and_finalization_handoff",
-        "operations": ["commit", "push", "pr_create", "merge"],
+        "current_relay_surface": "gated_delivery_mode_executor",
+        "operations": ["pre_pr_review", "commit", "push", "pr_create", "merge"],
+        "operation_statuses": {
+            "pre_pr_review": "policy_blocked:isolated_review_runtime_unavailable",
+            "commit": "implemented_gated",
+            "push": "policy_blocked:atomic_push_base_binding_unavailable",
+            "pr_create": "policy_blocked:atomic_pr_create_binding_unavailable",
+            "merge": "policy_blocked:atomic_merge_base_binding_unavailable",
+        },
+        "status": "implemented_gated",
+        "implemented": True,
         "missing_unlock_criteria": [
-            "busdriver_approved_seam",
-            "mutating_schema",
-            "hook_runtime_or_equivalent_proof",
-            "explicit_user_intent_per_operation",
-            "fresh_repo_pr_evidence",
-            "fresh_gate_review_evidence",
-            "finalization_lock_authority",
-            "data_boundary_policy",
-            "side_effect_transcript",
-            "postflight_reconciliation",
+            "runtime_explicit_user_intent_per_operation",
+            "runtime_fresh_repo_pr_evidence",
+            "runtime_fresh_gate_review_evidence",
+            "runtime_finalization_lock_authority",
+            "runtime_data_boundary_policy",
+            "runtime_postflight_reconciliation",
+        ],
+        "implemented_evidence": [
+            "scripts/hermes-busdriver-deliver execute operations",
+            "fresh_delivery_litmus_pre_pr_pr_grind_evidence_checks",
+            "finalization_lock_acquire_release",
+            "redacted_side_effect_transcript",
             "fail_closed_contract_tests",
         ],
-        "missing_future_schemas": [
-            "hermes-busdriver-finalization-authority/v0",
-            "hermes-busdriver-mutating-delivery-run/v0",
-        ],
+        "missing_future_schemas": [],
         "adr_sections": [
             "Authority Sources",
             "Required Unlock Criteria by Surface / Mutating commit/push/PR/merge executor and envelope",
         ],
-        "description": "hermes-busdriver-deliver commit/push/PR/merge executor mode, if ever approved",
+        "description": "hermes-busdriver-deliver gated executor surface with operation-specific dispatchability",
     },
     {
         "id": "mutating-final-result-envelope",
         "surface": "mutating final delivery result envelope",
-        "current_relay_surface": "read_only_handoff_and_non_mutating_delivery_run_envelopes",
+        "current_relay_surface": "gated_mutating_delivery_run_envelopes",
         "operations": ["mutating_delivery_result"],
+        "status": "implemented_gated",
+        "implemented": True,
         "missing_unlock_criteria": [
-            "busdriver_approved_seam",
-            "mutating_schema",
-            "schema_authority",
-            "authority_evidence_schema",
+            "runtime_authority_evidence_schema",
+            "runtime_lock_preflight_postflight_state",
+            "runtime_side_effect_transcript",
+            "runtime_postflight_reconciliation",
+        ],
+        "implemented_evidence": [
+            "hermes-busdriver-mutating-delivery-run/v0",
             "durable_redacted_run_artifact_contract",
             "lock_preflight_postflight_state",
             "side_effect_transcript",
-            "postflight_reconciliation",
             "malformed_or_authority_positive_rejection_tests",
         ],
-        "missing_future_schemas": [
-            "hermes-busdriver-finalization-authority/v0",
-            "hermes-busdriver-mutating-delivery-run/v0",
-        ],
+        "missing_future_schemas": [],
         "adr_sections": [
             "Schemas and Evidence Required",
             "Retiring finalization_guardrails.remaining_work",
         ],
-        "description": "mutating final delivery result envelope",
+        "description": "gated mutating delivery result envelope",
     },
     {
         "id": "programmatic-litmus-pre-pr-dual-review",
@@ -378,11 +394,12 @@ def parse_args() -> argparse.Namespace:
 def matrix_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in CAPABILITY_MATRIX:
+        implemented = bool(item.get("implemented", False))
         rows.append({
             **item,
-            "status": "policy_blocked",
-            "retired": False,
-            "implemented": False,
+            "status": str(item.get("status") or "policy_blocked"),
+            "retired": bool(item.get("retired", False)),
+            "implemented": implemented,
             "safe_to_execute_by_this_helper": False,
             "capability_allowed": False,
             "authority": dict(NON_MUTATING_CAPABILITY_FLAGS),
@@ -433,13 +450,14 @@ def build_status() -> dict[str, Any]:
         "summary": {
             "remaining_work_count": len(rows),
             "policy_blocked_count": sum(1 for row in rows if row["status"] == "policy_blocked"),
+            "implemented_count": sum(1 for row in rows if row["implemented"]),
             "retired_count": len(retired_ids),
             "capability_allowed_count": sum(1 for row in rows if row["capability_allowed"]),
             "finalization_flags_policy": CURRENT_POLICY,
         },
         "decision": {
-            "status": "policy_blocked",
-            "reason": "adr_0005_unlock_contract_not_satisfied",
+            "status": "partial_policy_blocked",
+            "reason": "gated_executor_available_other_surfaces_blocked",
             **NON_MUTATING_CAPABILITY_FLAGS,
         },
     }

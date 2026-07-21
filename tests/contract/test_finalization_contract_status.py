@@ -27,8 +27,6 @@ UNSAFE_BOOLEAN_KEYS = [
     "non_codex_agent_enablement_allowed",
     "capability_allowed",
     "safe_to_execute_by_this_helper",
-    "implemented",
-    "retired",
 ]
 EXPECTED_REMAINING_WORK_IDS = {
     "deliver-mutating-executor",
@@ -93,20 +91,22 @@ def test_contract_status_emits_read_only_policy_blocked_matrix():
     ]
     assert data["related_design_adrs"] == ["ADRs/0006-programmatic-dual-review-marker-interop.md"]
     assert data["source_remaining_work"] == "scripts/hermes-busdriver-finalization-readiness:finalization_guardrails.remaining_work"
-    assert data["current_policy"] == "non_mutating_relay_only"
+    assert data["current_policy"] == "gated_delivery_mode_executor"
     assert data["guardrails_schema"] == "hermes-busdriver-finalization-guardrails/v0"
     assert data["retired_remaining_work"] == []
     assert data["summary"] == {
         "remaining_work_count": 5,
-        "policy_blocked_count": 5,
+        "policy_blocked_count": 3,
+        "implemented_count": 2,
         "retired_count": 0,
         "capability_allowed_count": 0,
-        "finalization_flags_policy": "non_mutating_relay_only",
+        "finalization_flags_policy": "gated_delivery_mode_executor",
     }
     assert {item["id"] for item in data["remaining_work"]} == EXPECTED_REMAINING_WORK_IDS
     assert data["required_authority_sources"] == EXPECTED_AUTHORITY_SOURCE_IDS
     assert [item["id"] for item in data["authority_sources"]] == EXPECTED_AUTHORITY_SOURCE_IDS
     assert set(data["unsupported_mutating_operations"]) == {
+        "pre_pr_review",
         "commit",
         "push",
         "pr_create",
@@ -123,7 +123,7 @@ def test_contract_status_emits_read_only_policy_blocked_matrix():
     for key in AUTHORITY_KEYS:
         assert data["authority"][key] is False
         assert data["decision"][key] is False
-    assert data["decision"]["status"] == "policy_blocked"
+    assert data["decision"]["status"] == "partial_policy_blocked"
     assert_no_positive_finalization_authority(data)
 
 
@@ -131,21 +131,41 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
     _, data = run_contract_status()
     by_id = {item["id"]: item for item in data["remaining_work"]}
 
+    implemented_ids = {"deliver-mutating-executor", "mutating-final-result-envelope"}
     for item in by_id.values():
-        assert item["status"] == "policy_blocked"
         assert item["retired"] is False
-        assert item["implemented"] is False
         assert item["safe_to_execute_by_this_helper"] is False
         assert item["capability_allowed"] is False
-        assert item["missing_unlock_criteria"]
-        assert item["missing_authority_sources"] == data["required_authority_sources"]
         assert item["authority"] == data["authority"]
         assert item["adr_sections"]
+        if item["id"] in implemented_ids:
+            assert item["status"] == "implemented_gated"
+            assert item["implemented"] is True
+            assert item["missing_unlock_criteria"]
+            assert item["missing_authority_sources"] == data["required_authority_sources"]
+            assert item["missing_future_schemas"] == []
+            assert item["implemented_evidence"]
+        else:
+            assert item["status"] == "policy_blocked"
+            assert item["implemented"] is False
+            assert item["missing_unlock_criteria"]
+            assert item["missing_authority_sources"] == data["required_authority_sources"]
 
-    assert "busdriver_approved_seam" in by_id["deliver-mutating-executor"]["missing_unlock_criteria"]
-    assert "mutating_schema" in by_id["deliver-mutating-executor"]["missing_unlock_criteria"]
-    assert "hook_runtime_or_equivalent_proof" in by_id["deliver-mutating-executor"]["missing_unlock_criteria"]
-    assert "schema_authority" in by_id["mutating-final-result-envelope"]["missing_unlock_criteria"]
+    assert by_id["deliver-mutating-executor"]["operations"] == ["pre_pr_review", "commit", "push", "pr_create", "merge"]
+    assert by_id["deliver-mutating-executor"]["operation_statuses"] == {
+        "pre_pr_review": "policy_blocked:isolated_review_runtime_unavailable",
+        "commit": "implemented_gated",
+        "push": "policy_blocked:atomic_push_base_binding_unavailable",
+        "pr_create": "policy_blocked:atomic_pr_create_binding_unavailable",
+        "merge": "policy_blocked:atomic_merge_base_binding_unavailable",
+    }
+    assert "verifier_containment_unavailable" in data["policy"]
+    assert "isolated_review_runtime_unavailable" in data["policy"]
+    assert "atomic_pr_create_binding_unavailable" in data["policy"]
+    assert "runtime_fresh_gate_review_evidence" in by_id["deliver-mutating-executor"]["missing_unlock_criteria"]
+    assert "fresh_delivery_litmus_pre_pr_pr_grind_evidence_checks" in by_id["deliver-mutating-executor"]["implemented_evidence"]
+    assert "runtime_authority_evidence_schema" in by_id["mutating-final-result-envelope"]["missing_unlock_criteria"]
+    assert "hermes-busdriver-mutating-delivery-run/v0" in by_id["mutating-final-result-envelope"]["implemented_evidence"]
     assert "busdriver_approved_reviewer_role_mappings_or_native_invocation_seam" in by_id[
         "programmatic-litmus-pre-pr-dual-review"
     ]["missing_unlock_criteria"]
@@ -185,7 +205,7 @@ def test_contract_status_records_adr_0005_unlock_criteria_by_surface():
         "ADRs/0005-finalization-authority-integration-contract.md",
         "ADRs/0006-programmatic-dual-review-marker-interop.md",
     ]
-    assert "hermes-busdriver-mutating-delivery-run/v0" in by_id["mutating-final-result-envelope"]["missing_future_schemas"]
+    assert by_id["mutating-final-result-envelope"]["missing_future_schemas"] == []
     assert "hermes-busdriver-marker-interop/v0" in by_id["busdriver-marker-interop"]["missing_future_schemas"]
 
 

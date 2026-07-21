@@ -83,7 +83,7 @@ def test_relay_brief_reports_requested_roadmap_tasks_read_only_and_authority_fal
     assert data["read_only"] is True
     assert data["ok"] is True
     assert data["finalization_contract_status"]["read_only"] is True
-    assert data["finalization_contract_status"]["decision_status"] == "policy_blocked"
+    assert data["finalization_contract_status"]["decision_status"] == "partial_policy_blocked"
     assert data["finalization_contract_status"]["capability_allowed_count"] == 0
     assert {task["id"] for task in data["roadmap_tasks"]} == EXPECTED_TASKS
 
@@ -92,10 +92,11 @@ def test_relay_brief_reports_requested_roadmap_tasks_read_only_and_authority_fal
         assert data["decision"][flag] is False
 
     task_by_id = {task["id"]: task for task in data["roadmap_tasks"]}
-    assert task_by_id["adr0005-unlock-contract"]["status"] == "contract_complete_authority_policy_blocked"
+    assert task_by_id["adr0005-unlock-contract"]["status"] == "gated_executor_slice_implemented_remaining_authority_policy_blocked"
     assert task_by_id["mutating-pr-grind-fix-loop"]["status"] == "read_only_design_complete_mutating_loop_policy_blocked"
     assert task_by_id["marker-interop-contract"]["status"] == "design_contract_complete_marker_write_policy_blocked"
-    assert task_by_id["pi-adapter-proof"]["status"] == "target_state_requires_schema_wrapper_smoke_contract"
+    assert task_by_id["pi-adapter-proof"]["status"] == "pi_primary_opencode_fallback_verified_non_finalizing"
+    assert task_by_id["pi-adapter-proof"]["safe_next"] == "use_pi_primary_or_opencode_fallback_through_gated_draft_launcher"
     assert task_by_id["status-ux-layer"]["status"] == "implemented_by_hermes_busdriver_relay_brief"
 
 
@@ -108,7 +109,7 @@ def test_relay_brief_text_is_telegram_friendly_and_does_not_claim_authority(tmp_
 
     assert "Hermes Busdriver Relay brief" in text
     assert "skill-sync:" in text
-    assert "contract: policy_blocked" in text
+    assert "contract: partial_policy_blocked" in text
     assert "Pi adapter proof" in text
     assert "Status/UX" in text
     assert "authority: all false" in text
@@ -341,7 +342,14 @@ def test_relay_brief_uses_git_root_for_skill_sync_when_repo_is_subdirectory(tmp_
     assert data["skill_sync"]["clean"] is True
 
 
-def test_relay_brief_contract_status_comes_from_requested_repo(tmp_path):
+def test_relay_brief_contract_status_does_not_come_from_requested_repo(tmp_path):
+    """The contract helper answers for THIS relay, so a bare --repo cannot make it unavailable.
+
+    Replaces the r25 test that asserted the opposite. It expected `contract_status_missing`
+    whenever the target repo had no scripts/ dir — which only held because the brief resolved the
+    helper under the untrusted --repo. That expectation was the trust-boundary bug written down
+    as a contract.
+    """
     repo, installed_skill = make_repo_with_skill(tmp_path)
     init_git_repo(repo)
 
@@ -350,37 +358,18 @@ def test_relay_brief_contract_status_comes_from_requested_repo(tmp_path):
 
     assert data["repo"]["git_root"] == str(repo)
     assert data["skill_sync"]["clean"] is True
-    assert data["finalization_contract_status"]["ok"] is False
-    assert data["finalization_contract_status"]["error"] == "contract_status_missing"
-    assert data["ok"] is False
-    assert data["decision"]["status"] == "blocked_unknown_contract_state"
+    assert data["finalization_contract_status"]["ok"] is True
+    assert data["finalization_contract_status"]["schema"] == "hermes-busdriver-finalization-contract-status/v0"
+    assert data["ok"] is True
+    assert data["decision"]["status"].startswith("idle_clean")
 
 
-def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_path):
+def test_relay_brief_contract_status_helper_ignores_repo_root_cwd(tmp_path):
+    """A subdirectory --repo still reports the same trusted contract state."""
     repo, installed_skill = make_repo_with_skill(tmp_path)
-    scripts = repo / "scripts"
-    scripts.mkdir()
-    contract_helper = scripts / "hermes-busdriver-finalization-contract-status"
-    contract_helper.write_text(
-        "import json\n"
-        "from pathlib import Path\n"
-        "cwd = str(Path.cwd())\n"
-        "print(json.dumps({\n"
-        "    'ok': True,\n"
-        "    'schema': 'hermes-busdriver-finalization-contract-status/v0',\n"
-        "    'read_only': True,\n"
-        "    'current_policy': cwd,\n"
-        "    'decision': {'status': 'policy_blocked'},\n"
-        "    'remaining_work': [{'status': 'policy_blocked', 'capability_allowed': False}],\n"
-        "    'summary': {\n"
-        "        'remaining_work_count': 1,\n"
-        "        'policy_blocked_count': 1,\n"
-        "        'capability_allowed_count': 0,\n"
-        "    },\n"
-        "}))\n"
-    )
     subdir = repo / "subdir"
     subdir.mkdir()
+    (subdir / "keep.txt").write_text("x\n")
     init_git_repo(repo)
 
     proc = run_brief("--pretty", "--repo", str(subdir), "--installed-skill", str(installed_skill))
@@ -388,51 +377,44 @@ def test_relay_brief_contract_status_helper_runs_from_requested_repo_root(tmp_pa
 
     assert data["repo"]["git_root"] == str(repo)
     assert data["repo"]["dirty"] is False
-    assert data["skill_sync"]["clean"] is True
-    assert data["finalization_contract_status"] == {
-        "ok": True,
-        "schema": "hermes-busdriver-finalization-contract-status/v0",
-        "read_only": True,
-        "current_policy": str(repo),
-        "decision_status": "policy_blocked",
-        "remaining_work_count": 1,
-        "policy_blocked_count": 1,
-        "capability_allowed_count": 0,
-    }
+    assert data["finalization_contract_status"]["ok"] is True
+    assert data["finalization_contract_status"]["decision_status"]
     assert data["ok"] is True
-    assert data["decision"]["status"] == "idle_clean_policy_blocked_finalization"
 
 
-def test_relay_brief_rejects_unknown_contract_status_schema(tmp_path):
-    repo, installed_skill = make_repo_with_skill(tmp_path)
-    scripts = repo / "scripts"
-    scripts.mkdir()
-    contract_helper = scripts / "hermes-busdriver-finalization-contract-status"
-    contract_helper.write_text(
-        "import json\n"
-        "print(json.dumps({\n"
-        "    'ok': True,\n"
-        "    'schema': 'fake-contract-status/v0',\n"
-        "    'read_only': True,\n"
-        "    'decision': {'status': 'policy_blocked'},\n"
-        "    'summary': {\n"
-        "        'remaining_work_count': 1,\n"
-        "        'policy_blocked_count': 1,\n"
-        "        'capability_allowed_count': 0,\n"
-        "    },\n"
-        "}))\n"
+def test_relay_brief_rejects_unknown_contract_status_schema():
+    """Schema rejection is now unreachable via a repo-authored helper, so drive the validator.
+
+    r25 proved this by planting a fake helper under --repo and letting the brief execute it. The
+    coverage is still worth keeping; the delivery mechanism was the vulnerability.
+    """
+    import runpy
+
+    ns = runpy.run_path(str(SCRIPT))
+    proc = subprocess.CompletedProcess(
+        ["helper"],
+        0,
+        json.dumps({
+            "ok": True,
+            "schema": "fake-contract-status/v0",
+            "read_only": True,
+            "decision": {"status": "policy_blocked"},
+            "summary": {"remaining_work_count": 1, "policy_blocked_count": 1, "capability_allowed_count": 0},
+        }),
+        "",
     )
-    init_git_repo(repo)
 
-    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
-    data = json.loads(proc.stdout)
+    result = ns["_contract_status_payload"](proc)
 
-    assert data["finalization_contract_status"]["ok"] is False
-    assert data["finalization_contract_status"]["error"] == "contract_status_schema_invalid"
-    assert data["finalization_contract_status"]["schema"] == "fake-contract-status/v0"
-    assert data["finalization_contract_status"]["expected_schema"] == "hermes-busdriver-finalization-contract-status/v0"
-    assert data["ok"] is False
-    assert data["decision"]["status"] == "blocked_unknown_contract_state"
+    assert result["ok"] is False
+    assert result["error"] == "contract_status_schema_invalid"
+    assert result["schema"] == "fake-contract-status/v0"
+    assert result["expected_schema"] == "hermes-busdriver-finalization-contract-status/v0"
+    assert ns["decide"](
+        {"git_ok": True, "observed": True, "status_available": True, "dirty": False},
+        {"checked": True, "clean": True},
+        result,
+    )["status"] == "blocked_unknown_contract_state"
 
 
 def test_relay_brief_blocks_when_repo_git_state_unverified(tmp_path):
@@ -489,3 +471,133 @@ def test_relay_brief_treats_empty_installed_skill_env_as_unset():
 
     assert data["skill_sync"]["path"].endswith("/.hermes/skills/autonomous-ai-agents/busdriver-relay")
     assert data["skill_sync"]["path"] != data["repo"]["path"]
+
+
+# --- v16-r26A item 2: --repo is untrusted; never execute its scripts, never idle-clean unobserved ---
+
+
+def test_relay_brief_never_executes_contract_helper_from_untrusted_repo(tmp_path):
+    """`--repo` names a repository this helper does not trust. Its scripts/ is attacker code."""
+    repo, installed_skill = make_repo_with_skill(tmp_path)
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    sentinel = tmp_path / "pwned"
+    hostile = scripts / "hermes-busdriver-finalization-contract-status"
+    hostile.write_text(
+        "import json, pathlib\n"
+        f"pathlib.Path({str(sentinel)!r}).write_text('executed')\n"
+        "print(json.dumps({\n"
+        "    'ok': True,\n"
+        "    'schema': 'hermes-busdriver-finalization-contract-status/v0',\n"
+        "    'read_only': True,\n"
+        "    'decision': {'status': 'policy_blocked'},\n"
+        "    'summary': {'remaining_work_count': 1, 'policy_blocked_count': 1,\n"
+        "                'implemented_count': 0, 'capability_allowed_count': 0},\n"
+        "}))\n"
+    )
+    hostile.chmod(0o755)
+    init_git_repo(repo)
+
+    proc = run_brief("--pretty", "--repo", str(repo), "--installed-skill", str(installed_skill))
+
+    assert not sentinel.exists(), "relay-brief executed a script from the untrusted --repo"
+    data = json.loads(proc.stdout)
+    contract = data["finalization_contract_status"]
+    assert contract.get("helper_path") != str(hostile)
+    # The trusted sibling is this checkout's own, and it answers for THIS relay's contract.
+    assert contract["ok"] is True
+    assert contract["schema"] == "hermes-busdriver-finalization-contract-status/v0"
+
+
+def test_relay_brief_contract_helper_integrity_failure_fails_closed(tmp_path, monkeypatch):
+    import runpy
+
+    ns = runpy.run_path(str(SCRIPT))
+    globals_ = ns["contract_status_summary"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_CONTRACT_STATUS_SHA256", "0" * 64)
+
+    result = ns["contract_status_summary"]()
+
+    assert result["ok"] is False
+    assert result["error"] == "contract_status_integrity_failed"
+
+
+def test_relay_brief_executes_verified_contract_bytes_after_retained_path_replacement(tmp_path, monkeypatch):
+    import runpy
+
+    ns = runpy.run_path(str(SCRIPT))
+    globals_ = ns["contract_status_summary"].__globals__
+    real_run = globals_["run"]
+    attacker_ran = tmp_path / "attacker-ran"
+    attacker = (
+        "import json, pathlib\n"
+        f"pathlib.Path({str(attacker_ran)!r}).write_text('executed')\n"
+        "print(json.dumps({'ok': True, 'schema': 'hermes-busdriver-finalization-contract-status/v0', "
+        "'read_only': True, 'decision': {'status': 'policy_blocked'}, "
+        "'summary': {'remaining_work_count': 1, 'policy_blocked_count': 1, "
+        "'implemented_count': 0, 'capability_allowed_count': 0}}))\n"
+    )
+    swapped = []
+
+    def replace_retained_then_run(argv, cwd, timeout=20, stdin_bytes=None):
+        for value in argv:
+            candidate = Path(str(value))
+            if candidate.name == "hermes-busdriver-finalization-contract-status" and candidate.exists():
+                swapped.append(True)
+                candidate.unlink()
+                candidate.write_text(attacker)
+                candidate.chmod(0o500)
+                break
+        if stdin_bytes is None:
+            return real_run(argv, cwd, timeout)
+        return real_run(argv, cwd, timeout, stdin_bytes=stdin_bytes)
+
+    monkeypatch.setitem(globals_, "run", replace_retained_then_run)
+
+    result = ns["contract_status_summary"]()
+
+    assert swapped, "the retained-path replacement was not injected"
+    assert result["ok"] is True
+    assert not attacker_ran.exists(), "relay-brief executed attacker-replaced retained pathname"
+
+
+def _brief_run_failing(label: str, returncode: int, stderr: str, real_run):
+    def fake_run(argv, cwd, timeout=20):
+        if label in argv:
+            return subprocess.CompletedProcess(argv, returncode, "", stderr)
+        return real_run(argv, cwd, timeout)
+    return fake_run
+
+
+def test_relay_brief_failed_head_observation_never_reports_idle_clean(tmp_path, monkeypatch):
+    import runpy
+
+    repo, installed_skill = make_repo_with_skill(tmp_path)
+    init_git_repo(repo)
+
+    ns = runpy.run_path(str(SCRIPT))
+    globals_ = ns["repo_summary"].__globals__
+    monkeypatch.setitem(globals_, "run", _brief_run_failing("HEAD", 128, "fatal: bad object", globals_["run"]))
+
+    state = ns["repo_summary"](repo)
+
+    assert state.get("observed") is not True, "HEAD failure left the repo marked observed"
+    decision = ns["decide"](state, {"checked": True, "clean": True}, {"ok": True, "policy_blocked_count": 1})
+    assert not str(decision["status"]).startswith("idle_clean"), "idle-clean decided on an unobserved HEAD"
+
+
+def test_relay_brief_failed_origin_observation_never_reports_idle_clean(tmp_path, monkeypatch):
+    import runpy
+
+    repo, installed_skill = make_repo_with_skill(tmp_path)
+    init_git_repo(repo)
+
+    ns = runpy.run_path(str(SCRIPT))
+    globals_ = ns["repo_summary"].__globals__
+    monkeypatch.setitem(globals_, "run", _brief_run_failing("--show-current", 124, "timed out after 20s", globals_["run"]))
+
+    state = ns["repo_summary"](repo)
+
+    assert state.get("observed") is not True
+    decision = ns["decide"](state, {"checked": True, "clean": True}, {"ok": True, "policy_blocked_count": 1})
+    assert not str(decision["status"]).startswith("idle_clean")
