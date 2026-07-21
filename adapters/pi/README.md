@@ -4,7 +4,7 @@ This directory contains the relay-owned Pi adapter. It is not Pi upstream source
 
 ## Role
 
-Pi is a constrained Busdriver-shaped tool-harness candidate. It can produce scoped draft changes, but it is not ClaudeCode/Busdriver authority and cannot finalize work.
+Pi is the default target Busdriver-shaped adapter contract. It produces scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
 
 ```text
 Pi result status = needs_busdriver_review | blocked
@@ -20,7 +20,7 @@ pi-result.schema.json    Fail-closed result artifact contract
 
 ## Tool boundary
 
-The extension should be loaded with built-in tools and unrelated extensions disabled:
+The non-installed harness exercises the extension with built-in tools and unrelated extensions disabled:
 
 ```bash
 pi \
@@ -44,7 +44,7 @@ pi \
 
 ## Launcher
 
-Use the relay wrapper rather than calling Pi directly for repo work:
+Both commands below are negative production capability probes and are expected to return blocked:
 
 ```bash
 scripts/pi/run-pi-busdriver-draft \
@@ -54,10 +54,8 @@ scripts/pi/run-pi-busdriver-draft \
   --scope-include 'src/**'
 ```
 
-Production draft routing should go through:
-
 ```bash
 scripts/hermes-busdriver-agent-draft --agent pi ...
 ```
 
-That wrapper handles lock, preflight, Pi launch, postflight, and final `needs_busdriver_review` evidence.
+They must report `agent_containment_and_credential_broker_unavailable` and must not launch Pi, copy credentials, or leave a draft diff. Functional `needs_busdriver_review` results belong only to the non-installed harness until a future containment and credential-brokering design is implemented and reviewed.

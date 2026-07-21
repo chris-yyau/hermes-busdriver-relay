@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Contract-test-only dependency injection for the Pi wrapper.
+
+This file is not installed or referenced by production entrypoints.
+"""
+from pathlib import Path
+import os
+import runpy
+import sys
+
+# agent-draft now authenticates and privately RETAINS the wrapper it launches, so the copy that
+# runs sits in a private run dir with no repo above it — `parents[3]` finds the state dir. The
+# agent-draft harness passes the root it loaded this fixture from. Tests that invoke this file
+# in place still resolve it relatively, so the fallback is the normal path, not a fixup.
+ROOT = Path(os.environ["HERMES_TEST_REPO_ROOT"]).resolve() if os.environ.get(
+    "HERMES_TEST_REPO_ROOT"
+) else Path(__file__).resolve().parents[3]
+ns = runpy.run_path(str(ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"))
+globals_ = ns["main"].__globals__
+globals_["production_dispatch_blocker"] = lambda: None
+globals_["trusted_pi_executable"] = lambda value: Path(value).expanduser().resolve()
+globals_["trusted_node_executable"] = lambda: Path(sys.executable).resolve()
+globals_["base_child_environment"] = lambda: {
+    key: value for key, value in globals_["os"].environ.items()
+    if key in {"TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "FAKE_PI_TARGET", "FAKE_PI_CONTENT", "HERMES_TEST_AGENT_CMD", "HERMES_AGENT_DRAFT_GUARD_BIN", "BUSDRIVER_PLUGIN_ROOT", "BUSDRIVER_STATE_DIR"}
+}
+raise SystemExit(ns["main"]())

@@ -2,53 +2,57 @@
 
 ## Status
 
-Accepted as a target-state adapter proof.
+**Accepted as target-state adapter and fixture proof; not enabled for production dispatch.**
 
-## Context
+## Current production truth
 
-The relay needs a constrained way to evaluate Pi as a Busdriver-shaped draft worker without making Pi a Busdriver authority. Pi can run with built-in tools disabled and custom extensions enabled, which makes it a plausible tool-harness adapter candidate.
+Pi remains the preferred implementation route in the authority map, but route preference is metadata rather than executable authority. Production `hermes-busdriver-agent-draft`, the Pi wrapper, and role/status surfaces fail closed before worker, repository, HOME, or credential handling with:
 
-The authority boundary remains unchanged:
+```text
+agent_containment_and_credential_broker_unavailable
+```
+
+Production metadata must therefore report:
+
+```text
+programmatic_dispatch_allowed=false
+adapter_verified=false
+dispatch_allowed=false
+```
+
+Historical fake-worker or real-model smoke proves adapter shape only. It does not prove enforceable process containment or least-privilege credential brokering.
+
+## Authority map
 
 ```text
 ClaudeCode / Busdriver = canonical authority
 Hermes                 = router / operator / verifier
-Pi                     = default constrained draft worker
-OpenCode               = configured fallback/comparison route, non-programmatic until adapter proof
-Codex                  = PR lead / review / backstop-focused by default; implementation only by explicit exception
+Pi                     = preferred constrained draft route; production non-programmatic
+OpenCode               = fallback/comparison route; production non-programmatic
+Codex                  = PR lead / review / backstop-focused by default
 ```
 
-This ADR records the minimum proof required before `hermes-busdriver-agent-draft --agent pi` is treated as an enabled mutating draft lane.
+## Target-state adapter design
 
-## Decision
+The relay retains a non-installed proof surface comprising:
 
-Add a relay-owned Pi adapter with:
+1. `adapters/pi/busdriver-tools.ts`, exposing only Busdriver-shaped `bd_*` tools;
+2. `adapters/pi/pi-result.schema.json`, defining a fail-closed artifact;
+3. a fixture form of `scripts/pi/run-pi-busdriver-draft`;
+4. fixture integration through lock/preflight/postflight;
+5. schema, scope, timeout, process-tree, and authority-negative contract tests.
 
-1. `adapters/pi/busdriver-tools.ts` exposing only Busdriver-shaped `bd_*` tools;
-2. `adapters/pi/pi-result.schema.json` defining the fail-closed result artifact;
-3. `scripts/pi/run-pi-busdriver-draft` launching Pi with built-ins/extensions disabled;
-4. `hermes-busdriver-agent-draft --agent pi` integration through the existing lock/preflight/postflight pattern, while OpenCode fallback/comparison roles remain non-programmatic until their adapter proof exists;
-5. `hermes-busdriver-agent-smoke --agent pi` opt-in real-agent smoke;
-6. contract tests and docs proving all authority flags remain false.
+The production wrapper remains blocked. The fixture seam lives under `tests/fixtures/**`, is loaded only by tests, and is not a production CLI or environment unlock.
 
-## Scope
+## Target-state scope
 
-Pi may perform scoped draft edits only through relay-defined tools. A successful run ends in:
+In the proof harness, Pi may produce scoped draft edits only through relay-defined tools. A successful fixture result ends in:
 
 ```text
 status=needs_busdriver_review
 ```
 
-It does not authorize commits, pushes, PR creation, merges, marker writes, deploys, releases, or any finalization claim.
-
-## Non-goals
-
-- Pi is not Busdriver-native Claude runtime.
-- Pi is not a trusted marker writer.
-- Pi does not run litmus/pre-PR/PR-grind finalization.
-- Pi does not replace ClaudeCode/Busdriver authority.
-- Codex is not the normal implementation fallback; it remains PR lead / review / backstop-focused by default and implements only by explicit exception.
-- OpenCode parity is not a prerequisite for this Pi adapter proof; OpenCode fallback/comparison routes remain non-programmatic unless rebuilt and verified separately.
+It authorizes no commit, push, PR creation, merge, marker write, deploy, release, publish, or finalization action.
 
 ## Authority invariants
 
@@ -67,33 +71,36 @@ publish_allowed=false
 finalization_allowed=false
 ```
 
-Any Pi self-report containing `done`, `complete`, `ready_to_merge`, or `merged` is treated as `worker_self_report_only` unless independently verified by Hermes and authorized by ClaudeCode/Busdriver or explicit Hermes Delivery Mode.
+Any worker self-report containing `done`, `complete`, `ready_to_merge`, or `merged` remains `worker_self_report_only` unless independently verified and separately authorized.
 
 ## Tool boundary
 
-`bd_bash` is argv-only and allowlist-only. It must not expose shell strings, shell expansion, arbitrary `bash -c`, network commands by default, finalization commands, or marker writes.
+`bd_bash` is argv-only and allowlist-only. It exposes no shell strings, shell expansion, arbitrary `bash -c`, default network commands, finalization commands, or marker writes.
 
-`bd_write_draft` writes only inside repo root and declared scope. It blocks `.git/**`, `.claude/**`, `.opencode/**`, trusted marker paths, and symlink escapes. It records normalized path, operation id, `before_hash`, and `after_hash`.
+`bd_write_draft` writes only inside the repository and declared scope. It blocks `.git/**`, `.claude/**`, `.opencode/**`, trusted marker paths, and symlink escapes, and records normalized path, operation ID, `before_hash`, and `after_hash`.
 
 ## Failure modes
 
-The adapter fails closed when:
+The harness fails closed when:
 
-- Pi binary is missing or exits nonzero;
-- Pi does not write `pi-result.json`;
-- the result schema/status is invalid;
+- the worker binary is missing or exits nonzero;
+- the result artifact is missing, malformed, oversized, or inconsistent;
 - any authority flag is true or missing;
 - postflight sees out-of-scope writes;
-- the event/artifact evidence cannot be parsed;
-- gate preflight/postflight fails.
+- process-tree teardown cannot be demonstrated;
+- gate evidence cannot be parsed.
 
-## Rollout gates
+Production fails earlier with `agent_containment_and_credential_broker_unavailable`.
 
-Pi becomes an enabled draft adapter only after all pass:
+## Promotion requirements
 
-1. static contract tests for schema/tools;
-2. fake-Pi wrapper tests;
-3. `hermes-busdriver-agent-draft --agent pi` fake adapter gate test;
-4. `hermes-busdriver-agent-smoke --agent pi` fake adapter test;
-5. optional real Pi smoke when quota/runtime is available;
-6. docs and skill references describing Pi as the default constrained draft lane, OpenCode as fallback/comparison only after adapter proof, and Codex as review/backstop-focused by default.
+Adapter tests and smoke evidence are necessary but not sufficient. Production dispatch remains disabled until an independently reviewed design also proves:
+
+1. enforceable containment for the worker and every descendant;
+2. explicit, least-privilege credential brokering with no ambient-secret inheritance;
+3. filesystem and network side-effect policy;
+4. teardown and reconciliation under timeout and races;
+5. no fixture, environment, or caller-command bypass;
+6. status/docs/skill metadata updated atomically from false only after all proofs pass.
+
+Until then, Pi and OpenCode remain non-programmatic production routes regardless of adapter quality.

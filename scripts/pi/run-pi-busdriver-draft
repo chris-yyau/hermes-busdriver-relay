@@ -1,25 +1,342 @@
-#!/usr/bin/env python3
-"""Run Pi as a Busdriver-shaped draft-only tool harness.
+#!/usr/bin/python3
+"""Production Pi draft parser with fail-closed dispatch.
 
-This wrapper is target-state adapter glue for hermes-busdriver-agent-draft --agent pi.
-It launches Pi with built-ins/extensions disabled, exposes only adapters/pi bd_* tools,
-requires a structured pi-result artifact, and keeps all finalization authority false.
+Production dispatch is blocked until trusted OS containment and parent-held
+credential brokering exist. A non-installed runpy fixture exercises the
+Busdriver-shaped adapter contract without exposing a CLI or environment bypass.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
 import os
+import posixpath
 import re
+import select
+import secrets
 import shutil
+import stat
 import subprocess
-import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, NoReturn
 
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "adapters" / "pi" / "busdriver-tools.ts"
+# The adapter node loads and runs. It sat on a user-writable repo path that was handed straight to
+# node's `-e` — never digested, never retained — so the file that DEFINED every tool boundary in
+# the run was the one file in the launch nobody authenticated.
+TRUSTED_PI_TOOLS_SHA256 = 'f89686da24c47e758038472f96b79f5073b67817d70862f8ec208d9ff133462b'
 PI_RESULT_SCHEMA_PATH = ROOT / "adapters" / "pi" / "pi-result.schema.json"
 SCHEMA = "hermes-pi-busdriver-draft/v0"
 PI_RESULT_SCHEMA = "pi-busdriver-result/v0"
@@ -35,6 +352,36 @@ AUTHORITY_FALSE_FIELDS = [
     "publish_allowed",
 ]
 GIT_TIMEOUT = 30
+# The pinned Pi package entry point. Bound to config/trusted-runtime-manifest.json by
+# test_trusted_runtime_manifest, so it cannot drift from the reviewed runtime.
+TRUSTED_PI = Path("/Users/vfrvndtt/.local/bin/pi").resolve()
+TRUSTED_PI_TREE_SHA256 = "0f26848f78bf749a0a5a5a8c61da16d603b91d5862da211408af4385ab153ada"
+TRUSTED_NODE = Path("/Users/vfrvndtt/.hermes/node/bin/node").resolve()
+TRUSTED_NODE_SHA256 = "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c"
+TRUSTED_EXECUTABLE_DIGESTS = {
+    # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
+    # inode). A supply-chain pin, not an identity check — the path is the identity.
+    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+# Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
+# symlinked name is what this contract refuses. See _validated_root_owned_source().
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+}
+# The most this wrapper will hold of any ONE retained entry. Sized off the largest thing that
+# legitimately passes through read_package_entry_nofollow(): node, at ~108 MB. Every other entry is
+# orders of magnitude smaller — the biggest file in the whole Pi package tree is a ~3 MB native
+# module. Generous on purpose; the point is not to guess the real size, it is that the NUMBER stops
+# being the candidate's to choose.
+MAX_PACKAGE_ENTRY_BYTES = 256 * 1024 * 1024
+FS_BROKER = ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"
+TRUSTED_FS_BROKER_SHA256 = 'b9ce969f2c409add8995099fe7ae136542d20108b04cefcc54477b1cd231e7ec'
+# The adapter's filesystem broker needs openat(2), which Node does not expose, so it runs under a
+# Python the adapter never chooses: this path is pinned here, not resolved from PATH or argv.
+TRUSTED_BROKER_PYTHON = Path("/usr/bin/python3")
+TRUSTED_BROKER_PYTHON_SHA256 = "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5"
+MAX_PRIVATE_AUTH_BYTES = 1024 * 1024
+_PRIVATE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
 
 
 def authority_false_payload() -> dict[str, bool]:
@@ -42,7 +389,19 @@ def authority_false_payload() -> dict[str, bool]:
 
 
 def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, text=True, capture_output=True, timeout=timeout)
+    """Every child of this wrapper, bounded at the pipe — including the untrusted pi worker.
+
+    The worker is the reason. It ran under `capture_output=True`, so the number of bytes this
+    process allocated was the worker's to choose; `tail()` afterwards bounded what got PERSISTED,
+    never what got read. Overflow is rc 125 with a fixed token, which the callers already treat as
+    a worker failure.
+    """
+    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout)
+    if result.overflowed:
+        return subprocess.CompletedProcess(cmd, 125, "", "worker_output_too_large")
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout or 0)
+    return subprocess.CompletedProcess(cmd, result.returncode, result.stdout, result.stderr)
 
 
 def timeout_text(value: Any) -> str:
@@ -67,30 +426,175 @@ def startup_failure(error: str, **extra: Any) -> NoReturn:
     raise SystemExit(2)
 
 
-def git_root(repo: Path) -> Path:
+def wrapper_git_env() -> dict[str, str]:
+    """git's whole environment, enumerated rather than inherited.
+
+    These two calls ran with `env=None`, so git got this process's entire environment — every
+    GIT_* an operator happened to export, and every credential. Parity with the broker's
+    ``git_env()`` and the gate's: the repository being inspected is one an untrusted worker is
+    about to write to, so its config and hooks are disabled here rather than assumed absent.
+    """
+    return {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "LC_ALL": "C",
+    }
+
+
+def git_argv(git_bin: Path, repo: Path, *args: str) -> list[str]:
+    # core.fsmonitor names a command git runs on index refresh and is settable from the REPO-LOCAL
+    # config, which GIT_CONFIG_NOSYSTEM/GLOBAL do not cover. Parity with the gate and the broker.
+    return [str(git_bin), "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", "-C", str(repo), *args]
+
+
+def git_root(repo: Path, git_bin: Path) -> Path:
     try:
-        cp = run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"], timeout=GIT_TIMEOUT)
+        cp = run(git_argv(git_bin, repo, "rev-parse", "--show-toplevel"), env=wrapper_git_env(), timeout=GIT_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
-        startup_failure("git_root_timeout", stderr=timeout_text(exc.stderr))
+        startup_failure("git_root_timeout", stderr=tail(timeout_text(exc.stderr)))
     if cp.returncode != 0:
-        startup_failure("not_a_git_repo", stderr=cp.stderr.strip())
+        startup_failure("not_a_git_repo", stderr=tail(cp.stderr))
     return Path(cp.stdout.strip())
 
 
-def git_value(repo: Path, *args: str) -> str:
+def git_value(repo: Path, git_bin: Path, *args: str) -> str:
     try:
-        cp = run(["git", "-C", str(repo), *args], timeout=GIT_TIMEOUT)
+        cp = run(git_argv(git_bin, repo, *args), env=wrapper_git_env(), timeout=GIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         return ""
     return cp.stdout.strip() if cp.returncode == 0 else ""
 
 
-def tail(text: str, n: int = 8000) -> str:
-    return text[-n:]
+REDACTION = "[REDACTED]"
+TAIL_LIMIT = 4000
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
+def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        redacted: list[Any] = []
+        redact_next = False
+        for item in value:
+            if redact_next:
+                redacted.append(REDACTION)
+                redact_next = False
+                continue
+            redacted.append(redact_value(item))
+            if isinstance(item, str) and re.fullmatch(r"(?i)--?(?:api[_-]?key|secret|token|password|passwd)", item):
+                redact_next = True
+        return redacted
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = redact_text(str(key))
+            if re.search(r"(?i)(api[_-]?key|secret|token|password|passwd)", str(key)):
+                result[safe_key] = REDACTION
+            else:
+                result[safe_key] = redact_value(item)
+        return result
+    return value
+
+
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input -- including a URL-userinfo class with no length bound --
+# so a hostile pi run returning 500MB of stderr costs that much CPU and memory inside a wrapper
+# whose entire job is to emit a few KB. Bounding after redaction means the bound never applies to
+# the expensive step it exists to protect. Parity with hermes-busdriver-deliver.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED -- not sliced to its last `limit` bytes. The value classes for
+# `token:`, `--token`, `"token":` and `Bearer` are unbounded, so a long enough value has the very
+# prefix that IDENTIFIES it as a secret cut away by that slice; the remainder matches no shape
+# pattern and the tail is emitted raw. An unmatched fragment of a secret is still a secret.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value or ""
+    if limit <= 0:
+        return ""
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
+def tail(text: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
+    """Redact, then bound -- over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(text, limit)
 
 
 def split_scope(values: list[str] | None) -> list[str]:
     return [v for v in (values or []) if v]
+
+
+def scope_transport(patterns: list[str]) -> str:
+    """Hand the adapter a scope it cannot misread, and refuse one we cannot state.
+
+    `"\\n".join(scope)` was not a transport, it was an ambiguity: a list has no way to say "this
+    pattern contains a newline", so a declared scope of `safe\\n**` reached the adapter as TWO
+    patterns — `safe`, and a repo-wide `**` nobody declared. Every rejection this file does
+    downstream was undone by the framing upstream of it. JSON keeps an element whole, so the
+    adapter's own scopeTokenRejected() gets to see the character and refuse it.
+
+    The refusal is here as well as there on purpose: the encoder must never be able to emit a
+    pattern that the decoder is required to reject, or the two sides disagree about what was
+    declared and the disagreement is silent.
+    """
+    for pattern in patterns:
+        if scope_token_rejected(pattern):
+            startup_failure("scope_pattern_rejected")
+    return json.dumps(patterns)
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -98,10 +602,13 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
     i = 0
     while i < len(pattern):
         if pattern[i:i + 3] == "**/":
-            regex += r"(?:.*/)?"
+            regex += r"(?:(?s:.*)/)?"
             i += 3
         elif pattern[i:i + 2] == "**":
-            regex += r".*"
+            # (?s:.*), not .*: `.` skips \n, so an exclude of `**/secrets/**` failed to match a
+            # path with an embedded newline — the deny list silently missing the very filename
+            # crafted to dodge it. `**` means "any characters", newlines included.
+            regex += r"(?s:.*)"
             i += 2
         elif pattern[i] == "*":
             regex += r"[^/]*"
@@ -112,16 +619,41 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
         else:
             regex += re.escape(pattern[i])
             i += 1
-    return re.compile(rf"^{regex}$")
+    # \Z, not $: `$` also matches just before a trailing newline, so `*.py` accepted `evil.py\n` —
+    # a real, creatable, DIFFERENT filename admitted to a scope it was never declared in.
+    return re.compile(rf"^{regex}\Z")
+
+
+# POSIX pathnames are bytes up to a NUL, so LF/CR/VT/FF, the C1 block, U+2028/U+2029 and a
+# backslash are all creatable filename characters — and the glob metacharacters treat them
+# inconsistently (`[^/]` swallows a newline, `.` does not). Rather than chase newline-exactness
+# through every wildcard, refuse the characters outright at the boundary: a declared scope is a
+# reviewed, human-written list, and no legitimate entry needs one. Backslash goes too — it is a
+# separator on Windows and a literal here, so admitting it means two readings of one path.
+SCOPE_FORBIDDEN_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\]")
+
+
+def scope_token_rejected(value: str) -> bool:
+    return bool(SCOPE_FORBIDDEN_CHARS.search(value))
 
 
 def scope_matches(path: str, pattern: str) -> bool:
+    """Strict, full-string, and identical for include and exclude patterns alike.
+
+    Rejection returns False for BOTH directions, so callers must treat a rejected path as
+    out-of-scope rather than as merely un-excluded — see the callers below.
+    """
+    if scope_token_rejected(path) or scope_token_rejected(pattern):
+        return False
     return path == pattern or bool(glob_to_regex(pattern).match(path))
 
 
 def scope_errors_for_path(path: str, scope_include: list[str], scope_exclude: list[str]) -> list[str]:
-    rel = path.replace("\\", "/")
-    if rel.startswith("/") or rel == "" or rel.startswith("../") or "/../" in rel:
+    # No backslash rewrite. On POSIX `a\b.py` is ONE file whose name contains a backslash; folding
+    # it to `a/b.py` matched it against a scope of `a/*.py` that the real file was never in. The
+    # character is refused now instead, so there is only ever one reading of a pathname here.
+    rel = path
+    if scope_token_rejected(rel) or rel.startswith("/") or rel == "" or rel.startswith("../") or "/../" in rel:
         return [f"file_outside_scope:{path}"]
     errors: list[str] = []
     if scope_include and not any(scope_matches(rel, pat) for pat in scope_include):
@@ -129,6 +661,55 @@ def scope_errors_for_path(path: str, scope_include: list[str], scope_exclude: li
     if any(scope_matches(rel, pat) for pat in scope_exclude):
         errors.append(f"file_in_denied_scope:{path}")
     return errors
+
+
+MAX_ARTIFACT_BYTES = 1024 * 1024
+
+
+class ArtifactError(Exception):
+    """A fail-closed refusal. The message is a fixed token, never artifact bytes."""
+
+
+def read_artifact_file(path: Path) -> bytes | None:
+    """Read the worker's artifact through ONE bounded no-follow descriptor. ``None`` means absent.
+
+    ``exists()`` then ``read_text()`` is two resolutions of a name the untrusted worker controls:
+    it plants a symlink between them and this wrapper reads, parses, redacts and emits any file the
+    operator can read. ``O_NOFOLLOW`` refuses the link, and every check below is on the DESCRIPTOR
+    — checking the pathname would just be a third resolution of the same name.
+
+    The bound is the other half, and it comes first. ``read_text()`` has none, so json.loads,
+    validate_artifact and redact_value's regex walk over every string all ran over however many
+    bytes the worker felt like writing. Bound the input BEFORE the expensive step, never after.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ArtifactError("artifact_path_is_symlink" if exc.errno == errno.ELOOP else "artifact_unreadable")
+    try:
+        st = os.fstat(fd)
+        # A hardlink means a second name shares these bytes; a FIFO or device is not an artifact at
+        # all — and O_NONBLOCK above is why a FIFO swapped in cannot simply wedge this process.
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+            raise ArtifactError("artifact_not_a_regular_owned_file")
+        if st.st_size > MAX_ARTIFACT_BYTES:
+            raise ArtifactError("artifact_too_large")
+        chunks: list[bytes] = []
+        size = 0
+        while size <= MAX_ARTIFACT_BYTES:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > MAX_ARTIFACT_BYTES:
+            raise ArtifactError("artifact_too_large")
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
 
 
 def json_type_matches(value: Any, expected: str) -> bool:
@@ -245,12 +826,726 @@ def build_prompt(prompt_file: Path) -> str:
     )
 
 
+def private_runtime_root() -> Path:
+    """Return this process's private 0700 runtime directory.
+
+    Held in a module global so the ``TemporaryDirectory`` finalizer cannot run
+    while the copies inside it are still on a live command line.
+    """
+    global _PRIVATE_RUNTIME
+    if _PRIVATE_RUNTIME is None:
+        _PRIVATE_RUNTIME = tempfile.TemporaryDirectory(prefix="hermes-pi-trusted-runtime-")
+        Path(_PRIVATE_RUNTIME.name).chmod(0o700)
+    return Path(_PRIVATE_RUNTIME.name)
+
+
+def write_private_runtime_file(path: Path, data: bytes, mode: int = 0o500) -> None:
+    """Write the bytes, then prove the file at `path` still holds exactly them.
+
+    Three separate claims hide behind a write that reports success. `os.write` may accept fewer
+    bytes than it was handed, so an unchecked call is a silent truncation. Nothing is flushed, so
+    the bytes need not be on disk when the child is launched to read them. And nothing re-reads
+    what landed, so "we wrote these bytes" and "the file holds these bytes" stay separate facts.
+
+    That gap is not academic: this file is about to be EXECUTED as a private runtime. The closing
+    re-digest reads the DESCRIPTOR, because a name resolves a second time and a second resolution
+    is a second chance to hand us a different file; the lstat then proves the name still reaches
+    the inode we wrote, which is the half a descriptor alone cannot see.
+    """
+    # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
+    # write-only one cannot be read (EBADF). Reopening the name to read it instead would resolve
+    # the name a second time, which is the very thing the descriptor is here to avoid.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    # The inode THIS call created. The failure path deletes only this one — never a replacement.
+    created = os.fstat(fd)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                # Consuming the result only as a slice index turns a legal 0 into an infinite loop,
+                # so this is what keeps the loop terminating as well as honest.
+                raise OSError("private_runtime_short_write")
+            view = view[written:]
+        os.fsync(fd)
+        # fchmod, not path.chmod: the mode lands on the inode we wrote, not on whatever the name
+        # means by now. The requested mode is also masked by the caller's umask at open.
+        os.fchmod(fd, mode)
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.geteuid()
+            or st.st_nlink != 1
+            or st.st_size != len(data)
+            or stat.S_IMODE(st.st_mode) != mode
+        ):
+            raise OSError("private_runtime_metadata_invalid")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < st.st_size:
+            # pread: neither moves the offset nor rides it, so the digest cannot race the writer.
+            chunk = os.pread(fd, min(1 << 16, st.st_size - offset), offset)
+            if not chunk:
+                raise OSError("private_runtime_truncated")
+            digest.update(chunk)
+            offset += len(chunk)
+        if digest.hexdigest() != hashlib.sha256(data).hexdigest():
+            raise OSError("private_runtime_integrity_failed")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
+            # The digest proved OUR inode is intact; this proves `path` still reaches it. A rename
+            # over the name publishes someone else's bytes under the name the caller will execute.
+            raise OSError("private_runtime_integrity_failed")
+    except BaseException:
+        # A half-written private executable must never be left for the next step to run. But by now
+        # the name may belong to something else — the case the identity check above fails on — and
+        # deleting THAT is a second bug wearing the first one's cleanup.
+        try:
+            landed = os.lstat(path)
+            if (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino):
+                os.unlink(path)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+
+
+def read_package_entry_nofollow(source: Path) -> bytes:
+    """Read one package entry through a single ``O_NOFOLLOW`` descriptor.
+
+    The caller both hashes and copies exactly these bytes, so the authentication
+    and the copy cannot disagree. ``O_NOFOLLOW`` plus the ``S_ISREG`` check on
+    the descriptor itself -- not on the pathname -- means an entry swapped for a
+    symlink after the directory walk fails closed instead of authenticating
+    whatever the link points at.
+
+    ``O_NONBLOCK`` because ``O_NOFOLLOW`` does not reject a FIFO -- it only
+    rejects a symlink -- and opening a FIFO for reading BLOCKS until a writer
+    arrives. Without it, a named pipe planted at any anchor path wedges this
+    wrapper forever, before the ``S_ISREG`` check below ever gets to refuse it:
+    a hang is a denial of service the fail-closed design would never report.
+    Parity with the broker's ``_READ_FLAGS``.
+
+    v16-r34c: the read is BOUNDED, and the descriptor is re-examined after it.
+
+    The bound is the half the FIFO check could not cover. ``S_ISREG`` refuses a pipe, but a regular
+    file has no size limit of its own -- so the entry chose how much memory this process spent, and
+    it chose *before* the digest that would have rejected it. A padded cli.js is not a subtle
+    attack; it is `dd` into the package tree. The cap is one byte past the bound because reading
+    exactly the bound cannot distinguish "this file IS the bound" from "this is a prefix of a
+    larger one".
+
+    The closing re-examination is the other half: identity was established at open and nothing
+    checked it again, so everything the read spanned -- a truncation, a growth, a new hard link, a
+    chmod, a rename away from the name -- was covered by nothing at all. The caller digests these
+    bytes and copies these bytes, but it is this descriptor that has to still be the file the
+    ``S_ISREG`` check cleared.
+    """
+    fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError("pi_package_entry_not_regular_file")
+        if opened.st_size > MAX_PACKAGE_ENTRY_BYTES:
+            # Refused without ever holding it. This is the whole point of the bound.
+            raise OSError("pi_package_entry_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_PACKAGE_ENTRY_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_PACKAGE_ENTRY_BYTES:
+            raise OSError("pi_package_entry_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != opened.st_nlink
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            raise OSError("pi_package_entry_changed_during_read")
+    finally:
+        os.close(fd)
+    return data
+
+
+def private_entry_target(private_root: Path, relative: Path) -> Path:
+    """Create ``relative``'s parent chain under ``private_root`` as 0700 directories.
+
+    ``Path.mkdir(parents=True)`` ignores ``mode`` for the parents it creates, so
+    the chain is walked explicitly rather than left at the umask default.
+    """
+    current = private_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        current.chmod(0o700)
+    return current / relative.parts[-1]
+
+
+class PiPackageSymlinkTargetUntrusted(OSError):
+    pass
+
+
+def validate_pi_package_symlink_target(package_root: Path, relative: Path, target: str) -> None:
+    """Require every package symlink to resolve lexically to another manifested tree entry."""
+    if target.startswith("/"):
+        raise PiPackageSymlinkTargetUntrusted("pi_package_symlink_target_untrusted")
+    normalized = posixpath.normpath(posixpath.join(relative.parent.as_posix(), target))
+    if normalized == ".." or normalized.startswith("../"):
+        raise PiPackageSymlinkTargetUntrusted("pi_package_symlink_target_untrusted")
+    if not os.path.lexists(package_root / Path(normalized)):
+        raise PiPackageSymlinkTargetUntrusted("pi_package_symlink_target_untrusted")
+
+
+def pi_package_tree_digest_v2(package_root: Path, private_root: Path | None = None) -> tuple[str, int]:
+    """Digest the Pi package tree, optionally copying it as it is read.
+
+    v16-r25 MEDIUM-6: the wrapper used to hash this tree under a user-writable
+    ``$HOME`` anchor and then hand the same *pathnames* to node. Every entry was
+    opened twice -- once to authenticate, once to execute -- so a same-UID writer
+    could swap any file in between and node would run bytes this digest never
+    covered. When ``private_root`` is given, each entry is read exactly once and
+    those same bytes are both fed to the digest and written to the private
+    runtime. What gets executed is byte-identical to what was authenticated
+    because it is the same read; there is no second lookup of the anchor to race.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"hermes-pi-package-tree-v2\0")
+    count = 0
+    for path in sorted(package_root.rglob("*"), key=lambda item: item.relative_to(package_root).as_posix()):
+        relative = path.relative_to(package_root)
+        rel = relative.as_posix().encode()
+        if path.is_symlink():
+            entry_type = b"symlink"
+            target = os.readlink(path)
+            validate_pi_package_symlink_target(package_root, relative, target)
+            data = target.encode()
+            if private_root is not None:
+                os.symlink(target, private_entry_target(private_root, relative))
+        elif path.is_file():
+            entry_type = b"regular"
+            data = read_package_entry_nofollow(path)
+            if private_root is not None:
+                write_private_runtime_file(private_entry_target(private_root, relative), data)
+        elif path.is_dir():
+            continue
+        else:
+            raise OSError("pi_package_tree_entry_type_unsupported")
+        for field, width in ((rel, 4), (entry_type, 1), (data, 8)):
+            digest.update(len(field).to_bytes(width, "big"))
+            digest.update(field)
+        count += 1
+    return digest.hexdigest(), count
+
+
+def verify_private_pi_package(private_root: Path) -> tuple[str, int]:
+    """Re-authenticate the private package after the copy.
+
+    Mirrors the private-executable check in ``hermes-busdriver-agent-draft``:
+    every retained entry must still be a same-owner, single-link, non-writable
+    regular file (or a symlink whose target the tree digest already binds) under
+    0700 directories, and the tree must still hash to the production pin.
+    """
+    uid = os.getuid()
+    root_st = private_root.lstat()
+    if not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != uid or stat.S_IMODE(root_st.st_mode) != 0o700:
+        raise OSError("private_pi_package_root_invalid")
+    for path in private_root.rglob("*"):
+        st = path.lstat()
+        if st.st_uid != uid:
+            raise OSError("private_pi_package_entry_owner_invalid")
+        if stat.S_ISLNK(st.st_mode):
+            validate_pi_package_symlink_target(private_root, path.relative_to(private_root), os.readlink(path))
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            if stat.S_IMODE(st.st_mode) != 0o700:
+                raise OSError("private_pi_package_directory_mode_invalid")
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != 0o500:
+            raise OSError("private_pi_package_file_identity_invalid")
+    return pi_package_tree_digest_v2(private_root)
+
+
+def trusted_pi_executable(value: str) -> Path:
+    """Return the private, authenticated Pi entry point for node to execute.
+
+    The anchor under ``$HOME`` is only ever read; it is never named on the
+    launch command line. See ``pi_package_tree_digest_v2`` for why the copy and
+    the digest have to come from the same read.
+    """
+    if value in (None, "", "pi", str(TRUSTED_PI)):
+        candidate = TRUSTED_PI
+    else:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            # No PATH lookup, deliberately, matching the OpenCode wrapper. `shutil.which` let the
+            # ambient PATH this process happens to inherit choose the executable whose bytes then
+            # DEFINE the trusted tree digest — with private auth material mounted. A relative name
+            # is refused outright; the pinned anchor is the only non-absolute answer.
+            startup_failure("pi_executable_override_rejected")
+    executable = candidate.resolve()
+    package_root = executable.parent.parent if executable.parent.name == "dist" else None
+    if package_root is None or not (package_root / "package.json").is_file():
+        startup_failure("pi_executable_untrusted")
+    private_root = Path(tempfile.mkdtemp(prefix="pi-package-", dir=private_runtime_root()))
+    private_root.chmod(0o700)
+    try:
+        digest, count = pi_package_tree_digest_v2(package_root, private_root)
+    except PiPackageSymlinkTargetUntrusted:
+        shutil.rmtree(private_root, ignore_errors=True)
+        startup_failure("pi_executable_integrity_failed")
+    except OSError as exc:
+        shutil.rmtree(private_root, ignore_errors=True)
+        startup_failure("pi_executable_integrity_unavailable", detail=type(exc).__name__)
+    if count == 0 or digest != TRUSTED_PI_TREE_SHA256:
+        shutil.rmtree(private_root, ignore_errors=True)
+        startup_failure("pi_executable_integrity_failed")
+    try:
+        private_digest, private_count = verify_private_pi_package(private_root)
+    except OSError as exc:
+        shutil.rmtree(private_root, ignore_errors=True)
+        startup_failure("private_pi_package_integrity_unavailable", detail=type(exc).__name__)
+    private_executable = private_root / executable.relative_to(package_root)
+    if private_count != count or private_digest != digest or not private_executable.is_file():
+        shutil.rmtree(private_root, ignore_errors=True)
+        startup_failure("private_pi_package_integrity_failed")
+    return private_executable
+
+
+def privately_retain(source: Path, expected_digest: str, kind: str, *, mode: int = 0o500) -> Path:
+    """Authenticate ``source``'s bytes once, retain exactly those bytes, and return what to USE.
+
+    Four sites had grown their own copy of this — node, the broker, the adapter, git — and a copy
+    each is four chances to drift on the one ordering that matters. The ordering: read the anchor
+    ONCE under ``O_NOFOLLOW``, digest the bytes we hold, write those same bytes into the private
+    0700 runtime, and re-prove the retained file before handing its path out. What runs is
+    byte-identical to what was authenticated because it is the same read.
+
+    Digesting a pathname and then naming that same pathname on a command line is the defect this
+    exists to remove: a same-UID writer swaps the anchor in between and the child runs bytes the
+    digest never covered. The anchor is read here and never named again.
+    """
+    try:
+        data = read_package_entry_nofollow(source)
+    except OSError as exc:
+        startup_failure(f"{kind}_integrity_unavailable", detail=type(exc).__name__)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        startup_failure(f"{kind}_integrity_failed")
+    private_dir = Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=private_runtime_root()))
+    private_dir.chmod(0o700)
+    private = private_dir / source.name
+    try:
+        write_private_runtime_file(private, data, mode)
+        parent_st = private_dir.lstat()
+        st = private.lstat()
+        redigest = hashlib.sha256(private.read_bytes()).hexdigest()
+    except OSError as exc:
+        startup_failure(f"private_{kind}_unavailable", detail=type(exc).__name__)
+    if (
+        private.is_symlink()
+        or not stat.S_ISDIR(parent_st.st_mode)
+        or parent_st.st_uid != os.getuid()
+        or stat.S_IMODE(parent_st.st_mode) != 0o700
+        or not stat.S_ISREG(st.st_mode)
+        or st.st_uid != os.getuid()
+        or st.st_nlink != 1
+        or stat.S_IMODE(st.st_mode) != mode
+        or redigest != expected_digest
+    ):
+        startup_failure(f"private_{kind}_integrity_failed")
+    return private
+
+
+def trusted_node_executable() -> Path:
+    return privately_retain(TRUSTED_NODE, TRUSTED_NODE_SHA256, "node_executable")
+
+
+# =============================================================================================
+# Fixed root-owned source execution contract. Copy of the primitive in hermes-busdriver-deliver;
+# these are standalone executables with no shared import path, so a contract test asserts the
+# copies agree. Refusals go through startup_failure() here rather than raising SystemExit with a
+# bare payload, because this wrapper answers in its own authority-negative envelope; the tokens are
+# the contract's, unchanged.
+#
+# The full rationale lives in the deliver copy; the short version: executing a private copy
+# relocated the substitutable name instead of removing it. macOS has no fexecve and will not exec
+# /dev/fd/N, so the kernel re-resolves a *pathname* at exec time, and any pathname we can write is
+# one a same-UID adversary can rename first. The source therefore has to live where the adversary
+# cannot write at all: root-owned, non-group/world-writable, root to leaf.
+#
+# /usr/bin/git is the CommandLineTools shim — same inode as /usr/bin/python3, nlink 78 — so nlink==1
+# is waived for it and SF_RESTRICTED (SIP; denies even root) required instead. That shim also
+# honours $DEVELOPER_DIR through xcrun, which no ancestry walk can see, so the child environment is
+# owned too: see ENV_DENIED_FOR_TRUSTED_DISPATCH.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"git"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: "str | None" = None) -> NoReturn:
+    if reason == "unavailable" and name == "gh":
+        startup_failure("trusted_root_owned_gh_unavailable", executable=name)
+    startup_failure("trusted_root_owned_source_" + reason, executable=name)
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd, not the path: the leaf must be opened relative to the directory just validated.
+    Re-opening by full pathname would re-traverse every component and restore the TOCTOU.
+    """
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        _trusted_source_refusal(name, "ancestry_untrusted", "/")
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError:
+                _trusted_source_refusal(name, "ancestry_untrusted", component)
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Pure seam: production reaches this only via trusted_executable_path(), which supplies the
+    path from a frozen table. Tests pass harmless already-root-owned system binaries."""
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                _trusted_source_refusal(name, "metadata_invalid", "symlink")
+            _trusted_source_refusal(name, "unavailable", type(exc).__name__)
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                _trusted_source_refusal(name, "integrity_failed")
+            if _identity(os.fstat(fd)) != _identity(opened):
+                _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
+def trusted_git_executable() -> Path:
+    """The git this wrapper runs.
+
+    It was once `git` off the ambient PATH — so the PATH this process happened to inherit picked
+    the binary that then inspected the repository and reported on it. r34 answered that by
+    retaining a private authenticated copy, which only moved the problem: the copy lands somewhere
+    this UID can write, macOS has no fexecve, and the kernel re-resolves the copy's PATHNAME at
+    exec time. The source is fixed and root-owned now, validated root-to-leaf immediately before
+    dispatch, so there is no writable name anywhere in the chain.
+
+    It is no longer "the git the broker runs" either: the broker resolves its own from the same
+    frozen table rather than being handed this one's pathname in $BD_BROKER_GIT.
+    """
+    return trusted_executable_path("git")
+
+
+def trusted_pi_tools() -> Path:
+    """The adapter node loads. 0400: node reads it, nothing executes it.
+
+    It was passed to node's `-e` straight off its repo path — the file that defines every tool
+    boundary in the run, and the one file in the launch that was never authenticated.
+    """
+    return privately_retain(TOOLS, TRUSTED_PI_TOOLS_SHA256, "pi_tools", mode=0o400)
+
+
+def trusted_broker_python() -> Path:
+    """Authenticate the interpreter the broker runs under, and return the path to execute.
+
+    This is the one runtime the wrapper does NOT copy into private runtime, and the reason is
+    measured rather than assumed: a copy of ``/usr/bin/python3`` is SIGKILLed on launch, because it
+    is a code-signed system shim and the copy is not. The copy exists for ``node`` and the Pi tree
+    because those live under ``$HOME``, where a same-UID attacker can swap the anchor between the
+    digest and the exec. That window does not exist here — this binary is root-owned and writable
+    by nobody but root, which the check below re-proves at dispatch rather than trusting the pin to
+    imply. An attacker who can rewrite it is already root, and no copy would save us from that.
+    """
+    try:
+        data = read_package_entry_nofollow(TRUSTED_BROKER_PYTHON)
+        st = TRUSTED_BROKER_PYTHON.lstat()
+    except OSError as exc:
+        startup_failure("broker_python_integrity_unavailable", detail=type(exc).__name__)
+    if hashlib.sha256(data).hexdigest() != TRUSTED_BROKER_PYTHON_SHA256:
+        startup_failure("broker_python_integrity_failed")
+    if st.st_uid != 0 or stat.S_IMODE(st.st_mode) & 0o022:
+        startup_failure("broker_python_not_root_owned")
+    return TRUSTED_BROKER_PYTHON
+
+
+def trusted_fs_broker() -> Path:
+    """Repo bytes on a user-writable path, named on the adapter's command line: same swap window."""
+    return privately_retain(FS_BROKER, TRUSTED_FS_BROKER_SHA256, "fs_broker")
+
+
+def _names_created_inode(dir_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `dir_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def verify_published_file(dir_fd: int, name: str, payload: bytes, mode: int, created: os.stat_result) -> None:
+    """Prove the published name still reaches the inode we renamed, holding exactly `payload`.
+
+    os.replace() publishes atomically, but it resolves the destination NAME a second time and
+    returns before anything re-reads what landed — so "we renamed our bytes into place" and "this
+    name holds our bytes" stay separate facts. A same-UID writer with access to the parent can
+    rewrite the published file THROUGH the same name: same inode, same size, same mode, different
+    bytes, which every metadata check passes and only a re-digest catches. These are the adapter's
+    credentials — the reopen goes through the parent descriptor the replace already used, so the
+    name cannot resolve somewhere else on this second look, and it runs BEFORE the parent fsync:
+    an entry made durable before it is proven is a durable unproven entry.
+    """
+    fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+    try:
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            # A rename carries the inode across, so the published name must still BE our inode.
+            or (st.st_dev, st.st_ino) != (created.st_dev, created.st_ino)
+            or st.st_uid != os.geteuid()
+            or st.st_nlink != 1  # A hardlink means a second name can rewrite what we just proved.
+            or st.st_size != len(payload)
+            or stat.S_IMODE(st.st_mode) != mode
+        ):
+            raise RuntimeError("private_copy_metadata_invalid")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < st.st_size:
+            # pread: neither moves the offset nor rides it, so the digest cannot race a writer.
+            chunk = os.pread(fd, min(1 << 16, st.st_size - offset), offset)
+            if not chunk:
+                raise RuntimeError("private_copy_truncated")
+            digest.update(chunk)
+            offset += len(chunk)
+        if digest.hexdigest() != hashlib.sha256(payload).hexdigest():
+            raise RuntimeError("private_copy_integrity_failed")
+    finally:
+        os.close(fd)
+
+
+def copy_regular_file_nofollow(source: Path, target_dir: Path, target_name: str) -> bool:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise RuntimeError("nofollow_unavailable")
+    try:
+        # O_NONBLOCK: O_NOFOLLOW rejects a symlink but not a FIFO, and opening a FIFO for reading
+        # blocks until a writer shows up — so a named pipe left at the auth.json path would wedge
+        # this wrapper before the S_ISREG check below could refuse it.
+        source_fd = os.open(source, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            return False
+        raise
+    try:
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            return False
+        if source_stat.st_size > MAX_PRIVATE_AUTH_BYTES:
+            raise RuntimeError("private_auth_file_too_large")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(source_fd, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_PRIVATE_AUTH_BYTES:
+                raise RuntimeError("private_auth_file_too_large")
+            chunks.append(chunk)
+    finally:
+        os.close(source_fd)
+
+    # Held whole: the write loop consumes its memoryview, and the closing digest needs the bytes
+    # the source was actually read as — the same ones, not a second read of a file that may differ.
+    data = b"".join(chunks)
+    target_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if target_dir.is_symlink() or not target_dir.is_dir():
+        raise RuntimeError("private_config_directory_invalid")
+    target_dir.chmod(0o700)
+    dir_fd = os.open(target_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
+    temp_name = f".{target_name}.{secrets.token_hex(8)}.tmp"
+    temp_fd = -1
+    try:
+        temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(temp_fd)
+        try:
+            payload = memoryview(data)
+            while payload:
+                # A zero-return write slices nothing off `payload`, so this loop would spin forever
+                # instead of failing — see privately_retain()'s guarded spelling. `os.write` is
+                # permitted to accept 0 bytes, and this is the copy the adapter's runtime is built from.
+                written = os.write(temp_fd, payload)
+                if written <= 0:
+                    raise RuntimeError("short_write")
+                payload = payload[written:]
+            os.fchmod(temp_fd, 0o600)
+            os.fsync(temp_fd)
+            os.close(temp_fd)
+            temp_fd = -1
+            os.replace(temp_name, target_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            verify_published_file(dir_fd, target_name, data, 0o600, created)
+            # A rename is only durable once the DIRECTORY entry is — and only the proven one is.
+            os.fsync(dir_fd)
+            return True
+        except BaseException:
+            # Our inode sits at temp_name before the replace and at target_name after it. Delete
+            # whichever still IS it, and neither if it is not: a name that by now reaches a
+            # different inode is someone else's file, and unlinking THAT is a second bug wearing
+            # the first one's cleanup.
+            for name in (temp_name, target_name):
+                if _names_created_inode(dir_fd, name, created):
+                    try:
+                        os.unlink(name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+            raise
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        os.close(dir_fd)
+
+
+def copy_private_pi_config(source_config: Path, private_config: Path) -> None:
+    copy_regular_file_nofollow(source_config / "auth.json", private_config, "auth.json")
+
+
+def base_child_environment() -> dict[str, str]:
+    allowed = {
+        "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR",
+    }
+    return {key: value for key, value in os.environ.items() if key in allowed}
+
+
+def production_dispatch_blocker() -> str | None:
+    """Return the production-only policy blocker.
+
+    A non-installed contract fixture may replace this function after loading
+    the module with runpy. No production CLI option or environment variable
+    can disable it.
+    """
+    return "agent_containment_and_credential_broker_unavailable"
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "policy_blocked\n"
+            "agent_containment_and_credential_broker_unavailable\n"
+            "Production is blocked and exits nonzero before dispatch; no agent process is launched."
+        ),
+    )
     ap.add_argument("--repo", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN") or shutil.which("pi") or "pi")
+    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN") or "pi")
     ap.add_argument("--model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"))
     ap.add_argument("--provider", default=os.environ.get("PI_BD_PROVIDER", ""))
     ap.add_argument("--scope-include", action="append")
@@ -259,7 +1554,16 @@ def main() -> int:
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
-    repo = git_root(Path(args.repo).expanduser())
+    # Fail before inspecting executables, repository state, HOME, or copying
+    # authentication material.
+    if blocker := production_dispatch_blocker():
+        startup_failure(blocker)
+
+    trusted_pi = trusted_pi_executable(args.pi_bin)
+    trusted_node = trusted_node_executable()
+    trusted_git = trusted_git_executable()
+    trusted_tools = trusted_pi_tools()
+    repo = git_root(Path(args.repo).expanduser(), trusted_git)
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     run_dir = Path(args.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -274,21 +1578,48 @@ def main() -> int:
     scope = split_scope(args.scope_include)
     denied_scope = split_scope(args.scope_exclude)
 
-    env = os.environ.copy()
+    private_home = run_dir / "pi-home"
+    private_config = private_home / ".pi" / "agent"
+    private_xdg = private_home / ".config"
+    private_xdg.mkdir(parents=True, mode=0o700, exist_ok=True)
+    source_config = Path.home() / ".pi" / "agent"
+    copy_private_pi_config(source_config, private_config)
+
+    env = base_child_environment()
     env.update(
         {
+            "HOME": str(private_home),
+            "XDG_CONFIG_HOME": str(private_xdg),
+            "PI_CONFIG_DIR": str(private_config),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "BD_REPO_ROOT": str(repo),
             "PI_BD_MODE": "draft",
-            "PI_BD_ALLOWED_WRITES": "\n".join(scope),
-            "PI_BD_DENIED_WRITES": "\n".join(denied_scope),
+            # JSON, not "\n".join: see scope_transport(). A newline-joined list cannot carry a
+            # pattern containing a newline, so `safe\n**` arrived as two patterns and one of them
+            # was a repo-wide `**` nobody declared.
+            "PI_BD_ALLOWED_WRITES": scope_transport(scope),
+            "PI_BD_DENIED_WRITES": scope_transport(denied_scope),
             "PI_BD_EVENT_LOG": str(event_log),
             "PI_BD_ARTIFACT_PATH": str(artifact_path),
-            "HERMES_BASE_HEAD": git_value(repo, "rev-parse", "HEAD"),
+            "HERMES_BASE_HEAD": git_value(repo, trusted_git, "rev-parse", "HEAD"),
+            # The adapter has no filesystem access of its own; these are the only way it acts on a
+            # file, and the two roots are the only places it can reach. Resolved here, in the
+            # trusted parent — the adapter names a root by LABEL and so cannot widen its own reach.
+            "BD_BROKER_PYTHON": str(trusted_broker_python()),
+            "BD_BROKER_SCRIPT": str(trusted_fs_broker()),
+            "BD_BROKER_ROOT_REPO": str(repo.resolve()),
+            "BD_BROKER_ROOT_RUN": str(run_dir.resolve()),
+            # No BD_BROKER_GIT. It handed the broker a PATHNAME and asked it to trust that this
+            # process had authenticated the bytes behind it — a proof about a different process,
+            # carried in a variable, over a name that stayed writable the whole time. The broker
+            # resolves /usr/bin/git from its own frozen root-owned table instead, so nothing this
+            # side sets can choose the program that side runs.
         }
     )
 
     cmd = [
-        args.pi_bin,
+        str(trusted_node),
+        str(trusted_pi),
         "--print",
         "--no-session",
         "--no-approve",
@@ -303,7 +1634,7 @@ def main() -> int:
         "--no-themes",
         "--no-extensions",
         "-e",
-        str(TOOLS),
+        str(trusted_tools),
         "--tools",
         "bd_status,bd_read,bd_write_draft,bd_bash,bd_artifact",
         "--mode",
@@ -320,34 +1651,48 @@ def main() -> int:
     try:
         cp = run(cmd, cwd=repo, env=env, timeout=args.timeout)
     except subprocess.TimeoutExpired as exc:
+        # This constructs an in-memory result; it does not execute cmd.
         cp = subprocess.CompletedProcess(
-            cmd,
+            cmd,  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
             124,
             stdout=timeout_text(exc.stdout),
             stderr=timeout_text(exc.stderr) + "\npi_timeout",
         )
     except OSError as exc:
+        # This constructs an in-memory result; it does not execute cmd.
         cp = subprocess.CompletedProcess(
-            cmd,
+            cmd,  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
             127,
             stdout="",
             stderr=f"pi_launch_error:{type(exc).__name__}:{exc}",
         )
-    (run_dir / "pi.stdout").write_text(cp.stdout)
-    (run_dir / "pi.stderr").write_text(cp.stderr)
+    # Bounded and redacted BEFORE it lands, never raw. `write_text(cp.stdout)` persisted whatever
+    # an untrusted worker chose to print, verbatim, to a file that outlives the run — so the
+    # credential the envelope was careful not to echo was on disk anyway, by the other route. The
+    # emitted tail and the persisted file are now the same bytes. Parity with the OpenCode wrapper.
+    (run_dir / "pi.stdout").write_text(tail(cp.stdout))
+    (run_dir / "pi.stderr").write_text(tail(cp.stderr))
 
     artifact: dict[str, Any] | None = None
     artifact_errors: list[str] = []
     artifact_blocker_reasons: list[str] = []
-    if artifact_path.exists():
-        try:
-            artifact = json.loads(artifact_path.read_text())
+    try:
+        artifact_bytes = read_artifact_file(artifact_path)
+        if artifact_bytes is None:
+            artifact_errors = ["artifact_missing"]
+        else:
+            artifact = json.loads(artifact_bytes.decode("utf-8"))
             artifact_errors = validate_artifact(artifact, scope, denied_scope)
             artifact_blocker_reasons = artifact_blockers(artifact)
-        except Exception as exc:  # pragma: no cover - defensive fail closed
-            artifact_errors = [f"artifact_parse_error:{exc}"]
-    else:
-        artifact_errors = ["artifact_missing"]
+            # Redact for emission only, AFTER validating: the artifact is whatever an untrusted
+            # worker wrote, so echoing it verbatim leaks any credential it quotes — the same hole
+            # the raw `tail` was, by the other route. Validation still sees the original bytes, so
+            # scope/authority verdicts are unchanged by what redaction collapses.
+            artifact = redact_value(artifact)
+    except ArtifactError as exc:
+        artifact_errors = [str(exc)]
+    except Exception as exc:  # pragma: no cover - defensive fail closed
+        artifact_errors = [redact_text(f"artifact_parse_error:{exc}")]
 
     ok = cp.returncode == 0 and not artifact_errors and not artifact_blocker_reasons
     result: dict[str, Any] = {
