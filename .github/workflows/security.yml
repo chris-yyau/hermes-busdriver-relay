@@ -1,8 +1,7 @@
 name: Security
 
 on:
-  pull_request:                     # No path filter — workflow always starts on PRs
-                                    # (scanner jobs skip via if: when not needed)
+  pull_request:                     # No path filter — every required scanner runs on PRs
   push:
     branches: [main]
     paths:                          # Push trigger keeps path filter (no required-check issue)
@@ -28,62 +27,8 @@ defaults:
     shell: bash
 
 jobs:
-  # Detect whether this PR/push touches security-relevant files.
-  # Scanner jobs below skip via `if:` when false. GitHub treats skipped jobs as
-  # passing for required status checks — so scanners can safely be required.
-  changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-    outputs:
-      security: ${{ steps.filter.outputs.security }}
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
-        with:
-          egress-policy: audit
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Detect security-relevant changes
-        id: filter
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -eo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then
-            echo "security=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
-            echo "::warning::Base SHA $BASE_SHA not available — running scanners (fail-closed)"
-            echo "security=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed_files="$(git diff --name-only "$BASE_SHA"...HEAD)" || {
-            echo "::warning::git diff failed — running scanners (fail-closed)"
-            echo "security=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-          grep_status=0
-          # Note `(^|/)scripts/`: this repo's source files are the EXTENSIONLESS
-          # scripts under scripts/ (see .claude/CLAUDE.md) — an extension-only
-          # match would let a source-only PR skip the scanners.
-          grep -qE '\.(sh|py|yml|yaml|tf)$|(^|/)scripts/|\.github/|requirements.*\.txt|Dockerfile|pyproject\.toml' <<< "$changed_files" || grep_status=$?
-          case "$grep_status" in
-            0) echo "security=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "security=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::warning::grep failed (exit $grep_status) — running scanners (fail-closed)"
-               echo "security=true" >> "$GITHUB_OUTPUT" ;;
-          esac
-
   trivy:
     name: Dependency CVEs
-    needs: [changes]
-    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -112,8 +57,6 @@ jobs:
 
   semgrep:
     name: Code security
-    needs: [changes]
-    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -133,8 +76,6 @@ jobs:
 
   checkov:
     name: IaC misconfig
-    needs: [changes]
-    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -154,8 +95,6 @@ jobs:
 
   zizmor:
     name: Actions security
-    needs: [changes]
-    if: always() && (needs.changes.outputs.security == 'true' || needs.changes.result != 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -177,7 +116,7 @@ jobs:
 
   reports:
     if: always()
-    needs: [changes, trivy, semgrep, checkov, zizmor]
+    needs: [trivy, semgrep, checkov, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
