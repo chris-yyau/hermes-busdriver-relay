@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Contract-test-only dependency injection for delivery-status.
+
+This file is not installed or referenced by production entrypoints.
+"""
+from pathlib import Path
+import argparse
+import json
+import os
+import runpy
+import sys
+
+ROOT = Path(os.environ["HERMES_TEST_REPO_ROOT"]).resolve() if os.environ.get(
+    "HERMES_TEST_REPO_ROOT"
+) else Path(__file__).resolve().parents[2]
+
+# v16-r33 A: the caller-supplied RESULT files are parsed HERE, not by production.
+#
+# r32 moved the caller-named EXECUTABLE flags out of production, on the reasoning that the caller
+# who names the program is the caller who passes the flag — so no flag can gate the affordance. A
+# file is that same affordance with one step removed: `--pr-grind-result-file` reads whatever JSON a
+# caller points it at, and validation binds only CONTENT, every byte of which is authored by
+# whoever wrote the file. Production keeping the flag "but labelling the result a fixture" still
+# means production ships a parser that accepts caller-authored evidence. So the parser lives here,
+# where nothing installed can reach it, and production obtains evidence only by running its own
+# authenticated retained helper.
+#
+# Bounded and strict even so, because a harness input is still input: a fixture that will not read
+# must look like a broken test rather than like an absent result.
+MAX_FIXTURE_BYTES = 1024 * 1024
+
+# allow_abbrev=False is load-bearing, not tidiness. argparse abbreviates by default, so with only
+# these two flags declared, `--pr 7` is an unambiguous prefix of `--pr-grind-result-file` and gets
+# swallowed here — the PR number silently becomes a fixture path, and production never sees `--pr`
+# at all. A pre-parser that strips flags out of someone else's argv must match exactly what it owns.
+fixtures = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+fixtures.add_argument("--pr-grind-result-file")
+fixtures.add_argument("--litmus-status-result-file")
+injected, remaining = fixtures.parse_known_args(sys.argv[1:])
+# Production never sees them: its parser is about to read this argv and has no such flags.
+sys.argv[1:] = remaining
+
+ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-delivery-status"))
+globals_ = ns["main"].__globals__
+# The two halves of the affordance production refuses outright: the caller-named helper doubles,
+# and the envelope label that keeps whatever they print authority-negative.
+globals_["custom_helper_refusal"] = lambda custom: None
+globals_["FIXTURE_MODE"] = True
+if os.environ.get("HERMES_BUSDRIVER_PRIVATE_RUNTIME") == "1":
+    globals_["PRIVATE_TRUSTED_BIN"] = Path(os.environ["PATH"].split(os.pathsep)[0]).resolve()
+
+
+def read_fixture(path):
+    """One fixture result file: bounded read, strict parse, never authoritative."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_FIXTURE_BYTES + 1)
+        if len(raw) > MAX_FIXTURE_BYTES:
+            return None, "fixture_result_file_too_large"
+        return json.loads(raw.decode("utf8")), None
+    except Exception as exc:  # noqa: BLE001 - a fixture that will not read is a broken test
+        return None, str(exc)
+
+
+_run_pr_grind_check = globals_["run_pr_grind_check"]
+_run_litmus_status = globals_["run_litmus_status"]
+
+
+def run_pr_grind_check(args, repo, busdriver):
+    """The fixture branch production used to carry, with its `source: fixture` label intact.
+
+    The label is what keeps a hand-authored result out of pr_clean_read_only: fixture_sourced()
+    reads it and blocks the envelope whatever the result says.
+    """
+    if not injected.pr_grind_result_file:
+        return _run_pr_grind_check(args, repo, busdriver)
+    data, error = read_fixture(injected.pr_grind_result_file)
+    if error or not globals_["pr_grind_result_valid"](data, repo, args.pr):
+        return {"available": True, "source": "fixture", "ok": False, "reason": "pr_grind_result_invalid", "result": data}
+    return {"available": True, "source": "fixture", "ok": True, "result": data}
+
+
+def run_litmus_status(args, repo):
+    if not injected.litmus_status_result_file:
+        return _run_litmus_status(args, repo)
+    data, error = read_fixture(injected.litmus_status_result_file)
+    if error:
+        return {"available": True, "source": "fixture", "ok": False, "reason": "litmus_status_malformed", "parse_error": error}
+    return globals_["validated_litmus_status"](data, source="fixture", repo=repo)
+
+
+globals_["run_pr_grind_check"] = run_pr_grind_check
+globals_["run_litmus_status"] = run_litmus_status
+raise SystemExit(ns["main"]())
