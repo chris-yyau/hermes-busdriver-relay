@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Litmus / Pre-PR Marker Freshness Lessons
 
 Session context: while adding a read-only `hermes-busdriver-litmus-status` helper to `hermes-busdriver-relay`, Busdriver commit-mode litmus caught marker-freshness pitfalls that should apply to any future relay status/finalization helper.

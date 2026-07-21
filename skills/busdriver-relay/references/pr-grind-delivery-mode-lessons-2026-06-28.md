@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR-grind Delivery Mode Lessons — 2026-06-28
 
 Context: End-to-end Hermes Delivery Mode run for `hermes-busdriver-relay` PR #14 and #15. PR #14 was clean and merged; PR #15 implemented marker freshness reporting, hit reviewer feedback, was fixed, re-grinded, merged, and cleaned up.

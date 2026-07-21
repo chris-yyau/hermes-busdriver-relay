@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR35 Finalization Contract Status + Tracked `.claude/CLAUDE.md` Lessons
 
 Session context: after ADR 0005 established the future finalization authority integration contract, the next dogfood slice converted that textual contract into a read-only machine-readable capability matrix and included a user-requested tracked `.claude/CLAUDE.md` wording cleanup.

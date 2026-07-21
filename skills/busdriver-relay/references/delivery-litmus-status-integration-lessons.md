@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Delivery litmus-status integration lessons
 
 Session lesson from adding `hermes-busdriver-litmus-status` evidence to Delivery Mode status/finalization readiness.

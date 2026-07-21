@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Litmus Status Pathspec-Environment PR-Grind Lessons
 
 Context: while delivering the read-only `scripts/hermes-busdriver-litmus-status` helper, PR reviewer bots found a real blocker after commit/PR creation: `sanitized_git_env()` stripped repository-identity variables but did not strip Git pathspec-mode variables. This let inherited caller state change the `.gitattributes` probe semantics.

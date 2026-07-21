@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Reviewer Report and PR-Grind Lessons
 
 Use this when Hermes is asked to save a PR-reviewer report into the `hermes-busdriver-relay` repo or when tuning the PR-grind readiness checker from live reviewer-bot feedback.

@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Drift-baseline delivery guard lessons
 
 Use when extending `hermes-busdriver-delivery-status` / `hermes-busdriver-finalization-readiness` with Busdriver drift-baseline evidence.

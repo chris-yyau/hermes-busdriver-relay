@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Delivery Litmus PR-Mode Lessons
 
 Use this reference when taking a Hermes Busdriver Relay delivery-status/finalization slice through commit, PR, PR-grind, and merge.

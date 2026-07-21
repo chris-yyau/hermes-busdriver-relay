@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR47 Docs Refresh Delivery Lessons
 
 Use when continuing relay after a clean merged main and the next safe slice is a docs/status verification refresh.

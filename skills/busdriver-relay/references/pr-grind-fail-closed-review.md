@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Busdriver relay PR-grind fail-closed review lessons
 
 Use for Hermes Busdriver Relay PR/delivery work that touches status envelopes, finalization-readiness, litmus/pre-PR marker evidence, or helper subprocess wrappers.

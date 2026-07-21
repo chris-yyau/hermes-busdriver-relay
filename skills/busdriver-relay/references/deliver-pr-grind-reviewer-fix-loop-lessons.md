@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Deliver PR-grind reviewer-fix loop lessons
 
 Use this reference when Hermes is delivering a relay PR and `hermes-busdriver-pr-grind-loop` returns `needs_fix` after reviewer bots comment on the latest PR head.

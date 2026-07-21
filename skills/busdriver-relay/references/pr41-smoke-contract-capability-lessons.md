@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR41 Smoke Contract Capability Evidence Lessons
 
 Context: continuation after PR #38–#40. The safe slice exposed embedded finalization contract evidence in smoke summaries and added finalization-readiness / finalization-contract-status helpers to delivery-status capability inventory.

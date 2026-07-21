@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR #25/#26 delivery lessons — litmus evidence and doc-refresh follow-through
 
 Session lessons from finishing the litmus evidence delivery slice and the immediate post-merge docs/status refresh.

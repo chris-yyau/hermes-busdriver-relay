@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR56 Skill-Sync Delivery Lessons
 
 Session context: after PR55 merged, Phase 0 showed the repo was clean on `main`, no open PRs/relay locks, but the installed Hermes `busdriver-relay` skill still had drift: `references/pr53-pr55-skill-sync-lessons.md` plus a `SKILL.md` pointer that the repo source lacked. The next safe slice became PR56.

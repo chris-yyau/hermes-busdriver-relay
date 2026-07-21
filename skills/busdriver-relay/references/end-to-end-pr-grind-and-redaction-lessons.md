@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # End-to-end PR-grind and delivery-redaction lessons
 
 Session lessons from Hermes Busdriver Relay dogfooding on Dependabot PR-grind and the delivery verifier redaction slice.

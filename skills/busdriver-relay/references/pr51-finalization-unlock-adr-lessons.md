@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR51 Finalization Unlock ADR Lessons
 
 Session: relay PR #51 (`docs: add finalization unlock ADR`).

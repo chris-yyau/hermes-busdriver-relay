@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Idle clean-main finalization-readiness lessons
 
 When implementing the safe read-only/status slice for `hermes-busdriver-finalization-readiness`, distinguish **no candidate** from **blocked candidate**:

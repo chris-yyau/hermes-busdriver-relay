@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR49 Skill Sync Delivery Lessons
 
 Use when continuing `hermes-busdriver-relay` after a clean merged state and the next slice is a small skill/reference/docs sync PR.

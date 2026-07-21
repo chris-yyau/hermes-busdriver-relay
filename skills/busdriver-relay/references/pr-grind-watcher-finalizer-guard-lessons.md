@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR-grind watcher / finalizer guard lessons
 
 Use this when Hermes is asked to continue as a PR-grind watcher/finalizer guard for `hermes-busdriver-relay` or another Busdriver-relay repo.

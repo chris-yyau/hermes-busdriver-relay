@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Deliver PR-grind delivery loop lessons
 
 Session context: while delivering `hermes-busdriver-relay` PR #23, PR-grind/reviewer feedback repeatedly invalidated the prior clean state after amended commits. These lessons generalize to Delivery Mode work that wraps read-only PR-grind loops or updates PRs after review feedback.

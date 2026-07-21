@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR-grind readiness checker lessons
 
 Use this reference when maintaining `scripts/hermes-busdriver-pr-grind-check` or any future Hermes-side PR-grind equivalent. These are implementation pitfalls discovered by dogfooding the checker on its own PR.

@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Litmus Status Helper — Codex PR-Review Hardening Lessons
 
 Session context: while finishing the `hermes-busdriver-litmus-status` helper through Busdriver Delivery Mode, PR-mode Codex lead review found additional blockers after local tests/smoke were green. These lessons apply to future read-only marker/status helpers and PR-grind blocker fixes.

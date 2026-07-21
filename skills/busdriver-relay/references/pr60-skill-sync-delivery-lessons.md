@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR60 Skill-Sync Delivery Lessons
 
 Use when a relay continuation finds that the installed Hermes `busdriver-relay` skill has a reference or `SKILL.md` pointer that the repo source lacks.

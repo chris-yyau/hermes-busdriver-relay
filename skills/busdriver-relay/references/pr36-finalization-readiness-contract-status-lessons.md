@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR36 Finalization Readiness Contract Status Embedding Lessons
 
 Session context: after `hermes-busdriver-finalization-contract-status` existed as a separate read-only ADR 0005 capability matrix, the next small dogfood slice embedded that status inside `hermes-busdriver-finalization-readiness` so downstream readiness consumers do not need to call a second helper.

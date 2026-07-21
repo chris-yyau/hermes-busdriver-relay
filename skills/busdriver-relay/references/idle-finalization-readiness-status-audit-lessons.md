@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Idle finalization-readiness status audit lessons
 
 Context: read-only audit of a proposed `hermes-busdriver-finalization-readiness` slice that changes clean idle/no-PR/no-dirty-worktree status from `blocked` to `no_finalization_candidate` even when child litmus evidence reports stale/not-fresh.

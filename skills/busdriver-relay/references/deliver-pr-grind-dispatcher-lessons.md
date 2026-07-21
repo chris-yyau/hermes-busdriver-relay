@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Deliver PR-Grind Dispatcher Lessons
 
 When `scripts/hermes-busdriver-deliver` wraps `scripts/hermes-busdriver-pr-grind-loop` for `execute --operation pr-grind`, keep the wrapper fail-closed and non-finalizing.

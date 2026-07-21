@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Litmus Status Helper Hardening Lessons
 
 Context: building `scripts/hermes-busdriver-litmus-status`, a read-only helper that reports Busdriver commit/pre-PR marker freshness without granting finalization or writing markers.

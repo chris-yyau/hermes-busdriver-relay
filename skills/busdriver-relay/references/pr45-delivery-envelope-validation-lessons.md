@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR45 delivery-status envelope validation lessons
 
 Session lesson from continuing after PR44: the next strict-helper-evidence gap was not inside nested `litmus_status` evidence, but at the boundary where `hermes-busdriver-finalization-readiness` consumes the whole `hermes-busdriver-delivery-status` child envelope.

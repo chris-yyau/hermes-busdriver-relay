@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR44 Strict Helper Evidence Validation Lessons
 
 Context: continuation after PR #43, where the remaining gap was regression coverage for helper evidence validation rather than production behavior. The slice merged as PR #44.

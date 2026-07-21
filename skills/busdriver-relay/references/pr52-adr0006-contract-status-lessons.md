@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR52 ADR 0006 Contract-Status Evidence Lessons
 
 Session: relay PR #52 (`docs: surface ADR 0006 contract status evidence`).
