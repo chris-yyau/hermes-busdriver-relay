@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only Hermes-side PR-grind readiness checker.
 
 This command does not write Busdriver markers and does not merge. It collects the
@@ -10,14 +10,376 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import errno
+import hashlib
 import json
 import os
 import re
+import select
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# Pinned Busdriver plugin helpers are credential-bearing shell input. The largest helper this repo
+# ships is far smaller than this; the bound is ours because a candidate file's size is not.
+MAX_AUTHENTICATED_HELPER_BYTES = 1024 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+TRUSTED_PLUGIN_DIGESTS = {
+    "scripts/fetch-pr-state.sh": "48a31b7d57f4ede257cea6ba7b52264fc7e80605dfd3230ed8bfc6e8a67cd241",
+    "scripts/augment-equiv-acks.sh": "c7302f3e3d310f9f42a8fc49108e8574334a91868d75928cbf30c963c55e7759",
+    "scripts/ack-ledger.sh": "7590191a2707ee4d36b223397bb82da57d1941516f5bbc81f547e547aa7ad567",
+    "scripts/relevant-check-status.sh": "7bce456c0bbee60e7e69e461308addc66b3575e1ff7d573ff8f8008b04408671",
+}
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
+    # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
+    # inode). A supply-chain pin, not an identity check — the path is the identity.
+    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "jq": "49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a",
+    "bash": "21f1b686feca123f2c575296d6f8b8277a2695f7a06e3b1c1b154a0f21f68141",
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+# Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
+# symlinked name is what this contract refuses. See _validated_root_owned_source().
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+    "gh": Path("/usr/local/bin/gh"),
+    "jq": Path("/usr/bin/jq"),
+    "bash": Path("/bin/bash"),
+    "python3": Path("/usr/bin/python3"),
+}
+# None of the git/gh/jq children in this file had a timeout: each could block forever against a
+# network the caller does not control.
+GH_CHILD_TIMEOUT = 180
+SCHEMA = "hermes-busdriver-pr-grind-check/v0"
+# The canonical authority-negative set, stated by every decision this checker emits. This is a
+# read-only checker: it never holds any finalization authority, and consumers
+# (hermes-busdriver-delivery-status) require the whole set to be present and false before they
+# read a result at all, so an omission is a rejected result rather than an assumed-safe one.
+AUTHORITY_FALSE = {
+    "finalization_allowed": False,
+    "commit_allowed": False,
+    "push_allowed": False,
+    "pr_allowed": False,
+    "merge_allowed": False,
+    "deploy_allowed": False,
+    "release_allowed": False,
+    "publish_allowed": False,
+    "marker_write_allowed": False,
+}
+MAX_GITHUB_AUTH_CONFIG_BYTES = 64 * 1024
+_TRUSTED_GH_CONFIG_DIR: str | None = None
 
 FAIL_STATUSES = {"fail", "failing", "failure", "cancel", "cancelled", "error", "timed_out", "startup_failure"}
 PENDING_STATUSES = {"pending", "queued", "in_progress", "expected", "waiting", "requested"}
@@ -31,6 +393,248 @@ BOT_REVIEW_SUMMARY = re.compile(r"here are some automated review suggestions", r
 CUBIC_NO_ISSUES_REVIEW = re.compile(r"^\s*\*\*No issues found\*\*\s+across\s+\d+\s+files?\b", re.I)
 DEVIN_REVIEW_SUMMARY = re.compile(r"\*\*Devin Review\*\*\s+found\s+\d+\s+new potential issues?", re.I)
 DEVIN_NO_ISSUES_REVIEW = re.compile(r"^\s*(?:#+\s*)?(?:(?:✅|✔️|✔)\s*)?Devin Review:\s*No Issues Found\b", re.I)
+
+
+UNSAFE_AMBIENT_ENV = {
+    "GH_REPO",
+    "GH_HOST",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+}
+
+
+REDACTION = "[REDACTED]"
+# Kept byte-identical to the sibling relays (deliver, delivery-status, litmus-status,
+# finalization-readiness, pr-grind-loop). These are standalone executables with no shared import
+# path, so the block is restated rather than shared; the contract test asserts they agree.
+SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
+    (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+    (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*)([^\s'\"&]+)"), rf"\1{REDACTION}"),
+]
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
+def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input — including a URL-userinfo class with no length bound — so
+# a hostile subprocess returning 500MB of stderr, or a remote URL of the same size, costs that much
+# CPU and memory inside a helper whose entire job is to emit a few KB. Bounding after redaction, as
+# r25 did, means the bound never applies to the expensive step it exists to protect.
+#
+# 8192, not a tight bound: every shape pattern above matches far less than this, so the span exists
+# to keep a long-but-real match (a `token: <value>` with a verbose value, a long URL) whole inside
+# the budget. It costs 8KB of regex work and buys the guarantee below.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED — not sliced to its last `budget` bytes, which is what r26 did and
+# what leaked. The value classes for `token:`, `--token`, `"token":` and `Bearer` are unbounded, so
+# a long enough value has the very prefix that IDENTIFIES it as a secret cut away by that slice;
+# the remainder matches no shape pattern and the tail is emitted raw. No window size fixes it —
+# the prefix sits arbitrarily far from the tail. An unmatched fragment of a secret is still a
+# secret, and no diagnostic from an attacker-controlled 12KB+ of output is worth emitting one.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value or ""
+    if limit <= 0:
+        return ""
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
+def tail(value: str | bytes | None, limit: int = 4000) -> str:
+    """Redact, then bound — over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(value, limit)
+
+
+def body_preview(body: str) -> str:
+    """A PR body is untrusted text — anyone who can comment can paste a credential into it.
+
+    Redact whole, THEN cut. Head-slicing first bisects a token that starts inside the emitted
+    region and runs past it: the fragment matches no shape pattern, so it ships raw. This is the
+    head twin of the tail bug bounded_redacted_tail() fences.
+
+    Unlike tail(), the window is NOT bounded before redaction. tail() guards a subprocess whose
+    stderr is unbounded, so slicing first is what keeps a hostile 500MB from reaching the regexes.
+    A body reaches us only via gh_json(), which has already held and parsed the whole payload — a
+    pre-bound here buys no memory back, and refusing an over-budget body would blank the preview
+    that exists to be read.
+    """
+    return redact_text(body)[:500]
+
+
+def safe_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    allowed = {"TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["HOME"] = "/var/empty"
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if _TRUSTED_GH_CONFIG_DIR:
+        env["GH_CONFIG_DIR"] = _TRUSTED_GH_CONFIG_DIR
+    if extra:
+        for key, value in extra.items():
+            if key in UNSAFE_AMBIENT_ENV or key.startswith("GIT_") or key in {"PYTHONPATH", "PYTHONHOME", "BASH_ENV", "ENV", "ZDOTDIR"}:
+                continue
+            env[key] = value
+    return env
+
+
+def safe_local_script_env() -> dict[str, str]:
+    allowed = ("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP")
+    env = {key: os.environ[key] for key in allowed if isinstance(os.environ.get(key), str)}
+    for key, value in os.environ.items():
+        if key.startswith("LC_"):
+            env[key] = value
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    env["BUSDRIVER_DISABLE_ACK_SELF_RESOLVE"] = "1"
+    env["BUSDRIVER_DISABLE_RELEVANT_CHECK_SELF_RESOLVE"] = "1"
+    return env
+
+
+def safe_github_helper_env() -> dict[str, str]:
+    """The credential-bearing helper environment. Callers MUST validate every tool this helper
+    dispatches before calling this — see load_acked_bot_logins().
+
+    No bin_dir parameter any more: there is no directory of private copies to put at PATH head, and
+    the caller therefore cannot choose the programs the helper runs. PATH is root-owned components
+    only, and deliberately does NOT include /usr/local/bin — gh reaches the helper as an absolute
+    path bound to a shell function, so a lost binding fails closed instead of resolving elsewhere.
+
+    HERMES_BUSDRIVER_PRIVATE_RUNTIME is gone with the directory it used to select.
+    """
+    allowed = ("LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TMP", "TEMP", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+    env = {key: os.environ[key] for key in allowed if isinstance(os.environ.get(key), str)}
+    for key, value in os.environ.items():
+        if key.startswith("LC_"):
+            env[key] = value
+    env["HOME"] = "/var/empty"
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if _TRUSTED_GH_CONFIG_DIR:
+        env["GH_CONFIG_DIR"] = _TRUSTED_GH_CONFIG_DIR
+    env["BUSDRIVER_DISABLE_ACK_SELF_RESOLVE"] = "1"
+    # Belt and braces with the guard's own check: /usr/bin/git is the CommandLineTools shim, and
+    # these redirect it through xcrun to an attacker-chosen toolchain that no ancestry walk sees.
+    for key in ENV_DENIED_FOR_TRUSTED_DISPATCH:
+        env.pop(key, None)
+    return env
+
+
+def secure_read_github_auth_config(path: Path) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open(absolute.anchor, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+        for component in absolute.parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        fd = os.open(absolute.name, file_flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise SystemExit(json.dumps({"ok": False, "error": "github_auth_config_untrusted", "detail": type(exc).__name__})) from exc
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > MAX_GITHUB_AUTH_CONFIG_BYTES
+            or stat.S_IMODE(before.st_mode) & 0o077
+        ):
+            raise ValueError("unsafe_metadata")
+        chunks: list[bytes] = []
+        remaining = MAX_GITHUB_AUTH_CONFIG_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(fd)
+        identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if len(data) != before.st_size or len(data) > MAX_GITHUB_AUTH_CONFIG_BYTES or identity_before != identity_after:
+            raise ValueError("changed_during_read")
+        text = data.decode("utf-8")
+        if "\x00" in text or "github.com:" not in text:
+            raise ValueError("invalid_hosts_config")
+        return data
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise SystemExit(json.dumps({"ok": False, "error": "github_auth_config_untrusted", "detail": type(exc).__name__})) from exc
+    finally:
+        os.close(fd)
+
+
+def materialize_github_auth_config(source: Path | None = None) -> tempfile.TemporaryDirectory[str]:
+    global _TRUSTED_GH_CONFIG_DIR
+    auth_source = source or (Path.home() / ".config" / "gh" / "hosts.yml")
+    data = secure_read_github_auth_config(auth_source)
+    guard = tempfile.TemporaryDirectory(prefix="hermes-pr-grind-gh-auth-")
+    private = Path(guard.name)
+    private.chmod(0o700)
+    destination = private / "hosts.yml"
+    try:
+        write_private_authenticated(destination, data, 0o600)
+    except OSError as exc:
+        guard.cleanup()
+        raise SystemExit(json.dumps({"ok": False, "error": "github_auth_config_untrusted", "detail": type(exc).__name__})) from exc
+    _TRUSTED_GH_CONFIG_DIR = str(private)
+    return guard
 
 
 def is_cubic_no_issues_review(body: str, user_login: str | None) -> bool:
@@ -72,8 +676,180 @@ def is_ignorable_review_body(body: str, user_login: str | None) -> bool:
     return cleaned == ""
 
 
+def private_runtime_error(error: str, executable: "str | None" = None, detail: "str | None" = None) -> SystemExit:
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if executable:
+        payload["executable"] = executable
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+# =============================================================================================
+# Fixed root-owned source execution contract. Copy of the primitive in hermes-busdriver-deliver;
+# these are standalone executables with no shared import path, so a contract test asserts the
+# copies agree. The full rationale lives in the deliver copy; the short version:
+#
+# executing a private copy relocated the substitutable name instead of removing it. macOS has no
+# fexecve and will not exec /dev/fd/N, so the kernel re-resolves a *pathname* at exec time, and any
+# pathname we can write is one a same-UID adversary can rename first (r34's two-rename ABA leaves
+# st_nlink at 1 and every descriptor-visible field intact). The source therefore has to live where
+# the adversary cannot write at all: root-owned, non-group/world-writable, root to leaf. The walk
+# proves there is no race rather than trying to win one.
+#
+# /usr/bin/git is the CommandLineTools shim — same inode as /usr/bin/python3, nlink 78 — so nlink==1
+# is waived for it and SF_RESTRICTED (SIP; denies even root) required instead. That shim also
+# honours $DEVELOPER_DIR through xcrun, which no ancestry walk can see, so the child environment is
+# owned here too: see ENV_DENIED_FOR_TRUSTED_DISPATCH.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"git", "python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: "str | None" = None) -> SystemExit:
+    """gh gets its own top-level reason: a missing credential-bearing binary is an operational
+    state an administrator resolves by provisioning /usr/local/bin/gh, not an integrity failure."""
+    if reason == "unavailable" and name == "gh":
+        return private_runtime_error("trusted_root_owned_gh_unavailable", name, detail)
+    return private_runtime_error(f"trusted_root_owned_source_{reason}", name, detail)
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd, not the path: the leaf must be opened relative to the directory just validated.
+    Re-opening by full pathname would re-traverse every component and restore the TOCTOU.
+    """
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Pure seam: production reaches this only via trusted_executable_path(), which supplies the
+    path from a frozen table. Tests pass harmless already-root-owned system binaries."""
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _trusted_source_refusal(name, "metadata_invalid", "symlink") from exc
+            raise _trusted_source_refusal(name, "unavailable", type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _identity(os.fstat(fd)) != _identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
 def run(cmd: list[str], cwd: Path | None = None, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, check=check)
+    argv = list(cmd)
+    if argv and argv[0] in {"git", "gh"}:
+        argv[0] = str(trusted_executable_path(argv[0]))
+    try:
+        # No timeout existed on this wrapper at all: a trusted git/gh could block forever.
+        p = run_bounded(argv, cwd=cwd, timeout=GH_CHILD_TIMEOUT, env=safe_subprocess_env())
+        if p.overflowed or p.timed_out:
+            raise SystemExit(json.dumps({"ok": False, "error": "child_output_unusable"}))
+        if check and p.returncode != 0:
+            raise subprocess.CalledProcessError(p.returncode, argv, p.stdout, p.stderr)
+        return subprocess.CompletedProcess(argv, p.returncode, p.stdout, p.stderr)
+    except OSError as exc:
+        # An unusable cwd/executable (NotADirectoryError/PermissionError from a caller-supplied
+        # --repo) must reach callers as the same rc 127 shape they already handle, not a traceback.
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
 def read_json_file(path: str | None, default: Any) -> Any:
@@ -82,36 +858,181 @@ def read_json_file(path: str | None, default: Any) -> Any:
     return json.loads(Path(path).expanduser().read_text())
 
 
+def _read_authenticated_plugin_candidate(candidate: Path, expected: str) -> bytes | None:
+    try:
+        before = candidate.lstat()
+        if candidate.is_symlink() or not stat.S_ISREG(before.st_mode):
+            return None
+        fd = os.open(candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except (OSError, ValueError, AttributeError):
+        return None
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            return None
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+        ):
+            return None
+        if opened.st_size > MAX_AUTHENTICATED_HELPER_BYTES:
+            return None
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_HELPER_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_HELPER_BYTES:
+            return None
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            return None
+        landed = os.lstat(candidate)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    finally:
+        os.close(fd)
+    return data if hashlib.sha256(data).hexdigest() == expected else None
+
+
+def authenticated_plugin_bytes(root: Path, relative_path: str) -> bytes | None:
+    expected = TRUSTED_PLUGIN_DIGESTS.get(relative_path)
+    if not expected:
+        return None
+    try:
+        resolved_root = root.resolve()
+        candidate = resolved_root / relative_path
+        candidate.resolve().relative_to(resolved_root)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return _read_authenticated_plugin_candidate(candidate, expected)
+
+
+def authenticated_plugin_file(root: Path, relative_path: str) -> bool:
+    return authenticated_plugin_bytes(root, relative_path) is not None
+
+
+def trusted_busdriver_plugin_root(args: argparse.Namespace, required: tuple[str, ...]) -> Path | None:
+    default = Path.home() / ".claude/plugins/marketplaces/busdriver"
+    requested = Path(args.plugin_root).expanduser() if getattr(args, "plugin_root", None) else default
+    try:
+        default_resolved = default.resolve()
+        requested_resolved = requested.resolve()
+    except OSError:
+        if getattr(args, "plugin_root", None):
+            raise SystemExit(json.dumps({"ok": False, "error": "plugin_root_untrusted"}))
+        return None
+    if requested_resolved != default_resolved:
+        raise SystemExit(json.dumps({"ok": False, "error": "plugin_root_untrusted"}))
+    package_path = requested_resolved / "package.json"
+    try:
+        if not package_path.is_file() or package_path.is_symlink():
+            raise ValueError("package_missing_or_symlink")
+        package = json.loads(package_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        if getattr(args, "plugin_root", None):
+            raise SystemExit(json.dumps({"ok": False, "error": "plugin_root_integrity_failed"}))
+        return None
+    if package.get("name") != "busdriver" or not isinstance(package.get("version"), str):
+        raise SystemExit(json.dumps({"ok": False, "error": "plugin_root_integrity_failed"}))
+    for rel in required:
+        if not authenticated_plugin_file(requested_resolved, rel):
+            raise SystemExit(json.dumps({"ok": False, "error": "plugin_root_integrity_failed", "path": rel}))
+    return requested_resolved
+
+
 def parse_paginated_json(stdout: str) -> list[dict[str, Any]]:
     """Parse `gh api --paginate --slurp` output and flatten page arrays."""
-    if not stdout.strip():
-        return []
-    data = json.loads(stdout)
-    if isinstance(data, list) and all(isinstance(page, list) for page in data):
-        return [item for page in data for item in page if isinstance(item, dict)]
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    return []
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(json.dumps({"ok": False, "error": "rest_paginated_schema_invalid"}))
+    if not isinstance(data, list) or any(not isinstance(page, list) for page in data):
+        raise SystemExit(json.dumps({"ok": False, "error": "rest_paginated_schema_invalid"}))
+    rows = [item for page in data for item in page]
+    if any(not isinstance(item, dict) or "message" in item for item in rows):
+        raise SystemExit(json.dumps({"ok": False, "error": "rest_paginated_schema_invalid"}))
+    return rows
 
 
 def parse_paginated_check_runs(stdout: str) -> list[dict[str, Any]]:
-    if not stdout.strip():
-        return []
-    data = json.loads(stdout)
-    pages = data if isinstance(data, list) else [data]
+    try:
+        pages = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
+    if not isinstance(pages, list):
+        raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
     rows: list[dict[str, Any]] = []
     for page in pages:
-        if isinstance(page, dict):
-            for item in page.get("check_runs") or []:
-                if isinstance(item, dict):
-                    rows.append(item)
+        if not isinstance(page, dict) or "message" in page or not isinstance(page.get("check_runs"), list):
+            raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
+        for item in page["check_runs"]:
+            if not isinstance(item, dict):
+                raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
+            rows.append(item)
+    return rows
+
+
+def parse_paginated_statuses(stdout: str, head: str) -> list[dict[str, Any]]:
+    try:
+        pages = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise SystemExit(json.dumps({"ok": False, "error": "status_contexts_schema_invalid"}))
+    if not isinstance(pages, list):
+        raise SystemExit(json.dumps({"ok": False, "error": "status_contexts_schema_invalid"}))
+    rows: list[dict[str, Any]] = []
+    for page in pages:
+        if (
+            not isinstance(page, dict)
+            or "message" in page
+            or page.get("sha") != head
+            or not isinstance(page.get("statuses"), list)
+        ):
+            raise SystemExit(json.dumps({"ok": False, "error": "status_contexts_schema_invalid"}))
+        for item in page["statuses"]:
+            if not isinstance(item, dict) or not isinstance(item.get("context"), str) or not isinstance(item.get("state"), str):
+                raise SystemExit(json.dumps({"ok": False, "error": "status_contexts_schema_invalid"}))
+            rows.append(item)
+    return rows
+
+
+def validate_feedback_items(surface: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    common = {"id": int, "body": str, "user": dict}
+    required = {
+        "review_comments": {**common, "commit_id": str},
+        "issue_comments": {**common, "created_at": str},
+        "reviews": {**common, "state": str, "commit_id": str, "submitted_at": str},
+    }[surface]
+    for item in rows:
+        for field, expected_type in required.items():
+            value = item.get(field)
+            if not isinstance(value, expected_type) or isinstance(value, bool) or (expected_type is str and not value):
+                raise SystemExit(json.dumps({"ok": False, "error": f"{surface}_schema_invalid"}))
+        user = item["user"]
+        if not isinstance(user.get("login"), str) or not user["login"]:
+            raise SystemExit(json.dumps({"ok": False, "error": f"{surface}_schema_invalid"}))
     return rows
 
 
 def gh_json(cmd: list[str], repo: Path) -> Any:
     cp = run(cmd, cwd=repo)
     if cp.returncode != 0:
-        raise SystemExit(json.dumps({"ok": False, "error": "gh_failed", "cmd": cmd, "stderr": cp.stderr.strip()}))
+        raise SystemExit(json.dumps({"ok": False, "error": "gh_failed", "cmd": cmd, "stderr": tail(cp.stderr)}))
     return json.loads(cp.stdout)
 
 
@@ -127,38 +1048,375 @@ def ack_matches_head(value: str, head: str) -> bool:
     return token == head[:8] or (len(token) > 8 and head.startswith(token))
 
 
+def private_helper_guard_bytes() -> bytes:
+    """The last gate before bash runs: revalidate, then exec.
+
+    Two different jobs, because the two kinds of file have two different threat models.
+
+    The helper .sh files are Busdriver plugin bytes that have to be materialized somewhere to be
+    interpreted, and no root-owned location exists to put them in — so they stay private copies,
+    digest-checked here immediately before bash opens them.
+
+    git/gh/jq are not copied any more; this revalidates the fixed root-owned SOURCES against the
+    same ancestry contract the parent used. The parent already validated them, but the parent's
+    check is a statement about the past, and this process is the one that hands them to bash.
+
+    It also refuses ENV_DENIED_FOR_TRUSTED_DISPATCH outright. The parent builds the child env from
+    an allowlist that contains no such key, so this can only fire if that construction is ever
+    bypassed — which is exactly when a $DEVELOPER_DIR redirect of the /usr/bin/git shim would be
+    invisible to every ancestry walk above.
+    """
+    digests = json.dumps(TRUSTED_EXECUTABLE_DIGESTS, sort_keys=True)
+    sources = json.dumps({name: str(path) for name, path in TRUSTED_EXECUTABLE_SOURCES.items()}, sort_keys=True)
+    shim_backed = json.dumps(sorted(SHIM_BACKED_SOURCES))
+    denied_env = json.dumps(sorted(ENV_DENIED_FOR_TRUSTED_DISPATCH))
+    helper_names = {"fetch-pr-state.sh", "augment-equiv-acks.sh", "ack-ledger.sh"}
+    helper_digests = json.dumps(
+        {
+            Path(relative).name: digest
+            for relative, digest in TRUSTED_PLUGIN_DIGESTS.items()
+            if Path(relative).name in helper_names
+        },
+        sort_keys=True,
+    )
+    return f'''import errno, hashlib, json, os, stat, sys
+DIGESTS = json.loads({digests!r})
+SOURCES = json.loads({sources!r})
+SHIM_BACKED = json.loads({shim_backed!r})
+DENIED_ENV = json.loads({denied_env!r})
+HELPER_DIGESTS = json.loads({helper_digests!r})
+SF_RESTRICTED = {SF_RESTRICTED:#x}
+NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+MAX_BYTES = {MAX_TRUSTED_EXECUTABLE_BYTES}
+def fail(error, executable=None):
+    payload = {{"ok": False, "error": error}}
+    if executable: payload["executable"] = executable
+    print(json.dumps(payload, sort_keys=True))
+    raise SystemExit(3)
+def refuse(name, reason, detail=None):
+    if reason == "unavailable" and name == "gh":
+        fail("trusted_root_owned_gh_unavailable", name)
+    fail("trusted_root_owned_source_" + reason, name)
+def validate_dir(path, unavailable, invalid):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        fail(unavailable)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
+        fail(invalid)
+def validate_entries(root, entries, prefix):
+    fds = {{}}
+    for name, expected in entries.items():
+        path = os.path.join(root, name)
+        fd = None
+        try:
+            st = os.lstat(path)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            opened = os.fstat(fd)
+        except OSError:
+            if fd is not None:
+                os.close(fd)
+            fail(f"private_trusted_{{prefix}}_unavailable", name)
+        try:
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o500:
+                fail(f"private_trusted_{{prefix}}_metadata_invalid", name)
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_BYTES: fail(f"private_trusted_{{prefix}}_metadata_invalid", name)
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != expected:
+                fail(f"private_trusted_{{prefix}}_integrity_failed", name)
+            if identity(os.fstat(fd)) != identity(opened):
+                fail(f"private_trusted_{{prefix}}_integrity_failed", name)
+            final = os.lstat(path)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                fail(f"private_trusted_{{prefix}}_integrity_failed", name)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.set_inheritable(fd, True)
+            fds[name] = fd
+            fd = None
+        finally:
+            if fd is not None:
+                os.close(fd)
+    return fds
+def require_dir(st, name, component):
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & NON_OWNER_WRITABLE):
+        refuse(name, "ancestry_untrusted", component)
+def open_ancestry(path, name):
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        refuse(name, "ancestry_untrusted", "/")
+    try:
+        require_dir(os.fstat(dir_fd), name, "/")
+        for component in path.split("/")[1:-1]:
+            try:
+                nxt = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except OSError:
+                refuse(name, "ancestry_untrusted", component)
+            os.close(dir_fd)
+            dir_fd = nxt
+            require_dir(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+def require_leaf(st, name):
+    if not stat.S_ISREG(st.st_mode): refuse(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & NON_OWNER_WRITABLE): refuse(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)): refuse(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED): refuse(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        refuse(name, "metadata_invalid", "multiply_linked")
+def identity(st):
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode, st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+def validate_source(name):
+    path = SOURCES[name]
+    leaf = path.rsplit("/", 1)[1]
+    parent_fd = open_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(leaf, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP: refuse(name, "metadata_invalid", "symlink")
+            refuse(name, "unavailable", type(exc).__name__)
+        try:
+            opened = os.fstat(fd)
+            require_leaf(opened, name)
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_BYTES: refuse(name, "metadata_invalid", "oversized")
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != DIGESTS[name]: refuse(name, "integrity_failed")
+            if identity(os.fstat(fd)) != identity(opened): refuse(name, "identity_changed", "descriptor")
+            final = os.lstat(leaf, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino): refuse(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+helper_dir = sys.argv[1]
+validate_dir(helper_dir, "private_trusted_helper_directory_unavailable", "private_trusted_helper_directory_metadata_invalid")
+helper_fds = validate_entries(helper_dir, HELPER_DIGESTS, "helper")
+for key in DENIED_ENV:
+    if key in os.environ: fail("trusted_root_owned_source_env_denied", key)
+for name in sorted(SOURCES):
+    validate_source(name)
+for name, fd in helper_fds.items():
+    key = "HERMES_BUSDRIVER_HELPER_FD_" + name.replace("-", "_").replace(".", "_").upper()
+    os.environ[key] = str(fd)
+try:
+    os.execve(sys.argv[2], sys.argv[2:], os.environ)
+finally:
+    for fd in helper_fds.values():
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+'''.encode()
+
+
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def write_private_authenticated(target: Path, content: bytes, mode: int) -> None:
+    """Write authenticated bytes through a descriptor, then prove that descriptor still holds them.
+
+    `Path.write_bytes()` looks like one operation and is three unproven claims. `os.write` may write
+    fewer bytes than it was handed, and a partial write that nobody checks is a silent truncation.
+    Nothing is flushed, so the bytes may not be on disk when the child is launched to read them.
+    And nothing re-reads what landed, so "we wrote the authenticated content" and "the file holds
+    the authenticated content" are separate facts — only the first was ever established.
+
+    That gap is not academic here: these bytes are about to be EXECUTED as a private runtime, and
+    the caller's pin check authenticated the bytes in MEMORY, not the file. The closing re-digest is
+    what carries that authentication onto disk, and it reads the descriptor rather than the name,
+    because a name resolves a second time and a second resolution is a second chance to hand us a
+    different file. The identity check then proves the other direction — that the name still reaches
+    the inode the digest just cleared — which is the half a descriptor alone cannot see: an adversary
+    who renames our file aside and its own into place leaves every descriptor-visible field (type,
+    owner, LINK COUNT, size, mode, digest) describing our inode exactly, and the name pointing at
+    theirs. `sha256(content)` is the expected value rather than a pin the caller passes in: the
+    caller already proved content matches its pin, so the two are the same number, and a parameter
+    that can only ever hold one value is a parameter that can be passed the wrong one.
+
+    O_EXCL: the name must not already exist, so this cannot land in something prepared for it.
+    O_NOFOLLOW: and it cannot be a symlink pointing somewhere the containment never authorized.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
+        # write-only one cannot be read (EBADF). Re-opening the name to read it instead would
+        # resolve the name a second time, which is the very thing the descriptor is here to avoid.
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(target.name, flags, mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    # Not merely "unusual": consuming the result only as a slice index makes a 0 an
+                    # infinite loop, so this is what keeps the loop terminating as well as honest.
+                    raise OSError("private_copy_short_write")
+                view = view[written:]
+            os.fsync(fd)
+            # fchmod, not chmod: the mode lands on the inode we wrote, not on whatever the name
+            # means by now. The requested mode is also masked by the caller's umask at open.
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(content)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("private_copy_metadata_invalid")
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < st.st_size:
+                # pread: neither moves the offset nor rides it, so the digest cannot race the writer.
+                chunk = os.pread(fd, min(1 << 16, st.st_size - offset), offset)
+                if not chunk:
+                    raise OSError("private_copy_truncated")
+                digest.update(chunk)
+                offset += len(chunk)
+            if digest.hexdigest() != hashlib.sha256(content).hexdigest():
+                raise OSError("private_copy_integrity_failed")
+            if not _names_created_inode(parent_fd, target.name, created):
+                # The digest proved OUR inode is intact; this proves `target` still reaches it. A
+                # rename over the name publishes someone else's bytes under the name the caller is
+                # about to execute — and here that name is the guard that re-digests every other
+                # private executable, so this one binding is what the rest of them rest on.
+                raise OSError("private_copy_integrity_failed")
+        except BaseException:
+            # A half-written private executable must never be left behind for the next step to run.
+            # But by now the name may belong to something else — the case the identity check above
+            # fails on — and deleting THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, target.name, created):
+                try:
+                    os.unlink(target.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+PRIVATE_HELPER_GUARD_STDIN_LOADER = (
+    "import sys\n"
+    "virtual = sys.argv[1]\n"
+    "program = sys.stdin.buffer.read()\n"
+    "sys.argv = [virtual, *sys.argv[2:]]\n"
+    "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+    "exec(compile(program, virtual, 'exec'), namespace)\n"
+)
+
+
+def write_private_helper_guard(root: Path) -> tuple[Path, bytes]:
+    guard = root / "private-runtime-guard.py"
+    data = private_helper_guard_bytes()
+    write_private_authenticated(guard, data, 0o500)
+    return guard, data
+
+
 def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> set[str]:
-    if args.fixture_mode or not head:
+    if FIXTURE_MODE or not head:
         return set()
-    plugin_candidates: list[Path] = []
-    if args.plugin_root:
-        plugin_candidates.append(Path(args.plugin_root).expanduser())
-    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
-        if os.environ.get(env_name):
-            plugin_candidates.append(Path(os.environ[env_name]).expanduser())
-    plugin_candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver")
-    fetch = ack = None
-    for plugin in plugin_candidates:
-        candidate_fetch = plugin / "scripts" / "fetch-pr-state.sh"
-        candidate_ack = plugin / "scripts" / "ack-ledger.sh"
-        if candidate_fetch.exists() and candidate_ack.exists():
-            fetch, ack = candidate_fetch, candidate_ack
-            break
-    if fetch is None or ack is None:
+    plugin = trusted_busdriver_plugin_root(args, ("scripts/fetch-pr-state.sh", "scripts/augment-equiv-acks.sh", "scripts/ack-ledger.sh"))
+    if plugin is None:
         return set()
+    fetch_data = authenticated_plugin_bytes(plugin, "scripts/fetch-pr-state.sh")
+    augment_data = authenticated_plugin_bytes(plugin, "scripts/augment-equiv-acks.sh")
+    ack_data = authenticated_plugin_bytes(plugin, "scripts/ack-ledger.sh")
+    if fetch_data is None or augment_data is None or ack_data is None:
+        return set()
+    # BEFORE safe_github_helper_env(), which is the call that puts GH_TOKEN in a dict. This lane
+    # drives gh, so a host without /usr/local/bin/gh must fail closed here — while the credential
+    # is still only an ambient variable of THIS process and has not been handed to anything.
+    # Ordering is the whole control: validating after the env is built would refuse a dispatch
+    # whose environment already existed to be leaked.
+    tool_paths = [(name, trusted_executable_path(name)) for name in ("git", "gh", "jq")]
+    # The plugin helpers invoke git/gh/jq by BARE NAME, and they are Busdriver's bytes, pinned by
+    # digest — not ours to rewrite. So the names are bound here instead: a function per tool whose
+    # body is the validated absolute path, exported so `bash "$ack_script"` inherits it too.
+    # bash resolves a function before PATH, so no bare name reaches a PATH lookup; and PATH itself
+    # (see safe_github_helper_env) no longer contains gh at all, so if this binding were ever
+    # dropped the helper would fail "gh: command not found" rather than silently find another one.
+    tools = "".join(
+        "{0}() {{ {1} \"$@\"; }}\n".format(name, shlex.quote(str(path))) for name, path in tool_paths
+    )
     script = (
         "set -euo pipefail\n"
-        ". \"$1\" \"$2\"\n"
+        + tools
+        + "export -f git gh jq\n"
+        + "fetch_fd=${HERMES_BUSDRIVER_HELPER_FD_FETCH_PR_STATE_SH:?}\n"
+        "augment_fd=${HERMES_BUSDRIVER_HELPER_FD_AUGMENT_EQUIV_ACKS_SH:?}\n"
+        "ack_fd=${HERMES_BUSDRIVER_HELPER_FD_ACK_LEDGER_SH:?}\n"
+        ". \"/dev/fd/$fetch_fd\" \"$2\"\n"
+        "if [ \"${FETCH_OK:-0}\" = \"1\" ]; then\n"
+        "  PR_NUMBER=\"$2\"\n"
+        "  . \"/dev/fd/$augment_fd\"\n"
+        "fi\n"
+        "_ack_src=$(<\"/dev/fd/$ack_fd\")\n"
         "shift 2\n"
-        "ack_script=$1\n"
         "shift\n"
         "for b in \"$@\"; do\n"
-        "  out=$(ACK_EMIT_TIER=1 bash \"$ack_script\" \"$b\" 2>/dev/null || echo stale)\n"
+        "  out=$(ACK_EMIT_TIER=1 bash -s -- \"$b\" <<< \"$_ack_src\" 2>/dev/null || echo stale)\n"
         "  printf '%s=%s\\n' \"$b\" \"$out\"\n"
         "done\n"
     )
-    cp = run(["bash", "-c", script, "ack-ledger", str(fetch), str(args.pr), str(ack), "chatgpt-codex-connector", "coderabbitai", "cubic-dev-ai", "devin-ai-integration"], cwd=repo)
+    with tempfile.TemporaryDirectory(prefix="hermes-busdriver-plugin-") as temp_dir:
+        fetch = Path(temp_dir) / "fetch-pr-state.sh"
+        augment = Path(temp_dir) / "augment-equiv-acks.sh"
+        ack = Path(temp_dir) / "ack-ledger.sh"
+        write_private_authenticated(fetch, fetch_data, 0o500)
+        write_private_authenticated(augment, augment_data, 0o500)
+        write_private_authenticated(ack, ack_data, 0o500)
+        guard, guard_program = write_private_helper_guard(Path(temp_dir))
+        # This helper drives gh+jq over PR comments authored by arbitrary GitHub users, and it
+        # had neither a bound nor a timeout. Both streams are json.loads()d below.
+        cp = run_bounded(
+            [str(trusted_executable_path("python3")), "-I", "-c", PRIVATE_HELPER_GUARD_STDIN_LOADER, str(guard), str(Path(temp_dir)), str(trusted_executable_path("bash")), "--noprofile", "--norc", "-c", script, "ack-ledger", str(fetch), str(args.pr), str(ack), "chatgpt-codex-connector", "coderabbitai", "cubic-dev-ai", "devin-ai-integration"],
+            cwd=repo, timeout=GH_CHILD_TIMEOUT, env=safe_github_helper_env(), stdin_bytes=guard_program,
+        )
+        if cp.overflowed or cp.timed_out:
+            return set()
     if cp.returncode != 0:
+        for stream in (cp.stdout, cp.stderr):
+            try:
+                failure = json.loads(stream.strip())
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            error = str(failure.get("error", "")) if isinstance(failure, dict) else ""
+            if error.startswith("private_trusted_") or error.startswith("trusted_root_owned_"):
+                raise SystemExit(json.dumps(failure, sort_keys=True))
         return set()
     acked: set[str] = set()
     for line in cp.stdout.splitlines():
@@ -172,90 +1430,193 @@ def load_acked_bot_logins(args: argparse.Namespace, repo: Path, head: str) -> se
 
 
 def owner_repo(repo: Path) -> str:
-    cp = run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=repo)
-    if cp.returncode == 0:
-        return json.loads(cp.stdout)["nameWithOwner"]
-    remote = run(["git", "remote", "get-url", "origin"], cwd=repo)
+    remote = run(["git", "config", "--local", "--get-all", "remote.origin.url"], cwd=repo)
     if remote.returncode != 0:
-        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "stderr": remote.stderr.strip()}))
-    url = remote.stdout.strip()
-    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", url)
-    if not m:
-        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "remote": url}))
-    return m.group(1)
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "stderr": tail(remote.stderr)}))
+    urls = [line.strip() for line in remote.stdout.splitlines() if line.strip()]
+    if len(urls) != 1:
+        raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_requires_exactly_one_local_origin_url"}))
+    url = urls[0]
+    patterns = (
+        r"^https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+        r"^git@github\.com:([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$",
+        r"^ssh://git@github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, url)
+        if match:
+            return f"{match.group(1)}/{match.group(2)}"
+    raise SystemExit(json.dumps({"ok": False, "error": "owner_repo_unresolved", "remote": tail(url, 512)}))
+
+
+def repository_for_args(args: argparse.Namespace, repo: Path) -> str:
+    value = getattr(args, "_repository", None) or getattr(args, "expected_repository", None)
+    return str(value) if value else owner_repo(repo)
 
 
 def load_view(args: argparse.Namespace, repo: Path) -> dict[str, Any]:
-    if args.view_json_file:
-        data = read_json_file(args.view_json_file, {})
-        if not isinstance(data, dict):
-            raise SystemExit(json.dumps({"ok": False, "error": "view_json_not_object"}))
-        return data
+    repo_name = repository_for_args(args, repo)
     return gh_json([
         "gh", "pr", "view", str(args.pr), "--json",
-        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefName,headRefName,commits",
+        "number,url,state,mergeable,mergeStateStatus,reviewDecision,isDraft,headRefOid,baseRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,commits",
+        "--repo", repo_name,
     ], repo)
 
 
-def load_checks(args: argparse.Namespace, repo: Path) -> str:
-    if args.checks_file:
-        return Path(args.checks_file).expanduser().read_text()
-    cp = run(["gh", "pr", "checks", str(args.pr)], cwd=repo)
-    # gh exits non-zero for failing checks; the tabular stdout/stderr is still useful.
-    text = (cp.stdout or "") + (cp.stderr or "")
-    if not text.strip() and cp.returncode != 0:
-        raise SystemExit(json.dumps({"ok": False, "error": "gh_pr_checks_failed", "stderr": cp.stderr.strip()}))
-    return text
+def repository_name(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    full_name = value.get("nameWithOwner")
+    if isinstance(full_name, str):
+        return full_name
+    owner = value.get("owner") if isinstance(value.get("owner"), dict) else {}
+    if isinstance(owner.get("login"), str) and isinstance(value.get("name"), str):
+        return f"{owner['login']}/{value['name']}"
+    return None
+
+
+def validate_live_view(args: argparse.Namespace, view: Any) -> None:
+    if not isinstance(view, dict):
+        raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_invalid", "field": "view"}))
+    required_types = {
+        "number": int,
+        "url": str,
+        "state": str,
+        "mergeable": str,
+        "mergeStateStatus": str,
+        "isDraft": bool,
+        "headRefOid": str,
+        "baseRefOid": str,
+        "headRefName": str,
+        "baseRefName": str,
+        "headRepository": dict,
+        "headRepositoryOwner": dict,
+    }
+    for field, expected_type in required_types.items():
+        value = view.get(field)
+        if not isinstance(value, expected_type) or (expected_type is str and (not value or value == "UNKNOWN")):
+            raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_invalid", "field": field}))
+
+    expected = {
+        "number": int(args.pr),
+        "url": f"https://github.com/{args.expected_repository}/pull/{int(args.pr)}",
+        "headRefOid": args.expected_head_sha,
+        "baseRefOid": args.expected_base_sha,
+        "headRefName": args.expected_head_ref,
+        "baseRefName": args.expected_base_ref,
+    }
+    for field, expected_value in expected.items():
+        if view.get(field) != expected_value:
+            raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_mismatch", "field": field}))
+    if args.expected_base_repository != args.expected_repository:
+        raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_mismatch", "field": "baseRepository"}))
+    if repository_name(view.get("headRepository")) != args.expected_head_repository:
+        raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_mismatch", "field": "headRepository"}))
+    expected_head_owner = args.expected_head_repository.split("/", 1)[0]
+    if view["headRepositoryOwner"].get("login") != expected_head_owner:
+        raise SystemExit(json.dumps({"ok": False, "error": "pr_view_identity_mismatch", "field": "headRepositoryOwner"}))
+
+
+# Enumerated from the CONSUMER, not restated by hand: every character `str.splitlines()` treats
+# as a line boundary is a row fabricator here, because the two in-file consumers of these rows
+# (fallback_check_counts, _pending_rows) re-split with splitlines(). Pinning this to tab/LF/CR
+# left \v \f \x1c \x1d \x1e \x85     as usable boundaries. The C0/C1/DEL controls are
+# added on top: they are never legitimate in a check name, and \x1b/\x00 reach operator
+# terminals through this envelope.
+ROW_DELIMITERS = tuple(sorted(
+    {"\t"}
+    | {chr(code) for code in range(0x11000) if len(f"a{chr(code)}b".splitlines()) > 1}
+    | {chr(code) for code in range(0x00, 0x20)}
+    | {chr(0x7F)}
+    | {chr(code) for code in range(0x80, 0xA0)}
+))
+_ROW_DELIMITER_SET = frozenset(ROW_DELIMITERS)
+
+
+def delimiter_safe(value: Any, error: str) -> str:
+    """A field that is about to be interpolated into a tab-delimited row the consumer re-splits.
+
+    Check-run `name` and status `context` are third-party-writable: anyone with checks:write on
+    the head SHA picks the bytes. A name of `Build<TAB>success` re-splits into name="Build",
+    status="success" — a failing check parsed as a passing one, so `failed` stays 0 and classify()
+    returns clean. A newline — or any other splitlines() boundary — fabricates whole rows. The
+    rows feed the Busdriver relevant-check-status.sh contract on stdin, which is tab-delimited by
+    definition, so the fields are constrained rather than the transport re-encoded.
+    """
+    if not isinstance(value, str):
+        return ""
+    if not _ROW_DELIMITER_SET.isdisjoint(value):
+        raise SystemExit(json.dumps({"ok": False, "error": error}))
+    return value
+
+
+def load_checks(args: argparse.Namespace, repo: Path, head: str) -> str:
+    repo_name = repository_for_args(args, repo)
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+        raise SystemExit(json.dumps({"ok": False, "error": "invalid_head_for_checks"}))
+    runs = run(["gh", "api", f"repos/{repo_name}/commits/{head}/check-runs", "--paginate", "--slurp"], cwd=repo)
+    statuses = run(["gh", "api", f"repos/{repo_name}/commits/{head}/status", "--paginate", "--slurp"], cwd=repo)
+    if runs.returncode != 0 or statuses.returncode != 0:
+        raise SystemExit(json.dumps({"ok": False, "error": "immutable_head_checks_unavailable", "stderr": tail((runs.stderr or "") + (statuses.stderr or ""))}))
+    rows: list[str] = []
+    for item in parse_paginated_check_runs(runs.stdout):
+        if item.get("head_sha") != head:
+            raise SystemExit(json.dumps({"ok": False, "error": "check_run_head_mismatch"}))
+        if not isinstance(item.get("name"), str) or not isinstance(item.get("status"), str):
+            raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
+        conclusion = item.get("conclusion")
+        if conclusion is not None and not isinstance(conclusion, str):
+            raise SystemExit(json.dumps({"ok": False, "error": "check_runs_schema_invalid"}))
+        state = conclusion or item["status"]
+        error = "check_runs_field_delimiter_injection"
+        name = delimiter_safe(item["name"], error)
+        state = delimiter_safe(state, error)
+        url = delimiter_safe(item.get("html_url") or "", error)
+        rows.append(f"{name}\t{state}\t0s\t{url}")
+    for item in parse_paginated_statuses(statuses.stdout, head):
+        error = "status_contexts_field_delimiter_injection"
+        context = delimiter_safe(item["context"], error)
+        state = delimiter_safe(item["state"], error)
+        url = delimiter_safe(item.get("target_url") or "", error)
+        rows.append(f"{context}\t{state}\t0s\t{url}")
+    return "\n".join(rows) + ("\n" if rows else "")
 
 
 def load_review_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
-    if args.review_comments_file:
-        data = read_json_file(args.review_comments_file, [])
-        return data if isinstance(data, list) else []
-    if args.fixture_mode:
+    if FIXTURE_MODE:
         return []
-    repo_name = owner_repo(repo)
+    repo_name = repository_for_args(args, repo)
     cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
     if cp.returncode != 0:
         # Fail closed: if review comments are unavailable, surface a blocked state.
-        raise SystemExit(json.dumps({"ok": False, "error": "review_comments_unavailable", "stderr": cp.stderr.strip()}))
-    return parse_paginated_json(cp.stdout)
+        raise SystemExit(json.dumps({"ok": False, "error": "review_comments_unavailable", "stderr": tail(cp.stderr)}))
+    return validate_feedback_items("review_comments", parse_paginated_json(cp.stdout))
 
 
 def load_issue_comments(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
-    if args.issue_comments_file:
-        data = read_json_file(args.issue_comments_file, [])
-        return data if isinstance(data, list) else []
-    if args.fixture_mode:
+    if FIXTURE_MODE:
         return []
-    repo_name = owner_repo(repo)
+    repo_name = repository_for_args(args, repo)
     cp = run(["gh", "api", f"repos/{repo_name}/issues/{args.pr}/comments", "--paginate", "--slurp"], cwd=repo)
     if cp.returncode != 0:
-        raise SystemExit(json.dumps({"ok": False, "error": "issue_comments_unavailable", "stderr": cp.stderr.strip()}))
-    return parse_paginated_json(cp.stdout)
+        raise SystemExit(json.dumps({"ok": False, "error": "issue_comments_unavailable", "stderr": tail(cp.stderr)}))
+    return validate_feedback_items("issue_comments", parse_paginated_json(cp.stdout))
 
 
 def load_reviews(args: argparse.Namespace, repo: Path) -> list[dict[str, Any]]:
-    if args.reviews_file:
-        data = read_json_file(args.reviews_file, [])
-        return data if isinstance(data, list) else []
-    if args.fixture_mode:
+    if FIXTURE_MODE:
         return []
-    repo_name = owner_repo(repo)
+    repo_name = repository_for_args(args, repo)
     cp = run(["gh", "api", f"repos/{repo_name}/pulls/{args.pr}/reviews", "--paginate", "--slurp"], cwd=repo)
     if cp.returncode != 0:
-        raise SystemExit(json.dumps({"ok": False, "error": "reviews_unavailable", "stderr": cp.stderr.strip()}))
-    return parse_paginated_json(cp.stdout)
+        raise SystemExit(json.dumps({"ok": False, "error": "reviews_unavailable", "stderr": tail(cp.stderr)}))
+    return validate_feedback_items("reviews", parse_paginated_json(cp.stdout))
 
 
 def load_review_thread_comment_states(args: argparse.Namespace, repo: Path) -> tuple[set[int], set[int]]:
-    if args.resolved_review_comment_ids_file:
-        data = read_json_file(args.resolved_review_comment_ids_file, [])
-        resolved = {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
-        return resolved, set()
-    if args.fixture_mode:
+    if FIXTURE_MODE:
         return set(), set()
-    repo_name = owner_repo(repo)
+    repo_name = repository_for_args(args, repo)
     owner, name = repo_name.split("/", 1)
     query = """
 query($owner:String!, $name:String!, $number:Int!, $after:String) {
@@ -276,68 +1637,95 @@ query($owner:String!, $name:String!, $number:Int!, $after:String) {
     resolved: set[int] = set()
     active: set[int] = set()
     after = ""
+    seen_cursors: set[str] = set()
     while True:
         cmd = ["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={int(args.pr)}", "-f", f"query={query}"]
         if after:
             cmd.extend(["-f", f"after={after}"])
         cp = run(cmd, cwd=repo)
         if cp.returncode != 0:
-            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_unavailable", "stderr": cp.stderr.strip()}))
-        data = json.loads(cp.stdout or "{}")
-        threads = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
-        for node in threads.get("nodes") or []:
-            if not isinstance(node, dict):
-                continue
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_unavailable", "stderr": tail(cp.stderr)}))
+        try:
+            payload = json.loads(cp.stdout)
+        except json.JSONDecodeError:
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
+        data = payload.get("data") if isinstance(payload, dict) and "errors" not in payload else None
+        repository = data.get("repository") if isinstance(data, dict) else None
+        pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+        threads = pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+        nodes = threads.get("nodes") if isinstance(threads, dict) else None
+        page_info = threads.get("pageInfo") if isinstance(threads, dict) else None
+        if (
+            not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+            or not isinstance(page_info.get("hasNextPage"), bool)
+            or "endCursor" not in page_info
+        ):
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
+        for node in nodes:
+            if not isinstance(node, dict) or not isinstance(node.get("isResolved"), bool) or not isinstance(node.get("isOutdated"), bool):
+                raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
             if node.get("isResolved") is True:
                 target = resolved
             elif node.get("isOutdated") is True:
                 target = resolved
             else:
                 target = active
-            comments_page = node.get("comments") if isinstance(node.get("comments"), dict) else {}
-            if (comments_page.get("pageInfo") or {}).get("hasNextPage"):
+            comments_page = node.get("comments")
+            comments_info = comments_page.get("pageInfo") if isinstance(comments_page, dict) else None
+            comments = comments_page.get("nodes") if isinstance(comments_page, dict) else None
+            if not isinstance(comments_info, dict) or not isinstance(comments_info.get("hasNextPage"), bool) or not isinstance(comments, list):
+                raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
+            if comments_info["hasNextPage"]:
                 raise SystemExit(json.dumps({"ok": False, "error": "review_thread_comments_truncated"}))
-            for comment in (comments_page.get("nodes") or []):
+            for comment in comments:
                 cid = comment.get("databaseId") if isinstance(comment, dict) else None
-                if isinstance(cid, int):
-                    target.add(cid)
-        page_info = threads.get("pageInfo") or {}
-        if not page_info.get("hasNextPage"):
+                if not isinstance(cid, int) or isinstance(cid, bool) or cid < 1:
+                    raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
+                target.add(cid)
+        if not page_info["hasNextPage"]:
             break
-        after = str(page_info.get("endCursor") or "")
-        if not after:
-            break
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise SystemExit(json.dumps({"ok": False, "error": "review_threads_schema_invalid"}))
+        seen_cursors.add(cursor)
+        after = cursor
     return resolved, active
 
 
 def resolve_relevant_script(args: argparse.Namespace) -> Path | None:
-    candidates: list[Path] = []
-    if args.relevant_check_script:
-        if not args.fixture_mode:
-            raise SystemExit(json.dumps({"ok": False, "error": "explicit_relevant_check_script_requires_fixture_mode"}))
+    # main() refuses --relevant-check-script outright before anything spawns, so this branch is
+    # reachable only through the contract harness that overrides that refusal.
+    if getattr(args, "relevant_check_script", None):
         path = Path(args.relevant_check_script).expanduser()
         if path.is_file():
             return path.resolve()
         return path
-    if args.fixture_mode:
+    if FIXTURE_MODE:
         return None
-    if args.plugin_root:
-        candidates.append(Path(args.plugin_root).expanduser() / "scripts" / "relevant-check-status.sh")
-    for env_name in ("BUSDRIVER_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
-        if os.environ.get(env_name):
-            candidates.append(Path(os.environ[env_name]).expanduser() / "scripts" / "relevant-check-status.sh")
-    candidates.append(Path.home() / ".claude/plugins/marketplaces/busdriver/scripts/relevant-check-status.sh")
-    for path in candidates:
-        if path.is_file():
-            return path.resolve()
-    return None
+    plugin = trusted_busdriver_plugin_root(args, ("scripts/relevant-check-status.sh",))
+    return plugin / "scripts" / "relevant-check-status.sh" if plugin is not None else None
 
 
 def compile_advisory_pattern(advisory_pattern: str) -> re.Pattern[str]:
     return re.compile(re.escape(advisory_pattern or "CodeScene"), re.I)
 
 
-def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+def fallback_check_counts(checks_text: str, advisory_pattern: str, relevance_expected: bool = True) -> dict[str, Any]:
+    """Count every non-advisory check row, having consulted no relevance authority.
+
+    `relevance_unavailable` states whether a relevance authority was EXPECTED and could not be
+    consulted, which is the question classify() blocks on:
+
+    * live mode -> the pinned plugin owns relevant-check-status.sh, so reaching this fallback
+      means plugin drift: relevance was expected and is unavailable. True, and classify() blocks.
+    * fixture mode -> the caller supplies the check rows itself and no relevance authority was
+      ever expected. False.
+
+    Omitting the key entirely (r23) made those two cases indistinguishable from each other AND
+    from a successful relevance read: classify() reads a missing key as falsy and raises no
+    blocker, so plugin drift silently certified a verdict as relevance-checked.
+    """
     advisory = compile_advisory_pattern(advisory_pattern)
     kept: list[str] = []
     failed_rows: list[str] = []
@@ -354,14 +1742,18 @@ def fallback_check_counts(checks_text: str, advisory_pattern: str) -> dict[str, 
             failed_rows.append(line)
         elif status in PENDING_STATUSES:
             pending_rows.append(line)
-    return {"failed": len(failed_rows), "pending": len(pending_rows), "mode": "all", "kept": len(kept), "failed_rows": failed_rows, "pending_rows": pending_rows, "source": "fallback"}
+    # relevance_unavailable is TRUE here by construction: this fallback counts every check,
+    # having never consulted relevant-check-status.sh about which are required. classify() reads
+    # a missing key as falsy and raises no blocker, so omitting it fails OPEN for any direct
+    # consumer — the loop's own shape check happens to reject it, but nothing else does.
+    return {"failed": len(failed_rows), "pending": len(pending_rows), "mode": "all", "kept": len(kept), "failed_rows": failed_rows, "pending_rows": pending_rows, "source": "fallback", "relevance_unavailable": relevance_expected}
 
 
 def head_changed_check_counts() -> dict[str, Any]:
     return {"failed": 0, "pending": 0, "mode": "unknown", "kept": 0, "failed_rows": [], "pending_rows": [], "source": "head_changed", "relevance_unavailable": False}
 
 
-def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str) -> dict[str, Any]:
+def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, advisory_pattern: str, relevance_expected: bool = True) -> dict[str, Any]:
     if script:
         if not script.is_file():
             return {
@@ -375,7 +1767,40 @@ def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, adv
                 "relevance_unavailable": True,
                 "error": "script_not_found",
             }
-        cp = subprocess.run(["bash", str(script), str(repo), advisory_pattern], input=checks_text, text=True, capture_output=True, cwd=str(repo))
+        executable_script = script
+        script_program: str | None = None
+        temp_copy: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            canonical_root = (Path.home() / ".claude" / "plugins" / "marketplaces" / "busdriver").resolve()
+            try:
+                relative = script.resolve().relative_to(canonical_root).as_posix()
+            except (OSError, ValueError, AttributeError):
+                relative = ""
+            if relative:
+                data = authenticated_plugin_bytes(canonical_root, relative)
+                if data is None:
+                    return {
+                        "failed": 0, "pending": 0, "mode": "unknown", "kept": 0,
+                        "failed_rows": [], "pending_rows": [], "source": str(script),
+                        "relevance_unavailable": True, "error": "script_integrity_failed",
+                    }
+                try:
+                    script_program = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    return {
+                        "failed": 0, "pending": 0, "mode": "unknown", "kept": 0,
+                        "failed_rows": [], "pending_rows": [], "source": str(script),
+                        "relevance_unavailable": True, "error": "script_integrity_failed",
+                    }
+            if script_program is not None:
+                cp = run_bounded([str(trusted_executable_path("bash")), "--noprofile", "--norc", "-c", script_program, script.name, str(repo), advisory_pattern], stdin_bytes=checks_text.encode(), cwd=repo, timeout=GH_CHILD_TIMEOUT, env=safe_local_script_env())
+            else:
+                cp = run_bounded([str(trusted_executable_path("bash")), "--noprofile", "--norc", str(executable_script), str(repo), advisory_pattern], stdin_bytes=checks_text.encode(), cwd=repo, timeout=GH_CHILD_TIMEOUT, env=safe_local_script_env())
+            if cp.overflowed or cp.timed_out:
+                raise SystemExit(json.dumps({"ok": False, "error": "relevant_check_output_unusable"}))
+        finally:
+            if temp_copy is not None:
+                temp_copy.cleanup()
         if cp.returncode == 0 and cp.stdout.strip():
             lines = cp.stdout.splitlines()
             first = lines[0].split()
@@ -410,9 +1835,9 @@ def parse_relevant_counts(script: Path | None, repo: Path, checks_text: str, adv
             "pending_rows": [],
             "source": str(script),
             "relevance_unavailable": True,
-            "error": cp.stderr.strip() or cp.stdout.strip() or f"exit {cp.returncode}",
+            "error": tail(cp.stderr).strip() or tail(cp.stdout).strip() or f"exit {cp.returncode}",
         }
-    return fallback_check_counts(checks_text, advisory_pattern)
+    return fallback_check_counts(checks_text, advisory_pattern, relevance_expected)
 
 
 def _pending_rows(checks_text: str, mode: str) -> list[str]:
@@ -468,7 +1893,7 @@ def actionable_comments(comments: list[dict[str, Any]], head: str, head_time: dt
             "path": c.get("path"),
             "line": c.get("line") or c.get("original_line"),
             "commit_id": c.get("commit_id"),
-            "body_preview": body[:500],
+            "body_preview": body_preview(body),
             "source": "review_comment",
         })
     return out
@@ -576,7 +2001,7 @@ def actionable_reviews(reviews: list[dict[str, Any]], head: str) -> list[dict[st
                 "path": None,
                 "line": None,
                 "commit_id": r.get("commit_id"),
-                "body_preview": body[:500],
+                "body_preview": body_preview(body),
                 "source": "review",
             })
             break
@@ -649,9 +2074,9 @@ def select_head_time(commit_time: dt.datetime | None, check_time: dt.datetime | 
 
 
 def load_head_time(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> dt.datetime | None:
-    if args.fixture_mode or args.view_json_file or not head:
+    if FIXTURE_MODE or not head:
         return latest_head_time(view)
-    repo_name = owner_repo(repo)
+    repo_name = repository_for_args(args, repo)
     push_cp = run(["gh", "api", "--paginate", "--slurp", f"repos/{repo_name}/events?per_page=100"], cwd=repo)
     push_time = None
     if push_cp.returncode == 0:
@@ -684,7 +2109,7 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
                 "path": None,
                 "line": None,
                 "commit_id": None,
-                "body_preview": body[:500],
+                "body_preview": body_preview(body),
                 "source": "bot_progress",
             })
             continue
@@ -694,16 +2119,25 @@ def actionable_issue_comments(comments: list[dict[str, Any]], head_time: dt.date
             "path": None,
             "line": None,
             "commit_id": None,
-            "body_preview": body[:500],
+            "body_preview": body_preview(body),
             "source": "issue_comment_after_head" if head_time else "issue_comment_unbound",
         })
     return out
 
 
+def parent_review_ids_for(reviews: list[dict[str, Any]], head: str) -> "set[int] | None":
+    """Live reviews always carry their own parentage.
+
+    The harness rebinds this: a fixture run with no injected reviews has no parentage to read, and
+    must not infer one from an empty list. Production has no injected reviews to distinguish.
+    """
+    return current_review_ids(reviews, head)
+
+
 def collect_actionable_feedback(args: argparse.Namespace, repo: Path, view: dict[str, Any], head: str) -> list[dict[str, Any]]:
     resolved_review_comment_ids, active_review_comment_ids = load_review_thread_comment_states(args, repo)
     reviews = load_reviews(args, repo)
-    parent_review_ids = None if args.fixture_mode and not args.reviews_file else current_review_ids(reviews, head)
+    parent_review_ids = parent_review_ids_for(reviews, head)
     review_comments = load_review_comments(args, repo)
     head_time = load_head_time(args, repo, view, head)
     acked_bot_logins = load_acked_bot_logins(args, repo, head)
@@ -716,18 +2150,76 @@ def collect_actionable_feedback(args: argparse.Namespace, repo: Path, view: dict
 
 def head_changed_result(args: argparse.Namespace, view: dict[str, Any], fresh_head: str, old_head: str, checks: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "schema": SCHEMA,
+        "version": 1,
         "ok": True,
+        "read_only": True,
+        "repository": getattr(args, "_repository", None),
         "pr": int(view.get("number") or args.pr),
         "url": view.get("url"),
         "head": fresh_head,
+        "head_repository": repository_name(view.get("headRepository")),
+        "head_ref": view.get("headRefName"),
+        "base_repository": getattr(args, "expected_base_repository", None),
         "base": view.get("baseRefName"),
+        "base_sha": view.get("baseRefOid"),
         "status": "blocked",
         "clean": False,
         "blockers": [f"head_changed_during_collection:{old_head[:12]}->{fresh_head[:12]}"],
+        "evidence": evidence_provenance(args),
         "checks": checks,
         "actionable_comments": [],
-        "decision": {"merge_allowed": False, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
+        "decision": {"status": "blocked", "pr_grind_clean": False, **AUTHORITY_FALSE, "needs_fix": False, "wait": False, "blocked": True, "reason": "head_changed"},
+    }
+
+
+# v16-r33 A: production reads GitHub, and nothing else.
+#
+# r24 gated only --relevant-check-script and demoted live_mode only for --view-json-file, so
+# `--checks-file forged.tsv` on an otherwise real invocation emitted an authoritative clean. r32
+# closed that by making every injected flag imply --fixture-mode. That is still the wrong boundary:
+# a caller-supplied evidence FILE proves shape, never provenance, and every byte of it is authored
+# by whoever passes the flag. Labelling the result `fixture` afterwards does not change what
+# production is — an entrypoint shipping a parser for caller-authored evidence. So the flags, their
+# readers and their labels all live in tests/fixtures/pr-grind-check-test-harness, which is never
+# installed. Production obtains evidence only from its authenticated live reads.
+#
+# These two are the seam the harness writes through, and the reason the envelope can still state
+# its own provenance: production leaves them at their live values and reports `authoritative`.
+FIXTURE_MODE = False
+INJECTED_EVIDENCE_FLAGS: "list[str]" = []
+
+# The one caller-named flag production still PARSES, because parsing it is how it refuses it by
+# name instead of by argparse accident. It names a program rather than a file, so no envelope label
+# can undo it: main() rejects it before anything spawns. See custom_helper_refusal().
+CUSTOM_HELPER_FLAGS = ("relevant_check_script",)
+
+
+def custom_helper_refusal(custom: "list[str]") -> "dict[str, Any] | None":
+    """Refuse the caller-named helper executable, before anything spawns.
+
+    Same refusal, same reason, as delivery-status.custom_helper_refusal(): r24 gated this on
+    --fixture-mode, but the caller that names the program is the caller that passes the flag, so the
+    gate only labelled the output of code that had already run same-UID with the operator's real
+    HOME. Every other injected-evidence flag names a FILE and is gone from this parser entirely; this
+    one is kept and refused by name so the failure is a structured envelope rather than an argparse
+    usage dump. The double the contract tests need lives in tests/fixtures/pr-grind-check-test-harness.
+    """
+    if custom:
+        return {"ok": False, "error": "custom_helper_execution_not_permitted", "flags": custom}
+    return None
+
+
+def evidence_provenance(args: argparse.Namespace) -> dict[str, Any]:
+    """States, in the envelope itself, whether this record is live evidence or a test double.
+
+    A consumer must be able to tell a fixture-built clean from a live clean by reading the record
+    alone. r24 emitted no such field, so a forged clean was byte-indistinguishable from a real one.
+    """
+    return {
+        "fixture_mode": bool(FIXTURE_MODE),
+        "injected_flags": list(INJECTED_EVIDENCE_FLAGS),
+        "authoritative": not FIXTURE_MODE and not INJECTED_EVIDENCE_FLAGS,
     }
 
 
@@ -774,27 +2266,57 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", default=".")
     ap.add_argument("--pr", required=True)
+    ap.add_argument("--expected-repository", help="Trusted GitHub owner/repo identity; required in live mode")
+    ap.add_argument("--expected-head-repository")
+    ap.add_argument("--expected-head-ref")
+    ap.add_argument("--expected-base-repository")
+    ap.add_argument("--expected-base-ref")
+    ap.add_argument("--expected-head-sha")
+    ap.add_argument("--expected-base-sha")
     ap.add_argument("--plugin-root")
-    ap.add_argument("--checks-file")
-    ap.add_argument("--review-comments-file")
-    ap.add_argument("--issue-comments-file")
-    ap.add_argument("--reviews-file")
-    ap.add_argument("--resolved-review-comment-ids-file")
-    ap.add_argument("--view-json-file")
     ap.add_argument("--relevant-check-script")
     ap.add_argument("--advisory-pattern", default="CodeScene")
-    ap.add_argument("--fixture-mode", action="store_true", help="Allow omitted feedback surfaces for offline contract fixtures only")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
     args.pr = validate_pr_number(args.pr)
 
     repo = Path(args.repo).expanduser().resolve()
+    # Structural, before anything spawns, and ahead of the evidence gate below: an injected FILE is
+    # a provenance problem the envelope labels, but an injected PROGRAM is an execution problem no
+    # label can undo. See custom_helper_refusal() — production runs neither, at any flag setting.
+    refusal = custom_helper_refusal(sorted(flag for flag in CUSTOM_HELPER_FLAGS if getattr(args, flag, None)))
+    if refusal is not None:
+        raise SystemExit(json.dumps(refusal, sort_keys=True))
+    # No injected-evidence gate survives here, because there is no longer anything to gate: the
+    # evidence flags are not in this parser at all, so argparse refuses them before main() runs and
+    # only the non-installed harness can set FIXTURE_MODE.
+    live_mode = not FIXTURE_MODE
+    auth_guard: tempfile.TemporaryDirectory[str] | None = None
+    if live_mode and not any(os.environ.get(key) for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")):
+        auth_guard = materialize_github_auth_config()
+    if live_mode:
+        for field in ("expected_repository", "expected_head_repository", "expected_base_repository"):
+            if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", str(getattr(args, field) or "")):
+                raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+        for field in ("expected_head_ref", "expected_base_ref"):
+            if not isinstance(getattr(args, field), str) or not getattr(args, field) or getattr(args, field) == "UNKNOWN":
+                raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+        for field in ("expected_head_sha", "expected_base_sha"):
+            if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(getattr(args, field) or "")):
+                raise SystemExit(json.dumps({"ok": False, "error": f"{field}_required"}))
+        args._repository = args.expected_repository
+        if owner_repo(repo) != args._repository:
+            raise SystemExit(json.dumps({"ok": False, "error": "expected_repository_mismatch"}))
+    else:
+        args._repository = None
     view = load_view(args, repo)
+    if live_mode:
+        validate_live_view(args, view)
     head = str(view.get("headRefOid") or "")
     script = resolve_relevant_script(args)
-    live_mode = not args.fixture_mode and not args.view_json_file
     if live_mode:
         fresh_view = load_view(args, repo)
+        validate_live_view(args, fresh_view)
         fresh_head = str(fresh_view.get("headRefOid") or "")
         if fresh_head and fresh_head != head:
             checks = head_changed_check_counts()
@@ -803,12 +2325,13 @@ def main() -> int:
         if fresh_head and fresh_head == head:
             view = fresh_view
 
-    checks_text = load_checks(args, repo)
-    checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+    checks_text = load_checks(args, repo, head)
+    checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern, relevance_expected=not FIXTURE_MODE)
     comments = collect_actionable_feedback(args, repo, view, head)
 
     if live_mode:
         final_view = load_view(args, repo)
+        validate_live_view(args, final_view)
         final_head = str(final_view.get("headRefOid") or "")
         if final_head and final_head != head:
             checks = head_changed_check_counts()
@@ -816,10 +2339,11 @@ def main() -> int:
             return 0
         if final_head and final_head == head:
             view = final_view
-            checks_text = load_checks(args, repo)
-            checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern)
+            checks_text = load_checks(args, repo, head)
+            checks = parse_relevant_counts(script, repo, checks_text, args.advisory_pattern, relevance_expected=not FIXTURE_MODE)
             comments = collect_actionable_feedback(args, repo, view, head)
             post_feedback_view = load_view(args, repo)
+            validate_live_view(args, post_feedback_view)
             post_feedback_head = str(post_feedback_view.get("headRefOid") or "")
             if post_feedback_head and post_feedback_head != head:
                 checks = head_changed_check_counts()
@@ -829,19 +2353,29 @@ def main() -> int:
                 view = post_feedback_view
     status, blockers = classify(view, checks, comments)
     result = {
-        "schema": "hermes-busdriver-pr-grind-check/v0",
+        "schema": SCHEMA,
+        "version": 1,
         "ok": True,
+        "read_only": True,
+        "repository": getattr(args, "_repository", None),
         "pr": int(view.get("number") or args.pr),
         "url": view.get("url"),
         "head": head,
+        "head_repository": repository_name(view.get("headRepository")) if live_mode else view.get("headRepositoryName"),
+        "head_ref": view.get("headRefName"),
+        "base_repository": args.expected_base_repository if live_mode else view.get("baseRepositoryName"),
         "base": view.get("baseRefName"),
+        "base_sha": view.get("baseRefOid"),
         "status": status,
         "clean": status == "clean",
         "blockers": blockers,
+        "evidence": evidence_provenance(args),
         "checks": checks,
         "actionable_comments": comments,
         "decision": {
-            "merge_allowed": status == "clean",
+            "status": status,
+            "pr_grind_clean": status == "clean",
+            **AUTHORITY_FALSE,
             "needs_fix": status == "needs_fix",
             "wait": status == "wait",
             "blocked": status == "blocked",

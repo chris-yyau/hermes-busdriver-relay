@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Contract-test-only dependency injection for pr-grind-check.
+
+This file is not installed or referenced by production entrypoints.
+"""
+from pathlib import Path
+import argparse
+import json
+import runpy
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+
+# v16-r33 A: the caller-supplied EVIDENCE files are parsed and read HERE, not by production.
+#
+# r32 moved the caller-named EXECUTABLE flag out of production, on the reasoning that the caller who
+# names the program is the caller who passes the flag — so no flag can gate the affordance. A file is
+# that same affordance with one step removed: `--checks-file` reads whatever bytes a caller points it
+# at, and validation binds only CONTENT, every byte of which is authored by whoever wrote the file.
+# Production keeping the flag "but labelling the result a fixture" still means production ships a
+# parser AND a reader for caller-authored evidence. So both live here, where nothing installed can
+# reach them, and production obtains evidence only from its own authenticated live reads.
+#
+# Bounded and strict even so, because a harness input is still input: a fixture that will not read
+# must look like a broken test rather than like an absent result.
+MAX_FIXTURE_BYTES = 1024 * 1024
+
+# allow_abbrev=False is load-bearing, not tidiness. argparse abbreviates by default, so with these
+# flags declared, `--repo x` is an unambiguous prefix of nothing here but `--reviews-file` and
+# `--review-comments-file` are prefixes of each other's neighbours; a pre-parser that strips flags
+# out of someone else's argv must match exactly what it owns and forward the rest untouched.
+fixture_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+fixture_parser.add_argument("--checks-file")
+fixture_parser.add_argument("--review-comments-file")
+fixture_parser.add_argument("--issue-comments-file")
+fixture_parser.add_argument("--reviews-file")
+fixture_parser.add_argument("--resolved-review-comment-ids-file")
+fixture_parser.add_argument("--view-json-file")
+fixture_parser.add_argument("--fixture-mode", action="store_true")
+fixture_args, remaining = fixture_parser.parse_known_args(sys.argv[1:])
+# Production never sees them: its parser is about to read this argv and has no such flags.
+# --relevant-check-script is deliberately NOT stripped: production still parses it in order to
+# refuse it BY NAME, and the refusal is what this harness overrides below.
+sys.argv[1:] = remaining
+
+ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-pr-grind-check"))
+globals_ = ns["main"].__globals__
+
+INJECTED = {
+    "--checks-file": fixture_args.checks_file,
+    "--review-comments-file": fixture_args.review_comments_file,
+    "--issue-comments-file": fixture_args.issue_comments_file,
+    "--reviews-file": fixture_args.reviews_file,
+    "--resolved-review-comment-ids-file": fixture_args.resolved_review_comment_ids_file,
+    "--view-json-file": fixture_args.view_json_file,
+}
+injected_flags = sorted(flag for flag, value in INJECTED.items() if value)
+# The executable double is named on production's own CLI, so it belongs in the envelope's
+# injected_flags too — production refuses it, and only this file un-refuses it.
+if "--relevant-check-script" in remaining:
+    injected_flags = sorted([*injected_flags, "--relevant-check-script"])
+
+# The two halves of the affordance production refuses outright: the caller-named helper double, and
+# the envelope label that keeps whatever this run prints authority-negative.
+globals_["custom_helper_refusal"] = lambda custom: None
+globals_["FIXTURE_MODE"] = bool(fixture_args.fixture_mode or injected_flags)
+globals_["INJECTED_EVIDENCE_FLAGS"] = injected_flags
+
+
+def read_fixture(path, default):
+    """One fixture evidence file: bounded read, strict parse, never authoritative."""
+    with open(path, "rb") as handle:
+        raw = handle.read(MAX_FIXTURE_BYTES + 1)
+    if len(raw) > MAX_FIXTURE_BYTES:
+        raise SystemExit(json.dumps({"ok": False, "error": "fixture_evidence_file_too_large"}))
+    return json.loads(raw.decode("utf8")) if raw.strip() else default
+
+
+_parent_review_ids_for = globals_["parent_review_ids_for"]
+
+
+def parent_review_ids_for(reviews, head):
+    """A fixture run with no injected reviews has no parentage to read.
+
+    load_reviews() returns [] there, which is an ABSENCE of evidence rather than evidence of
+    absence — inferring an empty parent set from it silently demotes every fixture comment that
+    carries a review id to non-actionable. Production never reaches this branch: it has no injected
+    reviews to distinguish, so its live list is always its real parentage.
+    """
+    if globals_["FIXTURE_MODE"] and not fixture_args.reviews_file:
+        return None
+    return _parent_review_ids_for(reviews, head)
+
+
+globals_["parent_review_ids_for"] = parent_review_ids_for
+
+_load_view = globals_["load_view"]
+_load_checks = globals_["load_checks"]
+_load_review_comments = globals_["load_review_comments"]
+_load_issue_comments = globals_["load_issue_comments"]
+_load_reviews = globals_["load_reviews"]
+_load_review_thread_comment_states = globals_["load_review_thread_comment_states"]
+_resolve_relevant_script = globals_["resolve_relevant_script"]
+
+
+def load_view(args, repo):
+    if not fixture_args.view_json_file:
+        return _load_view(args, repo)
+    data = read_fixture(fixture_args.view_json_file, {})
+    if not isinstance(data, dict):
+        raise SystemExit(json.dumps({"ok": False, "error": "view_json_not_object"}))
+    return data
+
+
+def load_checks(args, repo, head):
+    if not fixture_args.checks_file:
+        return _load_checks(args, repo, head)
+    with open(fixture_args.checks_file, "rb") as handle:
+        raw = handle.read(MAX_FIXTURE_BYTES + 1)
+    if len(raw) > MAX_FIXTURE_BYTES:
+        raise SystemExit(json.dumps({"ok": False, "error": "fixture_evidence_file_too_large"}))
+    return raw.decode("utf8")
+
+
+def load_review_comments(args, repo):
+    if not fixture_args.review_comments_file:
+        return _load_review_comments(args, repo)
+    data = read_fixture(fixture_args.review_comments_file, [])
+    return data if isinstance(data, list) else []
+
+
+def load_issue_comments(args, repo):
+    if not fixture_args.issue_comments_file:
+        return _load_issue_comments(args, repo)
+    data = read_fixture(fixture_args.issue_comments_file, [])
+    return data if isinstance(data, list) else []
+
+
+def load_reviews(args, repo):
+    if not fixture_args.reviews_file:
+        return _load_reviews(args, repo)
+    data = read_fixture(fixture_args.reviews_file, [])
+    return data if isinstance(data, list) else []
+
+
+def load_review_thread_comment_states(args, repo):
+    if not fixture_args.resolved_review_comment_ids_file:
+        return _load_review_thread_comment_states(args, repo)
+    data = read_fixture(fixture_args.resolved_review_comment_ids_file, [])
+    resolved = {int(x) for x in data if isinstance(x, int) or str(x).isdigit()} if isinstance(data, list) else set()
+    return resolved, set()
+
+
+globals_["load_view"] = load_view
+globals_["load_checks"] = load_checks
+globals_["load_review_comments"] = load_review_comments
+globals_["load_issue_comments"] = load_issue_comments
+globals_["load_reviews"] = load_reviews
+globals_["load_review_thread_comment_states"] = load_review_thread_comment_states
+raise SystemExit(ns["main"]())
