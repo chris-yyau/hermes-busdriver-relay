@@ -1,27 +1,372 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Fail-closed Hermes delivery dispatcher."""
 from __future__ import annotations
 
 import argparse
-import ast
+import errno
 import hashlib
 import hmac
 import io
 import json
 import os
 import re
+import select
 import secrets
 import shlex
-import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import tarfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+# The bound for children whose whole output is legitimately consumed — a `gh api` JSON body, a diff
+# that gets hashed, an archive. `MAX_CAPTURED_BYTES` is for the 4000-char tails and would refuse a
+# real PR. Both are enforced AT THE PIPE; the difference is only which number is right for the site.
+# 2MB preserves the ceiling the post-hoc `len(stdout) > 2_000_000` check already imposed, moved to
+# the one place that can enforce it before the memory is spent.
+MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+# Test-only result injection is supplied solely by the non-installed deliver harness. Production
+# has no parser affordance for caller-authored PR-grind evidence.
+FIXTURE_PR_GRIND_RESULT_FILE: str | None = None
+
+def _bounded_run(cmd, *, text=False, check=False, timeout=None, env=None,
+                 cwd=None, input=None, shell=False, limit=MAX_CAPTURED_BYTES):
+    """`subprocess.run`'s shape, bounded at the pipe.
+
+    This file runs git and gh at two dozen call sites, each `capture_output=True` — so each one let
+    the child decide how many bytes this process allocated. The shape is kept identical rather than
+    rewritten at every site: the bug was the bound, not the call.
+
+    Identical INCLUDES `text` defaulting to false, which is the whole reason this is a drop-in.
+    Every site that omits it was written against `subprocess.run` and reads what it gets as bytes —
+    `sha256(cp.stdout)`, `cp.stdout.split(b"\\0")`, `BytesIO(archive.stdout)`. A default of true
+    here is not a stricter bound, it is a TypeError at each of them.
+
+    Overflow raises RuntimeError, which is already this file's "the runtime refused this" channel
+    (`trusted_executable_path` raises it) and which every call site's handler already turns into a
+    structured fail-closed result. SystemExit here would instead unwind past them mid-operation.
+    """
+    stdin_bytes = input.encode() if isinstance(input, str) else input
+    p = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout, stdin_bytes=stdin_bytes, text=text, limit=limit)
+    if p.timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout or 0, output=p.stdout, stderr=p.stderr)
+    if p.overflowed:
+        raise RuntimeError("child_output_too_large")
+    cp = subprocess.CompletedProcess(cmd, p.returncode, p.stdout, p.stderr)
+    if check and p.returncode != 0:
+        raise subprocess.CalledProcessError(p.returncode, cmd, p.stdout, p.stderr)
+    return cp
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,48 +380,35 @@ FINALIZATION_AUTHORITY_SCHEMA = "hermes-busdriver-finalization-authority/v0"
 PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
 TRUSTED_BUSDRIVER_PLUGIN_COMMIT = "835dc1784a7ae5c34a5f8f58d6731a482f64df0a"
 TRUSTED_BUSDRIVER_PLUGIN_VERSION = "1.90.0"
-TRUSTED_PR_GRIND_LOOP_SHA256 = "7d10b14dea118f2a1791672c80efc4265129dce06be94fcb318acb9ca9be73c7"
-TRUSTED_PR_GRIND_CHECK_SHA256 = "7da58d0c8b9abc486d64e30259ce5f45baa1de51324e593db81173c3f69b0470"
-TRUSTED_LOCK_SHA256 = "aaceb611bec1165b34045ee9b2f700982029692a7935af7e404598ea4100db5c"
+TRUSTED_PR_GRIND_LOOP_SHA256 = '33ca1e4b6ee540373e45e7fe3e9a0ae217ffc3be6f1cad44501034bfb7505ec8'
+TRUSTED_PR_GRIND_CHECK_SHA256 = '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e'
+TRUSTED_LOCK_SHA256 = '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52'
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {
-    "scripts/hermes-busdriver-status": "7772656f5df165cdb264c0b1318c3c6e729197f199d288304ac10230e061e4fb",
-    "scripts/hermes-busdriver-relay-role": "6c5355d57fd186f13741ad1038ca9a559a335bd21b63da865556afffa0dbe01d",
-    "scripts/hermes-busdriver-runtime-check": "981dd22f3b164d1ccd90076eb735f0be735dfe3f431ce6cf9db2c4d556e503a6",
-    "scripts/hermes-busdriver-gate": "8f36e0eb727d77d7bd0b88db2d396aca6550605b7c5ef396b5587c8f6b214520",
-    "scripts/hermes-busdriver-agent-draft": "699bc80cbd996de75e109b733ed09d00982ece6e4d0e4ad3207e365a61b63b77",
-    "scripts/hermes-busdriver-agent-balance-plan": "58a64901f350e9dafcb4f69ddf2ab66198bcd03a2bc3b216425d88bce8f191f9",
-    "scripts/hermes-busdriver-agent-smoke": "969b7149fbc83c688d2e9857b475bd474383bef067774617feca1764029780da",
-    "scripts/hermes-busdriver-pr-grind-check": "7da58d0c8b9abc486d64e30259ce5f45baa1de51324e593db81173c3f69b0470",
-    "scripts/hermes-busdriver-pr-grind-loop": "7d10b14dea118f2a1791672c80efc4265129dce06be94fcb318acb9ca9be73c7",
-    "scripts/hermes-busdriver-litmus-status": "dd5814b1a2eee4e6cfb9d71256f2a2524b1a8fda32702e922b3ae5e30dc12bee",
-    "scripts/hermes-busdriver-finalization-readiness": "a90b05c06e22a54a8e69b7ab7569b31a2f9dbe58370605f1fc8801ba515287c6",
-    "scripts/hermes-busdriver-finalization-contract-status": "795a2b53f96aafa8bca369ffa44e06a00392ff2a4f012fae3bce9d21e5a782dd",
-    "scripts/hermes-busdriver-delivery-status": "16613577d08ab3a04fdc583819bddcaec883c6b96d773db48e1656c656f1a0ab",
-    "scripts/hermes-busdriver-smoke": "9c943092ea834040e8814dd1b8901e02272aa25976dca39b45c18f8d25c2c588",
-    "scripts/hermes-busdriver-lock": "aaceb611bec1165b34045ee9b2f700982029692a7935af7e404598ea4100db5c",
-}
+TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '5d10873d3606b96e27ef5a33cb0c9f130f9e96f08e5dd71b753a3fd1fa64c719',
+                                           'scripts/hermes-busdriver-agent-draft': 'e0b505058251cd779eb7a05760214a64e6f97e5fea943e3a3bc5842e9df0003b',
+                                           'scripts/hermes-busdriver-agent-smoke': 'ac55f1a9996413524e298d5a38301e3939bb5fee161f2b860c6439658497b961',
+                                           'scripts/hermes-busdriver-delivery-status': '1d3ce65f0fe13b095bd296e6f1d92b639e2753ba84a3d36cdf3acd7d840a3811',
+                                           'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
+                                           'scripts/hermes-busdriver-finalization-readiness': '0e02bb4ac29093254560adec60ad4af7ce272761e16f73a1cab6372cb791ef33',
+                                           'scripts/hermes-busdriver-gate': '48ec2229d1889e2236f790751ebd7d6b0007b4195e0b8e8f12ff4608d2173c8e',
+                                           'scripts/hermes-busdriver-litmus-status': 'ba95be8b96e7fc215e5fa96288b093a90e0265f1fe6dd428715b8c462034c561',
+                                           'scripts/hermes-busdriver-lock': '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52',
+                                           'scripts/hermes-busdriver-pr-grind-check': '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e',
+                                           'scripts/hermes-busdriver-pr-grind-loop': '33ca1e4b6ee540373e45e7fe3e9a0ae217ffc3be6f1cad44501034bfb7505ec8',
+                                           'scripts/hermes-busdriver-relay-role': 'c272f01b1a88e470c8b574a5326ec41a4df871d14ade64cd24966311b98a21dc',
+                                           'scripts/hermes-busdriver-runtime-check': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
+                                           'scripts/hermes-busdriver-smoke': '403fbf5f66ba0c42e1308350c64aa432dfcbdf76fac6aed1b8d49cd4395165ac',
+                                           'scripts/hermes-busdriver-status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'}
 # Enumerated independently of TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS above, so that
 # `materialize_delivery_status_runtime`'s set comparison is an actual cross-check: adding a script
 # to one inventory and forgetting the other must fail closed rather than silently agree. Deriving
-# this from the digest map's own keys made that check unfailable.
-DELIVERY_STATUS_RUNTIME_INVENTORY = (
-    "scripts/hermes-busdriver-status",
-    "scripts/hermes-busdriver-relay-role",
-    "scripts/hermes-busdriver-runtime-check",
-    "scripts/hermes-busdriver-gate",
-    "scripts/hermes-busdriver-agent-draft",
-    "scripts/hermes-busdriver-agent-balance-plan",
-    "scripts/hermes-busdriver-agent-smoke",
-    "scripts/hermes-busdriver-pr-grind-check",
-    "scripts/hermes-busdriver-pr-grind-loop",
-    "scripts/hermes-busdriver-litmus-status",
-    "scripts/hermes-busdriver-finalization-readiness",
-    "scripts/hermes-busdriver-finalization-contract-status",
-    "scripts/hermes-busdriver-delivery-status",
-    "scripts/hermes-busdriver-smoke",
-    "scripts/hermes-busdriver-lock",
-)
+# this from the digest map's own keys would make that check unfailable.
+#
+# There were three enumerations here until v16-r28. The third, DELIVERY_STATUS_RUNTIME_INVENTORY,
+# carried this same rationale but was referenced by nothing — the cross-check it claimed to make
+# real compares the two maps that are actually used, and never read the tuple. A list that no code
+# reads cannot fail closed; it only offers a fourth thing to drift and a comment that reads as a
+# guarantee. Two independently hand-written enumerations plus the set comparison is the check.
 DELIVERY_STATUS_RUNTIME_SOURCES = {
     "scripts/hermes-busdriver-agent-balance-plan": ROOT / "scripts" / "hermes-busdriver-agent-balance-plan",
     "scripts/hermes-busdriver-agent-draft": ROOT / "scripts" / "hermes-busdriver-agent-draft",
@@ -94,14 +426,45 @@ DELIVERY_STATUS_RUNTIME_SOURCES = {
     "scripts/hermes-busdriver-status": ROOT / "scripts" / "hermes-busdriver-status",
     "scripts/hermes-busdriver-lock": ROOT / "scripts" / "hermes-busdriver-lock",
 }
-TRUSTED_EXECUTABLE_DIGESTS = {
-    "git": "f9d9ddc8cba6309af5606cdb7668b0fe703aba90b6a128c0b7d8fd601baf7fd4",
-    "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
-    "jq": "49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a",
+TRUSTED_EXECUTABLE_DIGESTS = {'git': '31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5', 'git-real': '7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701', 'sandbox-exec': '2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a', 'gh': '02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1', 'jq': '49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a', 'bash': '21f1b686feca123f2c575296d6f8b8277a2695f7a06e3b1c1b154a0f21f68141', 'python3': '31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5'}
+# Fixed root-owned system sources, executed in place. No `.resolve()` anywhere in this table:
+# resolving *follows* symlinks, and a symlinked name is exactly what this contract refuses. The walk
+# in _validated_root_owned_source() proves the literal path, component by component.
+#
+# gh is bound to /usr/local/bin/gh and nothing else. Homebrew's /opt/homebrew/bin is uid=501
+# drwxrwxr-x — user *and* group writable — so every binary under it is renameable by the same-UID
+# adversary this contract exists to stop. That it is where `gh` happens to be installed is not a
+# reason to trust it; a credential-bearing dispatch is the last place to make that trade.
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+    "git-real": Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+    "sandbox-exec": Path("/usr/bin/sandbox-exec"),
+    "gh": Path("/usr/local/bin/gh"),
+    "jq": Path("/usr/bin/jq"),
+    "bash": Path("/bin/bash"),
+    "python3": Path("/usr/bin/python3"),
 }
-TRUSTED_GIT = Path("/opt/homebrew/bin/git").resolve()
-TRUSTED_GH = Path("/opt/homebrew/bin/gh").resolve()
-TRUSTED_JQ = Path("/usr/bin/jq").resolve()
+GIT_OBSERVATION_INERT_CONFIG = (
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "log.showSignature=false",
+    "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
+    "diff.external=", "core.pager=cat", "core.sshCommand=false", "core.editor=false",
+    "core.askPass=", "credential.helper=",
+    "protocol.allow=never", "protocol.file.allow=never", "protocol.ext.allow=never",
+    "submodule.recurse=false", "fetch.recurseSubmodules=false", "status.showUntrackedFiles=all",
+    "core.fileMode=true",
+)
+GIT_OBSERVATION_SANDBOX_PROFILE = (
+    '(version 1) (allow default) (deny network*) (deny file-write*) '
+    '(allow file-write* (literal "/dev/null")) (deny process-exec) '
+    '(allow process-exec (literal "/Library/Developer/CommandLineTools/usr/bin/git"))'
+)
+GIT_OBSERVATION_ENV_ALLOWLIST = {
+    "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "USER", "LOGNAME", "TERM", "NO_COLOR",
+}
+TRUSTED_GIT = TRUSTED_EXECUTABLE_SOURCES["git"]
+TRUSTED_GH = TRUSTED_EXECUTABLE_SOURCES["gh"]
+TRUSTED_JQ = TRUSTED_EXECUTABLE_SOURCES["jq"]
 DELIVERY_STATUS_SCHEMA = "hermes-busdriver-delivery-status/v0"
 LITMUS_STATUS_SCHEMA = "hermes-busdriver-litmus-status/v0"
 DEFAULT_DELIVERY_STATUS_TIMEOUT = 180
@@ -120,8 +483,13 @@ VERIFIER_LABEL = re.compile(r"^[A-Za-z0-9_.-]+=")
 REDACTION = "[REDACTED]"
 ARTIFACT_TOKEN = re.compile(r"[^A-Za-z0-9_.-]+")
 SENSITIVE_PATTERNS = [
+    # URL userinfo runs FIRST and on purpose. Generic token matching can redact the whole
+    # non-whitespace tail, including the host and repository needed for diagnostics.
+    # Collapsing only userinfo removes credentials while preserving that safe suffix.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+(?::[^/\s@]*)?)@"), rf"\1{REDACTION}@"),
     (re.compile(r"(?i)\b(authorization\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{8,})"), rf"\1{REDACTION}"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"), REDACTION),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), REDACTION),
     (re.compile(r"(?i)((?:--(?:api[_-]?key|secret|token|password|passwd))\s+)([^\s'\"&]+)"), rf"\1{REDACTION}"),
     (re.compile(r'(?i)("(?:api[_-]?key|secret|token|password|passwd)"\s*:\s*")([^"]+)(")'), rf"\1{REDACTION}\3"),
@@ -141,7 +509,18 @@ BLOCKED_FLAGS = {
 DEFAULT_BUSDRIVER_MARKER_STATE_DIRS = (".claude", ".opencode")
 
 
+CREDENTIAL_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+
+
+def credential_env_values() -> list[str]:
+    """Our own credential values, longest first, so a nested value cannot survive its container."""
+    values = {os.environ.get(key) for key in CREDENTIAL_ENV_KEYS}
+    return sorted((value for value in values if isinstance(value, str) and len(value) >= 8), key=len, reverse=True)
+
+
 def redact_text(text: str) -> str:
+    for value in credential_env_values():
+        text = text.replace(value, REDACTION)
     for pattern, replacement in SENSITIVE_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
@@ -166,10 +545,15 @@ def redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
+            # A key is untrusted text too. These dicts are built from children's JSON and from env
+            # snapshots, so a credential can arrive AS a key — where redacting only the value leaves
+            # it in the clear in the very envelope this function exists to make safe to print. The
+            # four sibling redactors (gate, agent-draft, pi, opencode) already spell it this way.
+            safe_key = redact_text(str(key))
             if re.search(r"(?i)(api[_-]?key|secret|token|password|passwd)", str(key)):
-                result[key] = REDACTION
+                result[safe_key] = REDACTION
             else:
-                result[key] = redact_value(item)
+                result[safe_key] = redact_value(item)
         return result
     return value
 
@@ -196,7 +580,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--relay-config", help="Relay config JSON path to pass through delivery-status")
     parser.add_argument("--relay-role-timeout", type=int, default=DEFAULT_RELAY_ROLE_TIMEOUT)
     parser.add_argument("--pr", help="Pull request number for post-PR status")
-    parser.add_argument("--pr-grind-result-file", help="Read-only PR-grind fixture/status JSON to pass through delivery-status")
+
     parser.add_argument(
         "--delivery-status-timeout",
         type=int,
@@ -234,18 +618,59 @@ def parse_args() -> argparse.Namespace:
         help="Reserved verifier NAME=COMMAND syntax; production execute verify returns verifier_containment_unavailable before launching commands.",
     )
     parser.add_argument("--pretty", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.pr_grind_result_file = FIXTURE_PR_GRIND_RESULT_FILE
+    return args
 
 
-def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
+# The window handed to redact_text() is bounded BEFORE the regexes run. redact_text() walks every
+# SENSITIVE_PATTERN over its whole input — including a URL-userinfo class with no length bound — so
+# a hostile subprocess returning 500MB of stderr, or a remote URL of the same size, costs that much
+# CPU and memory inside a helper whose entire job is to emit a few KB. Bounding after redaction, as
+# r25 did, means the bound never applies to the expensive step it exists to protect.
+#
+# 8192, not a tight bound: every shape pattern above matches far less than this, so the span exists
+# to keep a long-but-real match (a `token: <value>` with a verbose value, a long URL) whole inside
+# the budget. It costs 8KB of regex work and buys the guarantee below.
+REDACTION_PATTERN_SPAN = 8192
+
+# Over budget, output is REFUSED — not sliced to its last `budget` bytes, which is what r26 did and
+# what leaked. The value classes for `token:`, `--token`, `"token":` and `Bearer` are unbounded, so
+# a long enough value has the very prefix that IDENTIFIES it as a secret cut away by that slice;
+# the remainder matches no shape pattern and the tail is emitted raw. No window size fixes it —
+# the prefix sits arbitrarily far from the tail. An unmatched fragment of a secret is still a
+# secret, and no diagnostic from an attacker-controlled 12KB+ of output is worth emitting one.
+REDACTED_OVERSIZED = "[REDACTED:OVERSIZED_OUTPUT]"
+
+
+def redaction_overlap() -> int:
+    """Enough headroom that anything redact_text() can match fits whole inside the scan budget.
+
+    Sized from our OWN credential values, not guessed: an opaque enterprise token matches no shape
+    pattern, so length is the only thing that can guarantee a configured credential lands inside
+    the budget whole rather than pushing a legitimate output over it.
+    """
+    longest_secret = max((len(value) for value in credential_env_values()), default=0)
+    return max(REDACTION_PATTERN_SPAN, longest_secret + 64)
+
+
+def bounded_redacted_tail(value: "str | bytes | None", limit: int) -> str:
     if isinstance(value, bytes):
         text = value.decode(errors="replace")
     else:
         text = value or ""
-    text = redact_text(text)
     if limit <= 0:
         return ""
-    return text[-limit:]
+    if len(text) > limit + redaction_overlap():
+        return REDACTED_OVERSIZED
+    # Every pattern now sees its whole candidate span, so a match that ends inside the emitted
+    # region was matched whole; the slice below can only cut text no pattern claimed.
+    return redact_text(text)[-limit:]
+
+
+def tail(value: str | bytes | None, limit: int = TAIL_LIMIT) -> str:
+    """Redact, then bound — over a window bounded first. See bounded_redacted_tail()."""
+    return bounded_redacted_tail(value, limit)
 
 
 def delivery_status_pr_grind_timeout(args: argparse.Namespace) -> int:
@@ -290,7 +715,165 @@ def effective_delivery_status_timeout(args: argparse.Namespace) -> int:
     return max(DEFAULT_DELIVERY_STATUS_TIMEOUT, nested_budget)
 
 
-def materialize_delivery_status_runtime(destination: Path) -> Path:
+def _names_created_inode(parent_fd: int, name: str, created: os.stat_result) -> bool:
+    """True iff `name` under `parent_fd` still resolves, no-follow, to the inode we created.
+
+    The immediate parent plus the final component, not the whole path: the last component is the
+    only one this call created, and resolving it through the descriptor the create already held
+    means an ancestor swapped afterwards cannot redirect the answer.
+    """
+    try:
+        landed = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return False
+    return (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino)
+
+
+def write_private_authenticated(target: Path, content: bytes, mode: int) -> None:
+    """Write authenticated bytes through a descriptor, then prove that descriptor still holds them.
+
+    `Path.write_bytes()` looks like one operation and is three unproven claims. `os.write` may write
+    fewer bytes than it was handed, and a partial write that nobody checks is a silent truncation.
+    Nothing is flushed, so the bytes may not be on disk when the child is launched to read them.
+    And nothing re-reads what landed, so "we wrote the authenticated content" and "the file holds
+    the authenticated content" are separate facts — only the first was ever established.
+
+    That gap is not academic here: these bytes are about to be EXECUTED as a private runtime, and
+    the caller's pin check authenticated the bytes in MEMORY, not the file. The closing re-digest is
+    what carries that authentication onto disk, and it reads the descriptor rather than the name,
+    because a name resolves a second time and a second resolution is a second chance to hand us a
+    different file. The identity check then proves the other direction — that the name still reaches
+    the inode the digest just cleared — which is the half a descriptor alone cannot see.
+    `sha256(content)` is the expected value rather than a pin the caller passes in: the caller
+    already proved content matches its pin, so the two are the same number, and a parameter that can
+    only ever hold one value is a parameter that can be passed the wrong one.
+
+    O_EXCL: the name must not already exist, so this cannot land in something prepared for it.
+    O_NOFOLLOW: and it cannot be a symlink pointing somewhere the containment never authorized.
+    """
+    # One parent descriptor for the whole operation: the create, the identity check and the failure
+    # unlink all resolve the final component through it, so they cannot disagree about the parent.
+    parent_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
+        # write-only one cannot be read (EBADF). Re-opening the name to read it instead would
+        # resolve the name a second time, which is the very thing the descriptor is here to avoid.
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(target.name, flags, mode, dir_fd=parent_fd)
+        # The inode THIS call created. The failure path deletes only this one, never a replacement.
+        created = os.fstat(fd)
+        try:
+            view = memoryview(content)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    # Not merely "unusual": consuming the result only as a slice index makes a 0 an
+                    # infinite loop, so this is what keeps the loop terminating as well as honest.
+                    raise OSError("private_copy_short_write")
+                view = view[written:]
+            os.fsync(fd)
+            # fchmod, not chmod: the mode lands on the inode we wrote, not on whatever the name
+            # means by now. The requested mode is also masked by the caller's umask at open.
+            os.fchmod(fd, mode)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(content)
+                or stat.S_IMODE(st.st_mode) != mode
+            ):
+                raise OSError("private_copy_metadata_invalid")
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < st.st_size:
+                # pread: neither moves the offset nor rides it, so the digest cannot race the writer.
+                chunk = os.pread(fd, min(1 << 16, st.st_size - offset), offset)
+                if not chunk:
+                    raise OSError("private_copy_truncated")
+                digest.update(chunk)
+                offset += len(chunk)
+            if digest.hexdigest() != hashlib.sha256(content).hexdigest():
+                raise OSError("private_copy_integrity_failed")
+            if not _names_created_inode(parent_fd, target.name, created):
+                # The digest proved OUR inode is intact; this proves `target` still reaches it. A
+                # rename over the name publishes someone else's bytes under the name the caller is
+                # about to execute.
+                raise OSError("private_copy_integrity_failed")
+        except BaseException:
+            # A half-written private executable must never be left behind for the next step to run.
+            # But by now the name may belong to something else — the case the identity check above
+            # fails on — and deleting THAT is a second bug wearing the first one's cleanup.
+            if _names_created_inode(parent_fd, target.name, created):
+                try:
+                    os.unlink(target.name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+MAX_AUTHENTICATED_RELAY_SOURCE_BYTES = 1 << 20
+
+
+def _read_authenticated_relay_source(path: Path, expected_digest: str) -> bytes:
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise OSError("relay_source_metadata_invalid")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("relay_source_identity_changed")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.geteuid() or opened.st_nlink != 1:
+            raise OSError("relay_source_metadata_invalid")
+        if opened.st_size > MAX_AUTHENTICATED_RELAY_SOURCE_BYTES:
+            raise OSError("relay_source_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_RELAY_SOURCE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1 << 20, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_RELAY_SOURCE_BYTES:
+            raise OSError("relay_source_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.geteuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or len(data) != after.st_size
+        ):
+            raise OSError("relay_source_changed_during_read")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("relay_source_replaced_during_read")
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != expected_digest:
+        raise OSError("relay_source_integrity_failed")
+    return data
+
+
+DELIVERY_STATUS_STDIN_LOADER = (
+    "import sys\n"
+    "virtual = sys.argv[1]\n"
+    "program = sys.stdin.buffer.read()\n"
+    "sys.argv = [virtual, *sys.argv[2:]]\n"
+    "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+    "exec(compile(program, virtual, 'exec'), namespace)\n"
+)
+
+
+def materialize_delivery_status_runtime(destination: Path) -> tuple[Path, bytes]:
     if set(DELIVERY_STATUS_RUNTIME_SOURCES) != set(TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS):
         raise OSError("delivery_status_runtime_inventory_mismatch")
     authenticated: dict[str, bytes] = {}
@@ -298,9 +881,7 @@ def materialize_delivery_status_runtime(destination: Path) -> Path:
         source = DELIVERY_STATUS_RUNTIME_SOURCES[relative]
         if source.is_symlink() or not source.is_file():
             raise OSError("delivery_status_runtime_source_invalid")
-        content = source.read_bytes()
-        if hashlib.sha256(content).hexdigest() != expected_digest:
-            raise OSError("delivery_status_runtime_integrity_failed")
+        content = _read_authenticated_relay_source(source, expected_digest)
         authenticated[relative] = content
     for relative, content in authenticated.items():
         target = destination / relative
@@ -308,29 +889,21 @@ def materialize_delivery_status_runtime(destination: Path) -> Path:
         # mkdir's mode is masked by the caller's umask; chmod is not. The private-runtime
         # validators require exactly 0700, so a bundle must not depend on the caller's umask.
         target.parent.chmod(0o700)
-        target.write_bytes(content)
-        target.chmod(0o500)
-    return destination / "scripts" / "hermes-busdriver-delivery-status"
+        write_private_authenticated(target, content, 0o500)
+    entry_relative = "scripts/hermes-busdriver-delivery-status"
+    return destination / entry_relative, authenticated[entry_relative]
 
 
-def materialize_delivery_status_executables(destination: Path) -> Path:
-    trusted_bin = destination / "trusted-bin"
-    trusted_bin.mkdir()
-    trusted_bin.chmod(0o700)
-    for name, expected_digest in TRUSTED_EXECUTABLE_DIGESTS.items():
-        try:
-            source = trusted_executable_path(name)
-        except RuntimeError as exc:
-            raise OSError("delivery_status_executable_integrity_failed") from exc
-        content = source.read_bytes()
-        if hashlib.sha256(content).hexdigest() != expected_digest:
-            raise OSError("delivery_status_executable_integrity_failed")
-        target = trusted_bin / name
-        target.write_bytes(content)
-        target.chmod(0o500)
-    return trusted_bin
-
-
+# materialize_delivery_status_executables() used to live here. It copied git/gh/jq into a 0700
+# `trusted-bin/` and put that directory at the head of the child's PATH, so the child dispatched a
+# private copy. That was the private-copy design one level down, with two extra problems the parent
+# never had: the copy sat in a directory we own (hence renameable by a same-UID adversary — the
+# exact ABA this round removes), and copying /usr/bin/git copies the *CommandLineTools shim*, which
+# outside /usr/bin is a code-signed binary stripped of SIP that the kernel is entitled to refuse.
+#
+# There is nothing to replace it with: the child carries the same frozen source table and the same
+# ancestry walk, so it validates and execs the root-owned source itself. A bundle would only be a
+# second, weaker copy of a decision the child can make correctly on its own.
 def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool = True) -> tuple[dict[str, Any], int]:
     cmd: list[str] = []
     if args.repo:
@@ -368,19 +941,18 @@ def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool =
     try:
         with tempfile.TemporaryDirectory(prefix="hermes-delivery-status-runtime-") as runtime_dir:
             runtime_root = Path(runtime_dir)
-            delivery_status = materialize_delivery_status_runtime(runtime_root)
-            trusted_bin = materialize_delivery_status_executables(runtime_root)
-            cmd[:0] = [sys.executable, "-I", str(delivery_status)]
-            runtime_path = os.pathsep.join(
-                (str(trusted_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin")
-            )
-            cp = subprocess.run(
+            delivery_status, delivery_status_program = materialize_delivery_status_runtime(runtime_root)
+            cmd[:0] = [str(trusted_executable_path("python3")), "-I", "-c", DELIVERY_STATUS_STDIN_LOADER, str(delivery_status)]
+            # The entrypoint bytes are retained in memory and sent on stdin. The materialized
+            # pathname is only the virtual __file__ used for ROOT-relative reads, not something
+            # Python re-opens for the program being executed.
+            cp = _bounded_run(
                 cmd,
+                input=delivery_status_program,
                 text=True,
-                capture_output=True,
                 check=False,
                 timeout=timeout,
-                env=safe_git_env({"PATH": runtime_path, "HERMES_BUSDRIVER_PRIVATE_RUNTIME": "1"}),
+                env=safe_git_env(),
             )
     except subprocess.TimeoutExpired as e:
         return {
@@ -522,50 +1094,21 @@ def require_litmus_status(delivery_status: dict[str, Any], allowed_statuses: set
 
 
 def staged_diff_hash(repo: Path) -> str | None:
-    try:
-        cp = subprocess.run(
-            [
-                str(trusted_executable_path("git")),
-                "-C",
-                str(repo),
-                "-c",
-                f"core.attributesFile={os.devnull}",
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-color",
-                "--cached",
-            ],
-            capture_output=True,
-            check=False,
-            env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+    rc, raw, _stderr = git_observation_raw(
+        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--cached",
+    )
+    if rc != 0 or not raw:
         return None
-    if cp.returncode != 0 or not cp.stdout:
-        return None
-    return hashlib.sha256(cp.stdout).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def reviewed_tree_diff_hash(repo: Path, parent_head: str, tree: str) -> str | None:
-    try:
-        cp = subprocess.run(
-            [
-                str(trusted_executable_path("git")), "-C", str(repo), "-c", f"core.attributesFile={os.devnull}",
-                "diff", "--no-ext-diff", "--no-textconv", "--no-color",
-                parent_head, tree,
-            ],
-            capture_output=True,
-            check=False,
-            env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+    rc, raw, _stderr = git_observation_raw(
+        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", parent_head, tree,
+    )
+    if rc != 0 or not raw:
         return None
-    if cp.returncode != 0 or not cp.stdout:
-        return None
-    return hashlib.sha256(cp.stdout).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
 
 
 def commit_litmus_staged_diff_blocker(
@@ -595,30 +1138,12 @@ def commit_litmus_staged_diff_blocker(
 
 
 def diff_hash(repo: Path, *spec: str) -> str | None:
-    try:
-        cp = subprocess.run(
-            [
-                str(trusted_executable_path("git")),
-                "-C",
-                str(repo),
-                "-c",
-                f"core.attributesFile={os.devnull}",
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-color",
-                *spec,
-            ],
-            capture_output=True,
-            check=False,
-            env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+    rc, raw, _stderr = git_observation_raw(
+        repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", *spec,
+    )
+    if rc != 0 or not raw:
         return None
-    if cp.returncode != 0 or not cp.stdout:
-        return None
-    normalized = cp.stdout.rstrip(b"\n")
+    normalized = raw.rstrip(b"\n")
     if not normalized:
         return None
     return hashlib.sha256(normalized).hexdigest()
@@ -683,10 +1208,9 @@ def pr_base_ref(repo: Path, base: str | None) -> str | None:
 def live_remote_branch_head(repo: Path, branch: str, remote: str = "origin") -> tuple[str | None, str | None]:
     ref = f"refs/heads/{branch}"
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "ls-remote", "--heads", remote, ref],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
@@ -713,10 +1237,9 @@ def remote_head_ancestor_status(repo: Path, remote_head: str | None) -> tuple[bo
     if not remote_head:
         return True, None
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "merge-base", "--is-ancestor", remote_head, "HEAD"],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_env(),
@@ -785,7 +1308,9 @@ def commit_staged_index(
     allowed_marker_evidence_paths = allowed_marker_paths(marker_dirs)
 
     def marker_path_allowed(path: str, xy: str) -> bool:
-        clean_path = path.strip().strip('"')
+        # No strip('"'): see decode_porcelain_path. Under `-z` a quote is part of the filename,
+        # and stripping it is what let a hostile path land on an allow-listed marker.
+        clean_path = path.strip()
         return clean_path in allowed_marker_evidence_paths and marker_dirty_status_allowed(xy)
 
     def porcelain_paths(line: str) -> list[str]:
@@ -827,6 +1352,16 @@ def commit_staged_index(
                 break
         return aggregate_batch_effect(base_cmd, effects)
 
+    def git_observation_effect_pathspec_batches(base_args: list[str], paths: list[str], step_name: str) -> dict[str, Any]:
+        effects: list[dict[str, Any]] = []
+        for batch_index, batch_paths in pathspec_batches(paths):
+            batch_effect = git_observation_effect(repo, *base_args, "--", *literal_pathspecs(batch_paths))
+            substeps.append({"name": f"{step_name}_batch", **batch_effect, "batch_index": batch_index, "path_count": len(batch_paths)})
+            effects.append(batch_effect)
+            if not batch_effect.get("ok"):
+                break
+        return aggregate_batch_effect(["git", *base_args], effects)
+
     def git_output_pathspec_batches(base_args: list[str], paths: list[str], step_name: str, separator: str = "\n") -> tuple[int, str, str, dict[str, Any]]:
         outputs: list[str] = []
         errors: list[str] = []
@@ -845,6 +1380,28 @@ def commit_staged_index(
                 return rc, separator.join(outputs), "\n".join(errors), aggregate
         aggregate = aggregate_batch_effect(["git", *base_args], effects)
         return 0, separator.join(outputs), "\n".join(errors), aggregate
+
+    def git_observation_raw_pathspec_batches(base_args: list[str], paths: list[str], step_name: str) -> tuple[int, bytes, str, dict[str, Any]]:
+        """The bytes-preserving twin of git_output_pathspec_batches, for NUL-framed reads.
+
+        Batches concatenate with no separator: every `-z` record already carries its own NUL
+        terminator, so joining the raw bytes reframes nothing.
+        """
+        outputs: list[bytes] = []
+        errors: list[str] = []
+        effects: list[dict[str, Any]] = []
+        for batch_index, batch_paths in pathspec_batches(paths):
+            rc, out, err = git_observation_raw(repo, *base_args, "--", *literal_pathspecs(batch_paths))
+            batch_effect = {"cmd": ["git", *base_args, "--", *literal_pathspecs(batch_paths)], "returncode": rc, "ok": rc == 0, "stdout_tail": tail(out), "stderr_tail": tail(err), "batch_index": batch_index, "path_count": len(batch_paths)}
+            substeps.append({"name": f"{step_name}_batch", **batch_effect})
+            effects.append(batch_effect)
+            if out:
+                outputs.append(out)
+            if err:
+                errors.append(err)
+            if rc != 0:
+                return rc, b"".join(outputs), "\n".join(errors), aggregate_batch_effect(["git", *base_args], effects)
+        return 0, b"".join(outputs), "\n".join(errors), aggregate_batch_effect(["git", *base_args], effects)
 
     def restore_reviewed_paths_from_tree(tree: str, paths: list[str], aggregate_step_name: str, ls_step_name: str) -> dict[str, Any]:
         tree_paths_rc, tree_paths_out, tree_paths_err, tree_paths_effect = git_output_pathspec_batches(["ls-tree", "-r", "-z", "--name-only", tree], paths, ls_step_name, separator="\0")
@@ -870,8 +1427,9 @@ def commit_staged_index(
         substeps.append({"name": aggregate_step_name, **aggregate, "path_count": len(paths)})
         return aggregate
 
-    pre_status_rc, pre_status_out, pre_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    pre_allowed_marker_snapshot = marker_evidence_snapshot_from_status(repo, pre_status_out, allowed_marker_evidence_paths) if pre_status_rc == 0 else {}
+    pre_status_rc, pre_status_records, pre_status_err = git_status_records(repo, "--untracked-files=all")
+    pre_status_out = status_records_text(pre_status_records)
+    pre_allowed_marker_snapshot = marker_evidence_snapshot_from_status(repo, pre_status_records, allowed_marker_evidence_paths) if pre_status_rc == 0 else {}
     substeps.append({"name": "git_status_before_commit", "cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": pre_status_rc, "ok": pre_status_rc == 0, "stdout_tail": tail(pre_status_out), "stderr_tail": tail(pre_status_err), "pre_allowed_marker_entry_count": len(pre_allowed_marker_snapshot)})
     if pre_status_rc != 0:
         return {"cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": pre_status_rc or 1, "ok": False, "stdout_tail": pre_status_out, "stderr_tail": pre_status_err, "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_status_failed", "substeps": substeps, "before_head": "", "after_head": ""}
@@ -879,17 +1437,15 @@ def commit_staged_index(
         return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": pre_status_out, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_status_changed_after_review", "substeps": substeps, "before_head": "", "after_head": ""}
     pre_commit_dirty_entries: list[str] = []
     pre_existing_untracked_snapshot: dict[str, str] = dict(reviewed_untracked_snapshot or {})
-    for pre_line in pre_status_out.splitlines():
-        if not pre_line:
-            continue
-        pre_paths = porcelain_paths(pre_line)
-        pre_xy = pre_line[:2]
+    for pre_xy, pre_record_paths in pre_status_records:
+        pre_line = status_record_entry(pre_xy, pre_record_paths)
+        pre_paths = [path.rstrip("/") for path in pre_record_paths]
         if len(pre_paths) == 1 and marker_path_allowed(pre_paths[0], pre_xy):
             if pre_paths[0] in pre_allowed_marker_snapshot:
                 continue
             pre_commit_dirty_entries.append(pre_line)
             continue
-        if pre_line.startswith("?? "):
+        if pre_xy == "??":
             for pre_path in pre_paths:
                 identity = untracked_file_identity(repo, pre_path)
                 if reviewed_untracked_snapshot is not None and pre_existing_untracked_snapshot.get(pre_path) != identity:
@@ -903,30 +1459,27 @@ def commit_staged_index(
         return {"cmd": ["git", "commit"], "returncode": 1, "ok": False, "stdout_tail": "", "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "pre_commit_non_marker_dirty_worktree", "substeps": substeps, "before_head": "", "after_head": ""}
 
     def non_marker_dirty_paths() -> tuple[list[str], list[str], dict[str, Any]]:
-        rc, out, err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
-        effect = {"cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": rc, "ok": rc == 0, "stdout_tail": tail(out), "stderr_tail": tail(err)}
+        rc, records, err = git_status_records(repo, "--untracked-files=all")
+        effect = {"cmd": ["git", "status", "--porcelain=v1", "--untracked-files=all"], "returncode": rc, "ok": rc == 0, "stdout_tail": tail(status_records_text(records)), "stderr_tail": tail(err)}
         tracked: list[str] = []
         untracked: list[str] = []
         if rc != 0:
             return ["<status_failed>"], [], effect
-        current_allowed_marker_snapshot = marker_evidence_snapshot_from_status(repo, out, allowed_marker_evidence_paths)
+        current_allowed_marker_snapshot = marker_evidence_snapshot_from_status(repo, records, allowed_marker_evidence_paths)
         seen_marker_paths: set[str] = set()
         seen_preexisting_untracked_paths: set[str] = set()
-        for line in out.splitlines():
-            if not line:
-                continue
-            paths = porcelain_paths(line)
-            xy = line[:2]
+        for xy, record_paths in records:
+            paths = [path.rstrip("/") for path in record_paths]
             if len(paths) == 1 and marker_path_allowed(paths[0], xy):
                 seen_marker_paths.add(paths[0])
                 if paths[0] in current_allowed_marker_snapshot and current_allowed_marker_snapshot.get(paths[0]) == pre_allowed_marker_snapshot.get(paths[0]):
                     continue
-                if line.startswith("?? "):
+                if xy == "??":
                     untracked.extend(paths)
                 else:
                     tracked.extend(paths)
                 continue
-            if line.startswith("?? "):
+            if xy == "??":
                 unchanged_preexisting = True
                 for path in paths:
                     identity = untracked_file_identity(repo, path)
@@ -1000,8 +1553,44 @@ def commit_staged_index(
         if not commit_effect.get("ok"):
             live_head_effect = run_safe(["git", "rev-parse", "HEAD"], repo, timeout=30, env=env)
             substeps.append({"name": "git_rev_parse_after_commit_cas_failure", **live_head_effect})
-            live_head = str(live_head_effect.get("stdout_tail") or "").strip()
-            return {"cmd": commit_cmd, "returncode": int(commit_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": commit_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "commit_parent_changed_during_publish", "candidate_commit": candidate_commit, "substeps": substeps, "before_head": before, "after_head": live_head or before}
+            live_authoritative = bool(live_head_effect.get("ok"))
+            live_head = str(live_head_effect.get("stdout_tail") or "").strip() if live_authoritative else ""
+            base = {
+                "cmd": commit_cmd,
+                "returncode": int(commit_effect.get("returncode") or 1),
+                "ok": False,
+                "stdout_tail": "",
+                "stderr_tail": commit_effect.get("stderr_tail", ""),
+                "elapsed_seconds": round(time.time() - started, 3),
+                "candidate_commit": candidate_commit,
+                "commit_verified": True,
+                "substeps": substeps,
+                "before_head": before,
+                "after_head": live_head,
+            }
+            if live_authoritative and live_head == candidate_commit:
+                # The CAS postcondition is present even though the bounded transport lost command
+                # completion. Retrying would duplicate already-published work.
+                return {
+                    **base,
+                    "error": "commit_publish_completion_unconfirmed",
+                    "effect_completed": True,
+                    "reconciliation_required": True,
+                }
+            if live_authoritative and live_head == before:
+                # Only this observation proves that this invocation's CAS had no ref effect.
+                return {**base, "error": "commit_parent_changed_during_publish"}
+            # A third value can mean either that our CAS lost or that it landed and another actor
+            # advanced the ref before observation. A failed head read is equally unknowable. Both
+            # prohibit an automatic retry and require explicit reconciliation.
+            return {
+                **base,
+                "error": "commit_publish_outcome_unknown",
+                "effect_completed": False,
+                "effect_may_have_completed": True,
+                "effect_outcome_unknown": True,
+                "reconciliation_required": True,
+            }
     else:
         commit_cmd = ["git", "-c", "commit.gpgsign=false", "commit", "--cleanup=verbatim", "-m", message]
         commit_effect = run_safe(commit_cmd, repo, timeout=300, env=env)
@@ -1156,18 +1745,20 @@ def commit_staged_index(
     if not ok:
         return fail_and_restore_reviewed_tree("git_commit_failed_or_hook_drift")
 
-    index_clean_effect = run_safe_pathspec_batches(["git", "diff", "--cached", "--quiet"], reviewed_paths, "git_diff_cached_quiet_reviewed_paths_after_commit", timeout=30)
+    index_clean_effect = git_observation_effect_pathspec_batches(["diff", "--cached", "--quiet"], reviewed_paths, "git_diff_cached_quiet_reviewed_paths_after_commit")
     substeps.append({"name": "git_diff_cached_quiet_reviewed_paths_after_commit", **index_clean_effect})
-    worktree_clean_effect = run_safe_pathspec_batches(["git", "diff", "--quiet"], reviewed_paths, "git_diff_worktree_quiet_reviewed_paths_after_commit", timeout=30)
+    worktree_clean_effect = git_observation_effect_pathspec_batches(["diff", "--quiet"], reviewed_paths, "git_diff_worktree_quiet_reviewed_paths_after_commit")
     substeps.append({"name": "git_diff_worktree_quiet_reviewed_paths_after_commit", **worktree_clean_effect})
     dirty_reviewed_paths_after_commit = index_clean_effect.get("returncode") == 1 or worktree_clean_effect.get("returncode") == 1
-    reviewed_status_rc, reviewed_status_out, reviewed_status_err, reviewed_status_effect = git_output_pathspec_batches(["status", "--porcelain=v1", "--untracked-files=all"], reviewed_paths, "git_status_reviewed_paths_after_commit")
+    # -z here for the same reason as every other status read: this list decides whether reviewed
+    # paths drifted, and a fabricated `?? ` record is a fabricated drift verdict.
+    reviewed_status_rc, reviewed_status_raw, reviewed_status_err, reviewed_status_effect = git_observation_raw_pathspec_batches(["status", "--porcelain=v1", "-z", "--untracked-files=all"], reviewed_paths, "git_status_reviewed_paths_after_commit")
     reviewed_untracked_after_commit: list[str] = []
     if reviewed_status_rc == 0:
         reviewed_path_set = set(reviewed_paths)
-        for reviewed_line in reviewed_status_out.splitlines():
-            if reviewed_line.startswith("?? "):
-                reviewed_untracked_after_commit.extend(path for path in porcelain_paths(reviewed_line) if path in reviewed_path_set)
+        for reviewed_xy, reviewed_record_paths in parse_porcelain_z(reviewed_status_raw):
+            if reviewed_xy == "??":
+                reviewed_untracked_after_commit.extend(path.rstrip("/") for path in reviewed_record_paths if path.rstrip("/") in reviewed_path_set)
     substeps.append({"name": "git_status_reviewed_paths_after_commit", **reviewed_status_effect, "reviewed_untracked_paths": reviewed_untracked_after_commit})
     diff_check_failed = index_clean_effect.get("returncode") not in {0, 1} or worktree_clean_effect.get("returncode") not in {0, 1} or reviewed_status_rc != 0
     if diff_check_failed:
@@ -1227,13 +1818,12 @@ def push_remote_safety(repo: Path, remote: str) -> tuple[bool, str | None]:
 def git_mutation_config_safety(repo: Path) -> tuple[bool, str | None]:
     """Reject repository-local config that can redirect hooks, credentials, or network I/O."""
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [
                 str(trusted_executable_path("git")), "-C", str(repo), "config", "--name-only", "--get-regexp",
                 r"^(core\.(hookspath|sshcommand|gitproxy|askpass|fsmonitor|attributesfile)|credential\.|remote\..*\.(receivepack|uploadpack|proxy)|http\.|filter\.|diff\.|gpg\.|url\.|include\.|includeif\.)",
             ],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_mutation_env(),
@@ -1250,10 +1840,9 @@ def git_mutation_config_safety(repo: Path) -> tuple[bool, str | None]:
             return False, "local_credential_config_blocked_for_mutation"
         return False, "local_network_command_config_blocked_for_mutation"
     try:
-        common = subprocess.run(
+        common = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_mutation_env(),
@@ -1302,10 +1891,9 @@ def github_remote_url(repo: Path, remote: str = "origin") -> str | None:
     if not isinstance(remote, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", remote):
         return None
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "config", "--get-all", f"remote.{remote}.url"],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_mutation_env(),
@@ -1419,10 +2007,9 @@ def valid_local_branch_name(repo: Path, branch: str | None) -> bool:
     if any(ord(ch) < 32 for ch in branch):
         return False
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "check-ref-format", "--branch", branch],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_env(),
@@ -1470,13 +2057,13 @@ def busdriver_plugin_root_safety(plugin: Path) -> tuple[bool, str | None]:
     rels = [str(rel) for rel in required]
     try:
         trusted_git = str(trusted_executable_path("git"))
-        top = subprocess.run([trusted_git, "-C", str(plugin), "rev-parse", "--show-toplevel"], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+        top = _bounded_run([trusted_git, "-C", str(plugin), "rev-parse", "--show-toplevel"], text=True, check=False, timeout=30, env=safe_git_env())
         if top.returncode == 0 and top.stdout.strip() and Path(top.stdout.strip()).resolve() == plugin:
-            tracked = subprocess.run([trusted_git, "-C", str(plugin), "ls-files", "--error-unmatch", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+            tracked = _bounded_run([trusted_git, "-C", str(plugin), "ls-files", "--error-unmatch", *rels], text=True, check=False, timeout=30, env=safe_git_env())
             if tracked.returncode != 0:
                 return False, "plugin_root_integrity_failed"
-            worktree_clean = subprocess.run([trusted_git, "-C", str(plugin), "diff", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
-            index_clean = subprocess.run([trusted_git, "-C", str(plugin), "diff", "--cached", "--quiet", "--", *rels], text=True, capture_output=True, check=False, timeout=30, env=safe_git_env())
+            worktree_clean = _bounded_run([trusted_git, "-C", str(plugin), "diff", "--quiet", "--", *rels], text=True, check=False, timeout=30, env=safe_git_env())
+            index_clean = _bounded_run([trusted_git, "-C", str(plugin), "diff", "--cached", "--quiet", "--", *rels], text=True, check=False, timeout=30, env=safe_git_env())
             if worktree_clean.returncode != 0 or index_clean.returncode != 0:
                 return False, "plugin_root_dirty"
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
@@ -1488,12 +2075,14 @@ def materialize_authenticated_busdriver_snapshot(plugin: Path, destination: Path
     """Materialize the pinned committed plugin tree without executing worktree bytes."""
     try:
         trusted_git = str(trusted_executable_path("git"))
-        archive = subprocess.run(
+        archive = _bounded_run(
             [trusted_git, "-C", str(plugin), "archive", "--format=tar", TRUSTED_BUSDRIVER_PLUGIN_COMMIT],
-            capture_output=True,
             check=False,
             timeout=60,
             env=safe_git_env(),
+            # A tar of the whole pinned plugin tree, extracted whole: the tail bound is not the
+            # right number for a payload nobody reads the last 4000 bytes of.
+            limit=MAX_PAYLOAD_BYTES,
         )
         if archive.returncode != 0 or not archive.stdout:
             return False
@@ -1627,7 +2216,7 @@ def validate_backstop_verdict_text(repo: Path, text: str, base: str | None = "ma
     reviewed_root = payload.get("reviewed_repo_root")
     try:
         reviewed_root_path = Path(reviewed_root).expanduser().resolve() if isinstance(reviewed_root, str) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         reviewed_root_path = None
     if reviewed_root_path != repo:
         return False, "backstop_verdict_repo_mismatch", {"schema": schema, "status": status}
@@ -1749,88 +2338,16 @@ def effective_operation(args: argparse.Namespace) -> str:
     return args.operation
 
 
-def parse_verifier(item: str, index: int) -> tuple[str, str]:
-    if VERIFIER_LABEL.match(item):
-        name, command = item.split("=", 1)
-        command = command.strip()
-        if not command:
-            raise ValueError("empty verifier command")
-        return name.strip(), command
-    command = item.strip()
-    if not command:
-        raise ValueError("empty verifier command")
-    return f"verifier_{index}", command
-
-
-def verifier_error_name(item: str, index: int) -> str:
-    if VERIFIER_LABEL.match(item):
-        name, _command = item.split("=", 1)
-        return name.strip() or f"verifier_{index}"
-    return f"verifier_{index}"
-
-
-def run_verifiers(repo: Path, verifiers: list[str], timeout: int) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    verifier_home = tempfile.TemporaryDirectory(prefix="hermes-deliver-verifier-home-")
-    verifier_env = {
-        "HOME": verifier_home.name,
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "LC_ALL": os.environ.get("LC_ALL", ""),
-        "TMPDIR": os.environ.get("TMPDIR", tempfile.gettempdir()),
+def pr_grind_loop_credential_env() -> dict[str, str]:
+    return {
+        key: value
+        for key in CREDENTIAL_ENV_KEYS
+        if isinstance((value := os.environ.get(key)), str)
     }
-    for index, item in enumerate(verifiers, start=1):
-        try:
-            name, command = parse_verifier(item, index)
-            argv = shlex.split(command)
-            if not argv:
-                raise ValueError("empty verifier command")
-        except ValueError as e:
-            results.append({
-                "name": verifier_error_name(item, index),
-                "command": item,
-                "returncode": 2,
-                "ok": False,
-                "stdout_tail": "",
-                "stderr_tail": str(e),
-            })
-            continue
-        try:
-            cp = subprocess.run(argv, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=timeout, env=verifier_env)
-            results.append({
-                "name": name,
-                "command": command,
-                "returncode": cp.returncode,
-                "ok": cp.returncode == 0,
-                "stdout_tail": tail(cp.stdout),
-                "stderr_tail": tail(cp.stderr),
-            })
-        except subprocess.TimeoutExpired as e:
-            timeout_prefix = f"timeout after {timeout}s\n"
-            stderr_tail = timeout_prefix + tail(e.stderr, max(0, TAIL_LIMIT - len(timeout_prefix)))
-            results.append({
-                "name": name,
-                "command": command,
-                "returncode": 124,
-                "ok": False,
-                "stdout_tail": tail(e.stdout),
-                "stderr_tail": stderr_tail.rstrip(),
-            })
-        except OSError as e:
-            results.append({
-                "name": name,
-                "command": command,
-                "returncode": 127,
-                "ok": False,
-                "stdout_tail": "",
-                "stderr_tail": tail(f"{type(e).__name__}: {e}"),
-            })
-    verifier_home.cleanup()
-    return results
 
 
-def verifier_dispatch_blocker() -> str | None:
-    return "verifier_containment_unavailable"
+def pr_grind_loop_env() -> dict[str, str]:
+    return safe_git_env(pr_grind_loop_credential_env())
 
 
 def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -1846,9 +2363,7 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
         for source, name, expected_digest in sources:
             if source.is_symlink() or not source.is_file():
                 raise OSError(f"{name}_not_regular")
-            content = source.read_bytes()
-            if hashlib.sha256(content).hexdigest() != expected_digest:
-                return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_bundle_integrity_failed", "source": name}, 2
+            content = _read_authenticated_relay_source(source, expected_digest)
             authenticated[name] = content
     except OSError as e:
         return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_bundle_integrity_failed", "detail": type(e).__name__}, 2
@@ -1894,19 +2409,31 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
     # with _validate_private_metadata(..., 0o700), so a 022-umask 0755 makes the whole operation
     # unable to reach `clean`. mkdir(mode=...) would be masked; chmod is not.
     private_scripts.chmod(0o700)
-    for name, content in authenticated.items():
-        private = private_scripts / name
-        private.write_bytes(content)
-        private.chmod(0o500)
     try:
-        trusted_bin = materialize_delivery_status_executables(Path(bundle_guard.name))
+        for name, content in authenticated.items():
+            write_private_authenticated(private_scripts / name, content, 0o500)
     except OSError as e:
         bundle_guard.cleanup()
-        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_executable_bundle_integrity_failed", "detail": type(e).__name__}, 2
+        return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_bundle_integrity_failed", "detail": type(e).__name__}, 2
     script = private_scripts / "hermes-busdriver-pr-grind-loop"
+    loop_program = authenticated["hermes-busdriver-pr-grind-loop"]
+    try:
+        python3 = trusted_executable_path("python3")
+    except RuntimeError as e:
+        bundle_guard.cleanup()
+        return {
+            "ok": False,
+            "status": "blocked",
+            "clean": False,
+            "error": "pr_grind_runtime_unavailable",
+            "detail": tail(str(e)),
+            "returncode": 127,
+        }, 127
     cmd = [
-        sys.executable,
+        str(python3),
         "-I",
+        "-c",
+        DELIVERY_STATUS_STDIN_LOADER,
         str(script),
         "--repo",
         str(repo),
@@ -1932,13 +2459,12 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
     ]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
-    # Same shape as run_delivery_status: the digest-verified private bin leads, and the rest is
-    # the fixed system PATH. safe_git_env()'s default PATH keeps the user-writable Homebrew
-    # prefixes, which have no business being reachable from a private-runtime child.
-    runtime_path = os.pathsep.join((str(trusted_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"))
-    runtime_env = safe_git_env({"PATH": runtime_path, "HERMES_BUSDRIVER_PRIVATE_RUNTIME": "1"})
+    # Same shape as run_delivery_status: no private bin to lead with, because the child validates
+    # and execs the root-owned source itself. safe_git_env()'s PATH no longer carries the
+    # user-writable Homebrew prefixes either, so there is nothing left here to override.
+    runtime_env = pr_grind_loop_env()
     try:
-        cp = subprocess.run(cmd, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0), env=runtime_env)
+        cp = _bounded_run(cmd, cwd=str(repo), shell=False, text=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0), env=runtime_env, input=loop_program)
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
@@ -1949,7 +2475,7 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
             "stdout_tail": tail(e.stdout),
             "stderr_tail": tail(e.stderr),
         }, 124
-    except OSError as e:
+    except (OSError, RuntimeError) as e:
         return {"ok": False, "status": "blocked", "clean": False, "error": type(e).__name__, "returncode": 127, "stderr_tail": tail(str(e))}, 127
 
     try:
@@ -2593,6 +3119,8 @@ _MERGE_FAILURE_REASONS = {
     "atomic_merge_base_binding_unavailable",
 }
 _COMMIT_RECONCILIATION_REASONS = {
+    # update-ref transport failed, but its postcondition is authoritatively present.
+    "commit_publish_completion_unconfirmed",
     "post_commit_concurrent_work_preserved",
     "post_commit_external_dirty_drift",
     "post_commit_untracked_dirty",
@@ -2621,6 +3149,8 @@ _COMMIT_RECONCILIATION_REASONS = {
     "committed_message_mismatch_after_hooks_rollback_failed",
     "git_commit_failed_or_hook_drift_rollback_failed",
 }
+_COMMIT_OUTCOME_UNKNOWN_REASON = "commit_publish_outcome_unknown"
+_COMMIT_OUTCOME_UNKNOWN_RELEASE_REASON = "commit_publish_outcome_unknown_and_lock_release_failed"
 _PUSH_RECONCILIATION_REASONS = {
     "remote_head_post_push_mismatch",
     "pushed_with_post_push_dirty_worktree",
@@ -2646,6 +3176,7 @@ def _blocked_artifact_outcomes(reasons: set[str]) -> set[tuple[bool, str, str]]:
 # the dormant executor code behind these blockers. Lifting a blocker and admitting its outcomes
 # into the artifact contract must happen as one reviewed change.
 FIXED_EARLY_BLOCKED_OPERATIONS = {
+    "verify": "verifier_containment_unavailable",
     "pre-pr-review": "isolated_review_runtime_unavailable",
     "push": "atomic_push_base_binding_unavailable",
     "pr-create": "atomic_pr_create_binding_unavailable",
@@ -2654,12 +3185,11 @@ FIXED_EARLY_BLOCKED_OPERATIONS = {
 
 
 # Currently artifact-producing operations only: pr-grind and commit (plus the delivery_status
-# subphase). See FIXED_EARLY_BLOCKED_OPERATIONS for the rest. execute verify is absent for the
-# same reason: main() fixed-blocks it on verifier_dispatch_blocker() before run identity,
-# delivery status or artifact handling, so no verify artifact bytes reach production. The
-# non-installed test harness patches that blocker out, but its verify files are harness state,
-# never production-valid durable artifacts. execute pr-grind without --pr is absent for a
-# narrower reason: it sets pr_required but never sets write_run_artifact.
+# subphase). See FIXED_EARLY_BLOCKED_OPERATIONS for the rest. execute verify is fixed-blocked
+# before run identity, delivery status or artifact handling, so no verify artifact bytes reach
+# production. The non-installed test harness retains a verifier executor solely for fixture tests;
+# installed production contains no verifier command executor. execute pr-grind without --pr is
+# absent for a narrower reason: it sets pr_required but never sets write_run_artifact.
 #
 # Both artifact-write-failure fallbacks are absent for a third reason: main() calls
 # write_artifact exactly once, and each fallback only rewrites the dict main() then prints
@@ -2682,6 +3212,8 @@ ARTIFACT_OUTCOME_CONTRACT = {
         "commit": {
             (True, "committed", "committed"),
             *((False, "committed", reason) for reason in _COMMIT_RECONCILIATION_REASONS),
+            (False, "commit_outcome_unknown", _COMMIT_OUTCOME_UNKNOWN_REASON),
+            (False, "commit_outcome_unknown_release_failed", _COMMIT_OUTCOME_UNKNOWN_RELEASE_REASON),
             (False, "committed_release_failed", "finalization_lock_release_failed"),
             *_blocked_artifact_outcomes(_COMMON_MUTATION_FAILURE_REASONS | _LITMUS_MUTATION_FAILURE_REASONS | _COMMIT_FAILURE_REASONS),
         },
@@ -3019,25 +3551,114 @@ def write_artifact(result: dict[str, Any]) -> None:
         os.close(dir_fd)
 
 
+def _digest_artifact_fd(fd: int, size: int) -> str:
+    """sha256 of exactly `size` bytes read back through `fd`, never through the name."""
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        # pread: neither moves the offset nor rides it, so the digest cannot race the writer.
+        chunk = os.pread(fd, min(1 << 16, size - offset), offset)
+        if not chunk:
+            raise OSError("artifact_truncated")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
 def write_artifact_bytes(payload: bytes, dir_fd: int, tmp_name: str, name: str) -> None:
-    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    """Publish `payload` at `name` atomically, having proved each claim it rests on.
+
+    An INDEPENDENT writer, not a wrapper. `write_private_authenticated` creates its final name with
+    O_EXCL and never renames, because nothing may already hold the name it is about to execute; a
+    result artifact is the opposite — it must REPLACE what the previous run left. So the contract is
+    restated here rather than delegated, and the durability tests enumerate this function by name.
+
+    `handle.write` used to be the whole of the proof. `io.BufferedWriter` does loop over short
+    writes, so that one claim was accidentally true — but it is also why an `os.write`-shaped
+    enumeration could not see this function at all, and it left the rest unmade. Each is now its own
+    step: the write loop terminates on a zero rather than spinning; the closing re-read separates
+    "we wrote the authenticated bytes" from "the file holds them"; the destination reopen checks the
+    second resolution of `name` that the rename performs; the parent fsync makes the directory entry
+    the rename created as durable as the bytes it points at; and the unlink proves it is removing
+    the inode this call created, not whatever took the name in the meantime.
+    """
+    # O_RDWR, not O_WRONLY: the closing digest reads back through THIS descriptor, and a write-only
+    # one cannot be read (EBADF). Reopening the name to read it would resolve the name a second time.
+    fd = os.open(tmp_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
     try:
+        # The inode THIS call created. Every unlink below deletes only this one, never a replacement.
+        created = os.fstat(fd)
         try:
-            handle = os.fdopen(fd, "wb")
-        except OSError:
-            os.close(fd)
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    # Consuming the result only as a slice index makes a 0 an infinite loop, so this
+                    # keeps the loop terminating as well as honest.
+                    raise OSError("artifact_short_write")
+                view = view[written:]
+            os.fsync(fd)
+            st = os.fstat(fd)
+            if (
+                not stat.S_ISREG(st.st_mode)
+                or st.st_uid != os.geteuid()
+                or st.st_nlink != 1
+                or st.st_size != len(payload)
+                or stat.S_IMODE(st.st_mode) != 0o600
+            ):
+                raise OSError("artifact_metadata_invalid")
+            if _digest_artifact_fd(fd, st.st_size) != hashlib.sha256(payload).hexdigest():
+                raise OSError("artifact_integrity_failed")
+            if not _names_created_inode(dir_fd, tmp_name, created):
+                # The digest proved OUR inode is intact; this proves `tmp_name` still reaches it, so
+                # the rename below publishes our bytes rather than someone else's.
+                raise OSError("artifact_integrity_failed")
+        except BaseException:
+            # A half-written artifact must not be left for the next run to read. But by now the name
+            # may belong to something else, and deleting THAT is a second bug wearing the first
+            # one's cleanup.
+            if _names_created_inode(dir_fd, tmp_name, created):
+                try:
+                    os.unlink(tmp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
             raise
-        with handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+    finally:
+        os.close(fd)
+
+    try:
         os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
-        try:
-            os.unlink(tmp_name, dir_fd=dir_fd)
-        except OSError:
-            pass
+        if _names_created_inode(dir_fd, tmp_name, created):
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
         raise
+
+    # The rename resolved `name` a second time, and a second resolution is a second chance to land
+    # somewhere else. Reopen it, no-follow, and prove it reaches the inode the digest just cleared —
+    # then re-digest, because same-inode is not same-bytes to anyone who can write the file.
+    published = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | _O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        landed = os.fstat(published)
+        if (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
+            raise OSError("artifact_replaced_after_publish")
+        if (
+            not stat.S_ISREG(landed.st_mode)
+            or landed.st_uid != os.geteuid()
+            or landed.st_nlink != 1
+            or landed.st_size != len(payload)
+            or stat.S_IMODE(landed.st_mode) != 0o600
+        ):
+            raise OSError("artifact_metadata_invalid")
+        if _digest_artifact_fd(published, landed.st_size) != hashlib.sha256(payload).hexdigest():
+            raise OSError("artifact_replaced_after_publish")
+    finally:
+        os.close(published)
+    # A rename is durable only once the DIRECTORY entry is: without this, a crash can leave the
+    # parent pointing at the temp name, or at nothing, with the file itself perfectly intact.
+    os.fsync(dir_fd)
 
 
 def confirm_artifact_directory_identity(dir_fd: int, name: str) -> None:
@@ -3175,65 +3796,201 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 
 
-_TRUSTED_EXECUTABLE_RUNTIME: dict[str, tuple[Any, Path, Path, str]] = {}
+# =============================================================================================
+# Fixed root-owned source execution contract.
+#
+# What this replaces, and why the replacement is different in kind rather than degree:
+#
+# r26..r34 executed a *private copy* — read the pinned bytes, write them into a 0700 temp dir, exec
+# the copy. That never removed the substitutable name; it relocated it into a directory the
+# adversary still owns. macOS has no `fexecve` and refuses to exec `/dev/fd/N`, so the kernel must
+# re-resolve a *pathname* at exec time. Any pathname we can write is one a same-UID adversary can
+# rename between our last check and that re-resolution. r34 demonstrated it with a two-rename ABA:
+# rename ours aside, move theirs in — `st_nlink` stays 1 and every descriptor-visible field still
+# matches. No amount of re-checking a writable path closes that; the check and the exec cannot be
+# made atomic.
+#
+# So the source moves somewhere the adversary has no write access at all: a fixed path whose every
+# component, root to leaf, is root-owned and not group/world writable. The validation below is not
+# trying to win the race — it proves there is no race, because a same-UID non-root adversary cannot
+# rename, replace, or add a name anywhere along the path. `test_trusted_root_owned_execution.py`
+# asserts that against the kernel rather than restating it here.
+#
+# Two platform facts this has to encode rather than assume away:
+#
+#   * /usr/bin/git and /usr/bin/python3 are THE SAME INODE — one 78-way-hardlinked CommandLineTools
+#     multi-call shim that dispatches on argv[0]. `st_nlink == 1` is therefore not a property of a
+#     trusted system source, and requiring it would fail-close git forever. It also buys nothing
+#     here: an adversary who cannot write the directory cannot add a name to it. SF_RESTRICTED (SIP,
+#     which denies modification even to root) is required of those sources instead — strictly
+#     stronger than the nlink check it replaces.
+#
+#   * that shim re-dispatches through `xcrun`, which honours $DEVELOPER_DIR. With it set,
+#     /usr/bin/git execs $DEVELOPER_DIR/usr/bin/xcrun: attacker code out of a user-writable
+#     directory, from a root-owned SIP-restricted digest-matching binary. Verified with a planted
+#     xcrun (exit 42). No ancestry walk can see this, so the contract also owns the child
+#     environment — see ENV_DENIED_FOR_TRUSTED_DISPATCH. Today every env builder here is an
+#     allowlist and none lists DEVELOPER_DIR, so the hole is latent rather than live; the denial is
+#     explicit so that stays true by construction instead of by coincidence.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+# Sources that are the CommandLineTools multi-call shim: nlink > 1 by design, SIP-restricted.
+SHIM_BACKED_SOURCES = frozenset({"git", "python3"})
+# Never allowed into a child that runs a trusted source, no matter who asks. DEVELOPER_DIR is the
+# live redirection primitive; the rest are the same idea through xcrun's other knobs.
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+# gh is the largest of these by an order of magnitude; the bound is a memory guard, not a policy.
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> RuntimeError:
+    """Machine-readable refusal.
+
+    gh gets its own top-level reason because a missing credential-bearing binary is an operational
+    state an administrator resolves by provisioning /usr/local/bin/gh, not an integrity failure to
+    debug. Callers route on it; keep it exact.
+    """
+    if reason == "unavailable" and name == "gh":
+        code = "trusted_root_owned_gh_unavailable"
+    else:
+        code = f"trusted_root_owned_source_{reason}:{name}"
+    return RuntimeError(code if detail is None else f"{code}:{detail}")
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd is returned rather than the path because the leaf must be opened *relative to the
+    directory we just validated*. Re-opening the leaf by full pathname would re-traverse every
+    component from `/` again, handing back the TOCTOU this walk exists to remove.
+    """
+    try:
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                # O_NOFOLLOW is what refuses a symlinked component: no traversal, no surprise.
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        # nlink is waived for the shim (it is 78 by design); SIP replaces it, and is stronger.
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    """Everything a substitution would have to forge, read from the descriptor we will digest."""
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Prove `path` is a root-owned, non-writable, digest-pinned source, and return it unchanged.
+
+    Pure seam: production callers reach this only through trusted_executable_path(), which supplies
+    the path from a frozen table. Tests pass harmless already-root-owned system binaries here rather
+    than production accepting an alternate source.
+    """
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            # ELOOP is O_NOFOLLOW refusing a symlink leaf — a distinct, reportable condition from
+            # the file simply not being there, and the one an attacker would author.
+            if exc.errno == errno.ELOOP:
+                raise _trusted_source_refusal(name, "metadata_invalid", "symlink") from exc
+            raise _trusted_source_refusal(name, "unavailable", type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            # Closing revalidation: the descriptor must still be the inode we metadata-checked...
+            if _identity(os.fstat(fd)) != _identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            # ...and the *name* must still resolve to that inode, since the name is what execs.
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
 
 
 def trusted_executable_path(name: str) -> Path:
-    source = {"git": TRUSTED_GIT, "gh": TRUSTED_GH, "jq": TRUSTED_JQ}.get(name)
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
     if source is None:
-        raise ValueError(f"unsupported trusted executable:{name}")
-    expected_digest = TRUSTED_EXECUTABLE_DIGESTS[name]
-    cached = _TRUSTED_EXECUTABLE_RUNTIME.get(name)
-    if cached is not None:
-        _guard, private, cached_source, cached_digest = cached
-        if cached_source == source and cached_digest == expected_digest:
-            try:
-                mode = stat.S_IMODE(private.lstat().st_mode)
-                digest = hashlib.sha256(private.read_bytes()).hexdigest()
-            except OSError as exc:
-                raise RuntimeError(f"trusted_runtime_executable_unavailable:{name}:{type(exc).__name__}") from exc
-            if private.is_symlink() or not private.is_file() or mode != 0o500 or digest != expected_digest:
-                raise RuntimeError(f"trusted_runtime_executable_integrity_failed:{name}")
-            return private
-        cached[0].cleanup()
-        _TRUSTED_EXECUTABLE_RUNTIME.pop(name, None)
-    try:
-        content = source.read_bytes()
-    except OSError as exc:
-        raise RuntimeError(f"trusted_executable_unavailable:{name}:{type(exc).__name__}") from exc
-    if hashlib.sha256(content).hexdigest() != expected_digest:
-        raise RuntimeError(f"trusted_executable_integrity_failed:{name}")
-    guard = tempfile.TemporaryDirectory(prefix=f"hermes-delivery-{name}-runtime-")
-    runtime_root = Path(guard.name)
-    runtime_root.chmod(0o700)
-    private = runtime_root / name
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(private, flags, 0o500)
-        try:
-            view = memoryview(content)
-            while view:
-                written = os.write(fd, view)
-                if written <= 0:
-                    raise OSError("short trusted executable write")
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        private.chmod(0o500)
-    except OSError as exc:
-        guard.cleanup()
-        raise RuntimeError(f"trusted_runtime_executable_materialization_failed:{name}:{type(exc).__name__}") from exc
-    _TRUSTED_EXECUTABLE_RUNTIME[name] = (guard, private, source, expected_digest)
-    return private
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
 
 
 def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str] | None = None, *, allow_gh_repo: bool = False, input_text: str | None = None, capture_stdout: bool = False) -> dict[str, Any]:
     started = time.time()
     effective_argv = list(argv)
-    trusted_name = Path(effective_argv[0]).name if effective_argv and Path(effective_argv[0]).name in {"git", "gh"} else None
+    trusted_name = Path(effective_argv[0]).name if effective_argv and Path(effective_argv[0]).name in TRUSTED_EXECUTABLE_SOURCES else None
     try:
         if trusted_name is not None:
             effective_argv[0] = str(trusted_executable_path(trusted_name))
@@ -3250,58 +4007,58 @@ def run_safe(argv: list[str], cwd: Path, timeout: int = 300, env: dict[str, str]
             effective_argv,
             cwd=str(cwd),
             shell=False,
-            text=True,
-            stdin=subprocess.PIPE if input_text is not None else None,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=effective_env,
             start_new_session=True,
         )
-        try:
-            stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
-            result = {
-                "cmd": argv,
-                "returncode": proc.returncode,
-                "ok": proc.returncode == 0,
-                "stdout_tail": tail(stdout),
-                "stderr_tail": tail(stderr),
-                "elapsed_seconds": round(time.time() - started, 3),
-            }
-            if capture_stdout:
-                if len(stdout) > 2_000_000:
-                    result.update({"ok": False, "returncode": 1, "error": "stdout_capture_limit_exceeded"})
-                else:
-                    result["stdout"] = stdout
-            return result
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                stdout, stderr = proc.communicate()
-            else:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            return {
-                "cmd": argv,
-                "returncode": 124,
-                "ok": False,
-                "stdout_tail": tail(stdout),
-                "stderr_tail": tail(stderr),
-                "elapsed_seconds": round(time.time() - started, 3),
-                "error": "timeout",
-            }
     except OSError as e:
         return {"cmd": argv, "returncode": 127, "ok": False, "stdout_tail": "", "stderr_tail": tail(str(e)), "error": type(e).__name__}
+
+    # The 2MB `capture_stdout` check below used to be the only bound, and it ran AFTER
+    # communicate() had already read the whole stream — a bound on retention, not on the read.
+    # `git archive --format=tar` and a full worktree diff both come through here.
+    captured = _bounded_communicate(
+        proc, argv, timeout, input_text.encode() if input_text is not None else None,
+        # A tail-only caller needs 64KB; a caller that parses the whole stdout (a `gh api` JSON
+        # body) needs the payload bound. Either way the number is ours and the pipe enforces it.
+        MAX_PAYLOAD_BYTES if capture_stdout else MAX_CAPTURED_BYTES,
+    )
+    stdout, stderr = captured.stdout, captured.stderr
+
+    if captured.timed_out:
+        return {
+            "cmd": argv,
+            "returncode": 124,
+            "ok": False,
+            "stdout_tail": tail(stdout),
+            "stderr_tail": tail(stderr),
+            "elapsed_seconds": round(time.time() - started, 3),
+            "error": "timeout",
+        }
+    if captured.overflowed:
+        # The bounded pipe layer already killed and reaped the process group before returning.
+        return {
+            "cmd": argv,
+            "returncode": 1,
+            "ok": False,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "elapsed_seconds": round(time.time() - started, 3),
+            "error": "stdout_capture_limit_exceeded",
+        }
+    result = {
+        "cmd": argv,
+        "returncode": proc.returncode,
+        "ok": proc.returncode == 0,
+        "stdout_tail": tail(stdout),
+        "stderr_tail": tail(stderr),
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
+    if capture_stdout:
+        result["stdout"] = stdout
+    return result
 
 
 def repo_root_from_status(delivery_status: dict[str, Any]) -> Path | None:
@@ -3310,40 +4067,245 @@ def repo_root_from_status(delivery_status: dict[str, Any]) -> Path | None:
     return Path(root).expanduser().resolve() if isinstance(root, str) and root else None
 
 
-def git_output(repo: Path, *args: str) -> tuple[int, str, str]:
-    # Three distinct unusable-git channels, never collapsed: 126 = the trusted git bytes were
-    # rejected, 124 = git ran but hung, 127 = git could not be launched. Reporting drift as a
-    # timeout tells an operator to retry a command that can never succeed.
-    try:
-        git_bin = trusted_executable_path("git")
-    except RuntimeError as exc:
-        return 126, "", f"trusted_runtime_executable_integrity_failed:git:{exc}"
-    try:
-        git_args = list(args)
-        if git_args and git_args[0] == "diff":
-            git_args[1:1] = ["--no-ext-diff", "--no-textconv"]
-        # text=False: `git ... -z` emits raw pathname bytes, which need not be valid UTF-8.
-        # Decoding them here with errors="replace" keeps a hostile filename from raising
-        # inside the helper instead of returning a value its callers can act on.
-        cp = subprocess.run([str(git_bin), "-C", str(repo), "-c", "core.fsmonitor=false", *git_args], text=False, capture_output=True, check=False, env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}), timeout=30)
-    except subprocess.TimeoutExpired:
-        return 124, "", "git command timed out"
-    except OSError as e:
-        return 127, "", str(e)
-    def decode(raw: str | bytes | None) -> str:
-        if isinstance(raw, bytes):
-            return raw.decode("utf-8", errors="replace").rstrip("\n")
-        return (raw or "").rstrip("\n")
+def git_observation_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    ambient = os.environ if source is None else source
+    env = {
+        key: value
+        for key, value in ambient.items()
+        if key in GIT_OBSERVATION_ENV_ALLOWLIST or key.startswith("LC_")
+    }
+    env.update({
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "",
+    })
+    return env
 
-    return cp.returncode, decode(cp.stdout), decode(cp.stderr)
+
+def git_observation_args_are_read_only(args: tuple[str, ...]) -> bool:
+    """Accept only the read-only Git command shapes used by production callers.
+
+    The first token is always the real verb: global options and aliases are deliberately not
+    parsed.  New call shapes must be reviewed and added here rather than inheriting a generic Git
+    execution primitive.
+    """
+    if not args or not args[0] or args[0].startswith("-"):
+        return False
+    verb = args[0]
+    tail_args = args[1:]
+
+    def inert(value: str) -> bool:
+        return bool(value) and not value.startswith("-") and not any(char in value for char in "\x00\r\n")
+
+    if verb == "symbolic-ref":
+        return len(args) == 2 and args[1].startswith("refs/remotes/") and args[1].endswith("/HEAD")
+    if verb == "remote":
+        return len(args) == 1
+    if verb == "branch":
+        return args == ("branch", "--show-current")
+    if verb == "config":
+        if len(args) == 2:
+            return inert(args[1])
+        return len(args) == 3 and args[1] in {"--get", "--get-all", "--get-regexp"} and inert(args[2])
+    if verb == "log":
+        return len(args) == 4 and args[1:3] == ("-1", "--format=%B") and inert(args[3])
+    if verb == "rev-list":
+        return len(args) == 3 and args[1] == "--count" and inert(args[2]) and args[2].endswith("..HEAD")
+    if verb == "ls-tree":
+        return (
+            len(args) >= 6
+            and args[1:4] == ("-r", "-z", "--name-only")
+            and inert(args[4])
+            and args[5] == "--"
+            and all(pathspec.startswith(":(literal)") for pathspec in args[6:])
+        )
+    if verb == "rev-parse":
+        if args == ("rev-parse", "HEAD"):
+            return True
+        if args == ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"):
+            return True
+        return len(args) == 3 and args[1] == "--verify" and inert(args[2]) and args[2].endswith("^{commit}")
+    if verb == "status":
+        return all(not arg.startswith("--output") for arg in tail_args)
+    if verb == "diff":
+        refused = {"--ext-diff", "--textconv"}
+        return not any(arg in refused or arg == "--output" or arg.startswith("--output=") for arg in tail_args)
+    return False
+
+
+def git_observation_raw(repo: Path, *args: str) -> tuple[int, bytes, str]:
+    try:
+        if not git_observation_args_are_read_only(args):
+            return 126, b"", "git_observation_command_refused"
+        verb = args[0]
+        safe_args = list(args)
+        if verb == "status":
+            safe_args = [
+                arg for arg in safe_args
+                if not arg.startswith("--untracked-files") and not arg.startswith("--ignore-submodules")
+            ]
+            safe_args[1:1] = ["--untracked-files=all", "--ignore-submodules=none"]
+        if verb == "diff":
+            for flag in reversed(("--no-ext-diff", "--no-textconv")):
+                if flag not in safe_args:
+                    safe_args.insert(1, flag)
+        if verb == "config" and "--no-includes" not in safe_args:
+            safe_args.insert(1, "--no-includes")
+        config: list[str] = []
+        for item in GIT_OBSERVATION_INERT_CONFIG:
+            config.extend(("-c", item))
+        argv = [
+            str(trusted_executable_path("sandbox-exec")), "-p", GIT_OBSERVATION_SANDBOX_PROFILE,
+            str(trusted_executable_path("git-real")), "--no-pager", *config,
+            "-C", str(repo), *safe_args,
+        ]
+    except RuntimeError as exc:
+        return 126, b"", f"trusted_runtime_executable_integrity_failed:git_observation:{exc}"
+    try:
+        completed = _bounded_run(
+            argv,
+            env=git_observation_env(),
+            timeout=30,
+            text=False,
+            limit=MAX_PAYLOAD_BYTES,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, b"", "git command timed out"
+    except RuntimeError as exc:
+        if str(exc) == "child_output_too_large":
+            return 125, b"", "git_output_too_large"
+        return 126, b"", f"git_observation_refused:{exc}"
+    except OSError as exc:
+        return 127, b"", str(exc)
+    if completed.stderr:
+        return 126, b"", "git_observation_stderr"
+    return completed.returncode, completed.stdout, ""
+
+
+def git_observation_effect(repo: Path, *args: str) -> dict[str, Any]:
+    started = time.time()
+    rc, raw, stderr = git_observation_raw(repo, *args)
+    stdout = raw.decode("utf-8", errors="replace").rstrip("\n")
+    return {
+        "cmd": ["git", *args],
+        "returncode": rc,
+        "ok": rc == 0,
+        "stdout_tail": tail(stdout),
+        "stderr_tail": tail(stderr),
+        "elapsed_seconds": round(time.time() - started, 3),
+    }
+
+
+def git_raw(repo: Path, *args: str) -> tuple[int, bytes, str]:
+    # Disabled by construction.  All Git reads go through git_observation_raw; fixed mutation
+    # commands use run_safe.  Keeping this compatibility surface fail-closed prevents global
+    # options, aliases, or a future caller from rebuilding an unsandboxed observation path.
+    del repo, args
+    return 126, b"", "git_raw_disabled"
+
+
+def git_output(repo: Path, *args: str) -> tuple[int, str, str]:
+    rc, raw, stderr = git_observation_raw(repo, *args)
+    return rc, raw.decode("utf-8", errors="replace").rstrip("\n"), stderr
+
+
+# Enumerated from the CONSUMER, not restated by hand — the same derivation pr-grind-check uses for
+# its check rows: every character `str.splitlines()` treats as a boundary can fabricate a status
+# record, because that is the split these paths used to go through.
+#
+# Do not be reassured by git's own quoting. git quotes C0 controls (LF, CR, VT, FF) in a pathname
+# even under `core.quotePath=false`, but it does NOT quote the non-ASCII separators once that
+# config is off — and `splitlines()` splits on NEL (U+0085), LS (U+2028) and PS (U+2029) just the
+# same. A repo-local `.git/config` setting `core.quotePath=false` plus a directory named
+# `evil<U+2028> M .claude` therefore fabricated a ` M .claude/...` marker record out of one
+# untracked file, which `marker_path_allowed()` then accepted (it strips the stray quote the split
+# leaves behind). Verified against real git before this fix, not inferred.
+#
+# So the framing is changed rather than the config pinned: `--porcelain=v1 -z` frames every record
+# with NUL and cannot be reconfigured into ambiguity by the repo under inspection.
+STATUS_PATH_DELIMITERS = frozenset(
+    {"\t"}
+    | {chr(code) for code in range(0x11000) if len(f"a{chr(code)}b".splitlines()) > 1}
+    | {chr(code) for code in range(0x00, 0x20)}
+    | {chr(0x7F)}
+    | {chr(code) for code in range(0x80, 0xA0)}
+)
+
+
+def escape_status_path(path: str) -> str:
+    """Render a pathname safe to interpolate into an entry string a consumer may re-split.
+
+    The entries below travel into envelopes and across the delivery-status process boundary as
+    plain strings. A path that still carries a raw separator would fabricate a record for the NEXT
+    parser even though NUL framing protected this one, so the boundary characters are escaped once,
+    here, at the point the bytes become a string.
+    """
+    return "".join(f"\\x{ord(char):02x}" if char in STATUS_PATH_DELIMITERS else char for char in path)
+
+
+def parse_porcelain_z(raw: bytes) -> list[tuple[str, list[str]]]:
+    """NUL-framed `status --porcelain=v1 -z` → [(xy, [paths])].
+
+    `-z` never quotes, so nothing is unquoted here; a rename/copy record spends a second NUL field
+    on its source path, which is the only reason the fields cannot be walked one-to-one.
+    """
+    fields = [field for field in raw.split(b"\0")]
+    if fields and fields[-1] == b"":
+        fields.pop()
+    records: list[tuple[str, list[str]]] = []
+    index = 0
+    while index < len(fields):
+        field = fields[index].decode("utf-8", errors="replace")
+        index += 1
+        if len(field) < 4 or field[2] != " ":
+            continue
+        xy, destination = field[:2], field[3:]
+        if xy[0:1] in {"R", "C"} and index < len(fields):
+            source = fields[index].decode("utf-8", errors="replace")
+            index += 1
+            records.append((xy, [source, destination]))
+            continue
+        records.append((xy, [destination]))
+    return records
+
+
+def git_status_records(repo: Path, *extra: str) -> tuple[int, list[tuple[str, list[str]]], str]:
+    rc, raw, err = git_observation_raw(repo, "status", "--porcelain=v1", "-z", *extra)
+    if rc != 0:
+        return rc, [], err
+    return rc, parse_porcelain_z(raw), err
+
+
+def status_record_entry(xy: str, paths: list[str]) -> str:
+    """The porcelain-shaped display string for a record, with every path boundary-escaped."""
+    return f"{xy} " + " -> ".join(escape_status_path(path) for path in paths)
+
+
+def status_records_text(records: list[tuple[str, list[str]]]) -> str:
+    return "\n".join(status_record_entry(xy, paths) for xy, paths in records)
 
 
 def safe_git_env(extra: dict[str, str] | None = None, *, allow_gh_repo: bool = False) -> dict[str, str]:
     allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "SSH_AUTH_SOCK"}
     env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
-    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+    # /opt/homebrew/bin is gone from here deliberately. This PATH is the one a credential-bearing
+    # git/gh child searches, and git resolves its own subcommands, credential helpers and ssh
+    # through it. /usr/bin winning the race for names that exist in both is not a defence: any name
+    # /usr/bin lacks — git-credential-*, for one — resolves straight into a uid=501 drwxrwxr-x
+    # directory. /usr/local/bin stays: root-owned 0755, and where the trusted gh lives.
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
     if extra:
         for key, value in extra.items():
+            # ENV_DENIED_FOR_TRUSTED_DISPATCH is enforced on `extra` too: os.environ can't reach
+            # DEVELOPER_DIR (it isn't in `allowed`), but a caller passing it here would have
+            # redirected the CLT shim straight out of the ancestry walk's blind spot.
+            if key in ENV_DENIED_FOR_TRUSTED_DISPATCH:
+                continue
             if key in {"BASH_ENV", "ENV", "ZDOTDIR", "PYTHONPATH", "PYTHONHOME", "GH_HOST"}:
                 continue
             if key == "GH_REPO":
@@ -3380,10 +4342,9 @@ def live_remote_head(repo: Path, branch: str) -> tuple[str | None, str | None]:
     if remote_rc != 0 or merge_rc != 0 or not remote or not merge_ref:
         return None, "upstream_config_missing"
     try:
-        cp = subprocess.run(
+        cp = _bounded_run(
             [str(trusted_executable_path("git")), "-C", str(repo), "ls-remote", "--heads", remote, merge_ref],
             text=True,
-            capture_output=True,
             check=False,
             timeout=30,
             env=safe_git_env(),
@@ -3405,13 +4366,13 @@ def live_remote_head(repo: Path, branch: str) -> tuple[str | None, str | None]:
 
 
 def repo_clean(repo: Path) -> bool:
-    rc, out, _err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    return rc == 0 and not out
+    rc, records, _err = git_status_records(repo, "--untracked-files=all")
+    return rc == 0 and not records
 
 
 def repo_status_lines(repo: Path) -> tuple[int, list[str]]:
-    rc, out, _err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    return rc, out.splitlines() if out else []
+    rc, records, _err = git_status_records(repo, "--untracked-files=all")
+    return rc, [status_record_entry(xy, paths) for xy, paths in records]
 
 
 BUSDRIVER_MARKER_FILES = {
@@ -3538,11 +4499,16 @@ def untracked_fingerprint_valid(fingerprint: str) -> bool:
     )
 
 
-def marker_evidence_snapshot_from_status(repo: Path, status_text: str, allowed_paths: set[str]) -> dict[str, dict[str, str]]:
+def marker_evidence_snapshot_from_status(repo: Path, records: list[tuple[str, list[str]]], allowed_paths: set[str]) -> dict[str, dict[str, str]]:
+    """Marker evidence from NUL-framed records, never from a re-split of status text.
+
+    Records, not text: a snapshot keyed off `splitlines()` accepted a marker record that no file
+    produced (see STATUS_PATH_DELIMITERS), which is precisely the evidence this snapshot exists to
+    make tamper-evident.
+    """
     snapshot: dict[str, dict[str, str]] = {}
-    for entry in status_text.splitlines():
-        paths = [path.rstrip("/") for path in porcelain_entry_paths(entry)]
-        xy = entry[:2] if len(entry) >= 2 else ""
+    for xy, record_paths in records:
+        paths = [path.rstrip("/") for path in record_paths]
         if len(paths) == 1 and paths[0] in allowed_paths and marker_dirty_status_allowed(xy):
             fingerprint = marker_file_fingerprint(repo, paths[0])
             if marker_fingerprint_valid(fingerprint):
@@ -3569,32 +4535,18 @@ def repo_blocking_dirty_entries(repo: Path, state_dir_names: tuple[str, ...] | l
 
 
 def staged_changes_status(repo: Path) -> tuple[bool, str | None]:
-    try:
-        cp = subprocess.run(
-            [
-                str(trusted_executable_path("git")),
-                "-C",
-                str(repo),
-                "-c",
-                f"core.attributesFile={os.devnull}",
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-color",
-                "--cached",
-                "--quiet",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError):
-        return False, "staged_diff_status_failed"
-    if cp.returncode == 1:
+    rc, _raw, _error = git_observation_raw(
+        repo,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--cached",
+        "--quiet",
+    )
+    if rc == 1:
         return True, None
-    if cp.returncode == 0:
+    if rc == 0:
         return False, None
     return False, "staged_diff_status_failed"
 
@@ -3639,41 +4591,26 @@ def delivery_status_unstaged_or_untracked_entries(delivery_status: dict[str, Any
 
 
 def decode_porcelain_path(path: str) -> str:
-    value = path.rstrip("/")
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        try:
-            decoded = ast.literal_eval(value)
-            if isinstance(decoded, str):
-                try:
-                    return decoded.encode("latin-1").decode("utf-8").rstrip("/")
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    return decoded.rstrip("/")
-        except (SyntaxError, ValueError):
-            pass
-        return value.strip('"').rstrip("/")
-    return value
+    """A `-z` path is already the pathname. The only thing to drop is the untracked-dir slash.
+
+    There is deliberately no un-quoting here. Quoting is what `--porcelain=v1` does WITHOUT `-z`;
+    both status producers now pass `-z`, which frames with NUL and never quotes. So a leading and
+    trailing `"` no longer means "git quoted this" — it means the file is literally named with
+    quote characters, and decoding them rewrites a hostile path into some other path. r26 found
+    the reachable case: a directory named `".claude` holding `freeze.local"` decodes straight onto
+    the allow-listed marker path and stops blocking_dirty_entries from blocking it.
+    """
+    return path.rstrip("/")
 
 
 def split_porcelain_rename_payload(payload: str) -> tuple[str, str] | None:
-    if payload.startswith('"'):
-        escaped = False
-        for index in range(1, len(payload)):
-            char = payload[index]
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\":
-                escaped = True
-                continue
-            if char == '"':
-                rest = payload[index + 1 :].lstrip()
-                if rest.startswith("-> "):
-                    return payload[: index + 1], rest[3:]
-                return None
-    quoted_dest_delimiter = ' -> "'
-    if payload.endswith('"') and quoted_dest_delimiter in payload:
-        split_at = payload.rfind(quoted_dest_delimiter)
-        return payload[:split_at], payload[split_at + 4 :]
+    """Split `old -> new`, the shape status_record_entry emits for a rename/copy.
+
+    Quote-aware splitting went with the un-quoting above, for the same reason: `-z` producers emit
+    no quotes. A pathname that itself contains ` -> ` is ambiguous in this display form and splits
+    at the last one — which yields a path matching no allowlist entry, so it blocks. Wrong name in
+    the message, right decision.
+    """
     if " -> " in payload:
         return payload.rsplit(" -> ", 1)
     return None
@@ -3711,26 +4648,19 @@ def staged_marker_entries(repo: Path, state_dir_names: tuple[str, ...] | list[st
     allowed_paths = allowed_marker_paths(state_dir_names)
     if not allowed_paths:
         return []
-    try:
-        cp = subprocess.run(
-            [str(trusted_executable_path("git")), "-C", str(repo), "-c", "diff.renames=false", "diff", "--cached", "--no-renames", "--name-only", "-z"],
-            capture_output=True,
-            check=False,
-            timeout=30,
-            env=safe_git_mutation_env(),
-        )
-    except (OSError, subprocess.TimeoutExpired, RuntimeError):
+    rc, raw, _stderr = git_observation_raw(
+        repo, "diff", "--cached", "--no-renames", "--name-only", "-z",
+    )
+    if rc != 0:
         return ["<staged marker check failed>"]
-    if cp.returncode != 0:
-        return ["<staged marker check failed>"]
-    staged_paths = [part.decode("utf-8", errors="replace").rstrip("/") for part in cp.stdout.split(b"\0") if part]
+    staged_paths = [part.decode("utf-8", errors="replace").rstrip("/") for part in raw.split(b"\0") if part]
     return [path for path in staged_paths if path in allowed_paths]
 
 
-def run_lock_helper(cmd: list[str], timeout: int = 30) -> tuple[dict[str, Any], dict[str, Any]]:
+def run_lock_helper(cmd: list[str], program: bytes, timeout: int = 30) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.time()
     try:
-        cp = subprocess.run(cmd, cwd=str(ROOT), shell=False, text=True, capture_output=True, check=False, timeout=timeout, env=safe_git_env())
+        cp = _bounded_run(cmd, input=program, cwd=str(ROOT), shell=False, text=False, check=False, timeout=timeout, env=safe_git_env())
         result = {
             "cmd": cmd,
             "returncode": cp.returncode,
@@ -3740,8 +4670,8 @@ def run_lock_helper(cmd: list[str], timeout: int = 30) -> tuple[dict[str, Any], 
             "elapsed_seconds": round(time.time() - started, 3),
         }
         try:
-            payload = json.loads(cp.stdout or "{}")
-        except json.JSONDecodeError:
+            payload = json.loads(cp.stdout or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
             payload = {"parse_error": "invalid_json"}
         return payload if isinstance(payload, dict) else {"parse_error": "non_object_json"}, result
     except subprocess.TimeoutExpired as e:
@@ -3755,64 +4685,172 @@ def run_lock_helper(cmd: list[str], timeout: int = 30) -> tuple[dict[str, Any], 
             "error": "timeout",
         }
         return {"parse_error": "timeout"}, result
-    except OSError as e:
+    except (OSError, RuntimeError) as e:
         result = {"cmd": cmd, "returncode": 127, "ok": False, "stdout_tail": "", "stderr_tail": tail(str(e)), "error": type(e).__name__}
         return {"parse_error": type(e).__name__}, result
 
 
-def materialize_trusted_lock() -> Path:
-    lock_bytes = LOCK_SOURCE.read_bytes()
-    if hashlib.sha256(lock_bytes).hexdigest() != TRUSTED_LOCK_SHA256:
+_RETAINED_LOCK_BYTES: bytes | None = None
+LOCK_SOURCE_MAX_BYTES = 1 << 20
+
+
+def _stat_identity(st: os.stat_result) -> tuple[int, ...]:
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def authenticated_lock_bytes(source: Path) -> bytes:
+    """Read the lock helper once and prove the bytes read are the reviewed bytes.
+
+    Everything here exists because the attacker shares our UID. `commit` and `push` run repository
+    hooks, and a hook is free to unlink and replace any pathname we own — including one inside a
+    0o700 temp directory, whose mode stops other users and not its owner. So a pathname can never
+    be authenticated once and executed later; only bytes already in memory can.
+
+    Identity is therefore pinned to an open fd, not to a name: O_NOFOLLOW refuses a symlinked
+    source, the fstat pair brackets the read so a swap mid-read cannot pass, and the lstat compares
+    the name back to the fd so a source replaced between validation and use is caught rather than
+    silently trusted.
+    """
+    try:
+        fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        # O_NOFOLLOW refuses a symlinked source with ELOOP; report that as the metadata rejection
+        # it is rather than as the source being absent, which is a different operator problem.
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise OSError("trusted_lock_source_metadata_invalid") from exc
+        raise OSError("trusted_lock_source_unavailable") from exc
+    try:
+        pre = os.fstat(fd)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > LOCK_SOURCE_MAX_BYTES:
+                raise OSError("trusted_lock_source_too_large")
+            chunks.append(chunk)
+        post = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if _stat_identity(pre) != _stat_identity(post):
+        raise OSError("trusted_lock_source_mutated_during_read")
+    if (
+        not stat.S_ISREG(pre.st_mode)
+        or pre.st_uid != os.getuid()
+        or pre.st_nlink != 1
+        or stat.S_IMODE(pre.st_mode) & 0o022
+    ):
+        raise OSError("trusted_lock_source_metadata_invalid")
+    link = os.lstat(source)
+    if (link.st_dev, link.st_ino) != (pre.st_dev, pre.st_ino):
+        raise OSError("trusted_lock_source_path_replaced")
+    data = b"".join(chunks)
+    if hashlib.sha256(data).hexdigest() != TRUSTED_LOCK_SHA256:
         raise OSError("trusted_lock_integrity_failed")
-    generation = Path(tempfile.mkdtemp(prefix="hermes-lock-helper-"))
-    trusted = generation / "hermes-busdriver-lock"
-    trusted.write_bytes(lock_bytes)
-    trusted.chmod(0o500)
-    return trusted
+    return data
+
+
+def retained_lock_bytes() -> bytes:
+    """The authenticated helper bytes, read before any untrusted git operation and kept in memory.
+
+    Cached deliberately: acquire happens before the hooks run, release after. Re-reading the source
+    at release would hand the window back to the attacker this retention closes.
+    """
+    global _RETAINED_LOCK_BYTES
+    if _RETAINED_LOCK_BYTES is None:
+        _RETAINED_LOCK_BYTES = authenticated_lock_bytes(LOCK_SOURCE)
+    return _RETAINED_LOCK_BYTES
+
+
+def lock_helper_argv(action: str, repo: Path, *extra: str) -> list[str]:
+    """`-` reads the program from stdin: an fd we wrote, with no pathname to race."""
+    try:
+        python3 = trusted_executable_path("python3")
+    except RuntimeError as exc:
+        raise OSError("trusted_lock_python_unavailable") from exc
+    return [str(python3), "-I", "-", action, "--repo", str(repo), "--operation", "finalization", *extra]
 
 
 def acquire_finalization_lock(repo: Path, state_dir: str | None = None) -> dict[str, Any]:
     try:
-        helper = materialize_trusted_lock()
+        program = retained_lock_bytes()
     except OSError as exc:
         return {"acquired": False, "reason": str(exc)}
-    cmd = [sys.executable, "-I", str(helper), "acquire", "--repo", str(repo), "--operation", "finalization", "--ttl-seconds", str(6 * 60 * 60)]
-    if state_dir:
-        cmd += ["--state-dir", state_dir]
-    payload, result = run_lock_helper(cmd)
+    try:
+        cmd = lock_helper_argv("acquire", repo, "--ttl-seconds", str(6 * 60 * 60))
+        if state_dir:
+            cmd += ["--state-dir", state_dir]
+        payload, result = run_lock_helper(cmd, program)
+    except (OSError, RuntimeError) as exc:
+        return {"acquired": False, "reason": "finalization_lock_helper_unavailable", "error": str(exc)}
     if "parse_error" in payload:
         payload = {"acquired": False, **payload}
-    if payload.get("acquired"):
-        payload["trusted_helper_path"] = str(helper)
-    else:
-        helper.unlink(missing_ok=True)
-        helper.parent.rmdir()
     payload["command"] = result
     return payload
 
 
-def release_finalization_lock(repo: Path, token: str, state_dir: str | None = None, lock_path: str = "", helper_path: str = "") -> dict[str, Any]:
-    if not helper_path or not lock_path:
+def release_finalization_lock(repo: Path, token: str, state_dir: str | None = None, lock_path: str = "") -> dict[str, Any]:
+    """Release the finalization lock. This function must NEVER raise.
+
+    It is called from an unguarded outer `finally`, so an escaping exception does not merely lose
+    the release result — it REPLACES the already-computed result of a commit or push that really
+    happened, before `last_release` and `release_failure_reconciliation()` are ever consulted. The
+    operator is then shown a traceback and no record of the mutation, which is the one outcome
+    worse than a stuck lock. Every failure is therefore returned as a truthful payload the caller
+    reconciles into a `*_release_failed` status.
+
+    r24 guarded only `rmdir()`: `run_lock_helper()` and `helper.unlink()` both sat outside it.
+    r25 then executed a materialized PATHNAME here, which a git hook could replace between acquire
+    and release; the retained bytes it now runs cannot be swapped, and nothing is left to clean up.
+    """
+    if not lock_path:
         return {"released": False, "reason": "lock-identity-missing"}
-    helper = Path(helper_path)
-    cmd = [sys.executable, "-I", str(helper), "release", "--repo", str(repo), "--operation", "finalization", "--token", token, "--lock-path", lock_path]
-    if state_dir:
-        cmd += ["--state-dir", state_dir]
     try:
-        payload, result = run_lock_helper(cmd)
+        program = retained_lock_bytes()
+    except OSError as exc:
+        return {"released": False, "reason": "finalization_lock_release_helper_unavailable", "error": str(exc)}
+    try:
+        cmd = lock_helper_argv("release", repo, "--token", token, "--lock-path", lock_path)
+        if state_dir:
+            cmd += ["--state-dir", state_dir]
+        payload, result = run_lock_helper(cmd, program)
         if "parse_error" in payload:
             payload = {"released": False, **payload}
         payload["command"] = result
-        return payload
-    finally:
-        helper.unlink(missing_ok=True)
-        try:
-            helper.parent.rmdir()
-        except OSError:
-            pass
+    except Exception as exc:  # noqa: BLE001 - see docstring: escaping here erases a real mutation
+        payload = {
+            "released": False,
+            "reason": "finalization_lock_release_helper_failed",
+            "error": tail(f"{type(exc).__name__}: {exc}", 512),
+        }
+    return payload
 
 
 release_finalization_lock.supports_lock_identity = True  # type: ignore[attr-defined]
+
+RELEASE_REDACTION_FALLBACK = {
+    "released": False,
+    "reason": "finalization_lock_release_failed",
+    "error": "release_payload_redaction_failed",
+}
+
+
+def safe_release_error(exc: BaseException) -> str:
+    """Describe a release failure without being able to fail describing it.
+
+    `tail()` redacts, and redaction is the thing that may have just raised MemoryError. The class
+    name alone is a fixed-size string built from an already-live object, so the fallback cannot
+    re-enter the failure it is reporting.
+    """
+    try:
+        return tail(f"{type(exc).__name__}: {exc}", 512)
+    except BaseException:  # noqa: BLE001 - a description must never outrank the mutation truth
+        try:
+            return type(exc).__name__
+        except BaseException:  # noqa: BLE001
+            return "release_error_undescribable"
 
 
 def finalization_state_dir(args: argparse.Namespace) -> str | None:
@@ -3842,7 +4880,7 @@ def marker_state_dir_safety(repo: Path, state_dir_name: str) -> tuple[bool, str 
                 return False, "busdriver_state_dir_symlink_unsafe"
             if current.exists():
                 current.resolve().relative_to(repo_root)
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError):
             return False, "busdriver_state_dir_unsafe"
     return True, None
 
@@ -3884,7 +4922,8 @@ def legacy_decision_for_mutation(status: str, reason: str) -> dict[str, Any]:
 
 def mutating_run_envelope(args: argparse.Namespace, operation: str, status: str, reason: str, repo: Path | None, authority: dict[str, Any], side_effects: list[dict[str, Any]], lock: dict[str, Any] | None, release: dict[str, Any] | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     success_statuses = {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged", "already_up_to_date"}
-    release_placeholder = getattr(args, "_lock_release_placeholder", None) if status in success_statuses else None
+    release_tracked_statuses = success_statuses | {"commit_outcome_unknown"}
+    release_placeholder = getattr(args, "_lock_release_placeholder", None) if status in release_tracked_statuses else None
     release_value: Any = release if release is not None else release_placeholder
     return {
         "schema": MUTATING_RUN_SCHEMA,
@@ -3936,6 +4975,13 @@ def side_effect_completed_release_failed_status(operation: str, effects: list[di
 def release_failure_reconciliation(operation: str, mutating_run: dict[str, Any] | None, release: Any) -> tuple[dict[str, Any], list[dict[str, str]], int] | None:
     if mutating_run is None or not isinstance(release, dict) or release.get("released") is True:
         return None
+    if mutating_run.get("status") == "commit_outcome_unknown":
+        status = "commit_outcome_unknown_release_failed"
+        reason = _COMMIT_OUTCOME_UNKNOWN_RELEASE_REASON
+        mutating_run["status"] = status
+        mutating_run["reason"] = reason
+        mutating_run["authority"] = mutating_authority(operation, False, reason)
+        return legacy_decision_for_mutation(status, reason), steps_for(reason, operation, status), 2
     if mutating_run.get("status") not in {"pre_pr_review_complete", "committed", "pushed", "pr_created", "merged", "already_up_to_date"}:
         return None
     if mutating_run.get("status") == "already_up_to_date":
@@ -4000,11 +5046,11 @@ def run_busdriver_pre_pr_review(repo: Path, args: argparse.Namespace) -> tuple[d
     effects.append({"name": "validate_backstop_verdict", "ok": verdict_ok, "reason": verdict_reason, "summary": verdict_summary})
     if not verdict_ok:
         return {"ok": False, "reason": verdict_reason, "side_effects": effects}, 2
-    first = run_safe(["bash", str(init)], repo, timeout=max(args.verifier_timeout, 180), env=env)
+    first = run_safe(["/bin/bash", str(init)], repo, timeout=max(args.verifier_timeout, 180), env=env)
     effects.append({"name": "busdriver_init_review_loop", **first})
     if not first.get("ok"):
         return {"ok": False, "reason": "busdriver_init_review_loop_failed", "side_effects": effects}, int(first.get("returncode") or 1)
-    second = run_safe(["bash", str(loop)], repo, timeout=max(args.verifier_timeout, 1200), env=env)
+    second = run_safe(["/bin/bash", str(loop)], repo, timeout=max(args.verifier_timeout, 1200), env=env)
     effects.append({"name": "busdriver_codex_lead", **second})
     if not second.get("ok"):
         return {"ok": False, "reason": "busdriver_codex_lead_failed", "side_effects": effects}, int(second.get("returncode") or 1)
@@ -4021,11 +5067,11 @@ def run_busdriver_pre_pr_review(repo: Path, args: argparse.Namespace) -> tuple[d
     except (TypeError, ValueError, json.JSONDecodeError) as e:
         effects.append({"name": "busdriver_backstop_writer_payload", "ok": False, "error": type(e).__name__})
         return {"ok": False, "reason": "backstop_verdict_writer_payload_invalid", "side_effects": effects}, 2
-    write_backstop = run_safe(["bash", str(loop), "--write-backstop-verdict"], repo, timeout=180, env=env, input_text=writer_verdict)
+    write_backstop = run_safe(["/bin/bash", str(loop), "--write-backstop-verdict"], repo, timeout=180, env=env, input_text=writer_verdict)
     effects.append({"name": "busdriver_write_backstop_verdict", **write_backstop})
     if not write_backstop.get("ok"):
         return {"ok": False, "reason": "busdriver_write_backstop_verdict_failed", "side_effects": effects}, int(write_backstop.get("returncode") or 1)
-    marker = run_safe(["bash", str(loop), "--write-pr-marker"], repo, timeout=180, env=env)
+    marker = run_safe(["/bin/bash", str(loop), "--write-pr-marker"], repo, timeout=180, env=env)
     effects.append({"name": "busdriver_write_pr_marker", **marker})
     if not marker.get("ok"):
         return {"ok": False, "reason": "busdriver_write_pr_marker_failed", "side_effects": effects}, int(marker.get("returncode") or 1)
@@ -4162,21 +5208,37 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"litmus_decision_status": litmus_status})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
-            reviewed_status_rc, reviewed_status, _reviewed_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
+            reviewed_status_rc, reviewed_status_records, _reviewed_status_err = git_status_records(repo, "--untracked-files=all")
             if reviewed_status_rc != 0:
                 reason = "commit_status_snapshot_failed"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
+            reviewed_status = status_records_text(reviewed_status_records)
             reviewed_untracked_snapshot = {
-                path: untracked_file_identity(repo, path)
-                for line in reviewed_status.splitlines()
-                if line.startswith("?? ")
-                for path in porcelain_entry_paths(line)
+                path.rstrip("/"): untracked_file_identity(repo, path.rstrip("/"))
+                for xy, record_paths in reviewed_status_records
+                if xy == "??"
+                for path in record_paths
             }
             parent_rc, reviewed_parent_head, _parent_err = git_output(repo, "rev-parse", "HEAD")
-            tree_rc, reviewed_tree, _tree_err = git_output(repo, "write-tree")
-            if parent_rc != 0 or not reviewed_parent_head or tree_rc != 0 or not reviewed_tree:
+            tree_effect = run_safe(
+                ["git", "write-tree"],
+                repo,
+                timeout=60,
+                env=safe_git_mutation_env(),
+                capture_stdout=True,
+            )
+            effects.append({"name": "git_write_tree_candidate_snapshot", **tree_effect})
+            tree_rc = int(tree_effect.get("returncode") or 0)
+            reviewed_tree = str(tree_effect.get("stdout") or tree_effect.get("stdout_tail") or "").strip()
+            if (
+                parent_rc != 0
+                or not reviewed_parent_head
+                or not tree_effect.get("ok")
+                or tree_rc != 0
+                or not re.fullmatch(r"[0-9a-fA-F]{40,64}", reviewed_tree)
+            ):
                 reason = "commit_candidate_snapshot_failed"
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None)
@@ -4205,18 +5267,17 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
             )
             after_rc, after, after_err = git_output(repo, "rev-parse", "HEAD")
             helper_after = effect.get("after_head")
-            # `landed` is the helper's own verification that the commit object exists. Once it is
-            # true the mutation happened, and no failure of the OUTER HEAD re-read may downgrade
-            # the report to blocked/git_commit_failed — that would be a false no-mutation claim
-            # sending an operator to re-commit work that is already in the repository. The helper
-            # reports an unobserved post-publish head as empty rather than fabricating one, so
-            # its explicit `effect_completed` is the authority in that case, not the head value.
+            # Once the helper has positively completed the publish, no failure of the OUTER HEAD
+            # re-read may downgrade the report to blocked/git_commit_failed — that would be a
+            # false no-mutation claim
+            # A concurrent actor can move HEAD after our failed CAS. Neither a changed HEAD nor
+            # candidate verification proves that this invocation published anything; only the
+            # helper's positive effect_completed postcondition establishes landing.
+            outcome_unknown = effect.get("effect_outcome_unknown") is True
             landed = bool(
                 effect.get("commit_verified") is True
-                and (
-                    effect.get("effect_completed") is True
-                    or (isinstance(helper_after, str) and helper_after and helper_after != before)
-                )
+                and effect.get("effect_completed") is True
+                and not outcome_unknown
             )
             outer_head_verified = bool(after_rc == 0 and after and after == helper_after)
             effect.update({"before_head": before, "after_head": after, "verified_after_head": helper_after})
@@ -4232,16 +5293,18 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 effect.update({"effect_completed": True, "reconciliation_required": True})
             effects.append({"name": "git_commit", **effect})
             ok = bool(effect.get("ok") and commit_completed and not post_commit_warning)
-            if landed and not outer_head_verified:
+            if outcome_unknown:
+                reason = str(effect.get("error") or _COMMIT_OUTCOME_UNKNOWN_REASON)
+            elif landed and not outer_head_verified:
                 reason = "post_commit_head_verification_failed"
             elif effect.get("ok") and commit_completed:
                 reason = str(post_commit_warning or "committed")
             else:
                 reason = str(effect.get("error") or "git_commit_failed")
-            commit_status = "committed" if landed else "blocked"
+            commit_status = "commit_outcome_unknown" if outcome_unknown else ("committed" if landed else "blocked")
             authority = mutating_authority(operation, ok, reason, authority_sources)
             mut_run = mutating_run_envelope(args, operation, commit_status, reason, repo, authority, effects, lock_payload, None)
-            return {"ok": ok, "decision": legacy_decision_for_mutation(commit_status, reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0 if ok else int(effect.get("returncode") or 1)
+            return {"ok": ok, "decision": legacy_decision_for_mutation(commit_status, reason), "mutating_run": mut_run, "steps": steps_for(reason, operation, commit_status)}, 0 if ok else int(effect.get("returncode") or 1)
         if operation == "push":
             blocking_entries = commit_blocking_dirty_entries(delivery_status, args)
             if blocking_entries:
@@ -4337,16 +5400,16 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 authority = mutating_authority(operation, False, reason)
                 mut_run = mutating_run_envelope(args, operation, "blocked", reason, repo, authority, effects, lock_payload, None, {"branch": branch, "reviewed_head": push_head, "live_head": live_head})
                 return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 1
-            pre_push_status_rc, pre_push_status, pre_push_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
+            pre_push_status_rc, pre_push_status_records, pre_push_status_err = git_status_records(repo, "--untracked-files=all")
+            pre_push_status = status_records_text(pre_push_status_records)
             push_allowed_marker_paths = allowed_marker_paths(busdriver_marker_state_dirs(args))
-            pre_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, pre_push_status, push_allowed_marker_paths) if pre_push_status_rc == 0 else {}
-            pre_push_status_lines = pre_push_status.splitlines() if pre_push_status else []
+            pre_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, pre_push_status_records, push_allowed_marker_paths) if pre_push_status_rc == 0 else {}
+            pre_push_status_lines = [status_record_entry(xy, paths) for xy, paths in pre_push_status_records]
             pre_push_dirty_entries = blocking_dirty_entries(pre_push_status_lines, push_allowed_marker_paths) if pre_push_status_rc == 0 else ["<git status failed>"]
-            for pre_push_line in pre_push_status_lines:
-                pre_push_paths = porcelain_entry_paths(pre_push_line)
-                pre_push_xy = pre_push_line[:2] if len(pre_push_line) >= 2 else ""
+            for pre_push_xy, pre_push_record_paths in pre_push_status_records:
+                pre_push_paths = [path.rstrip("/") for path in pre_push_record_paths]
                 if len(pre_push_paths) == 1 and pre_push_paths[0] in push_allowed_marker_paths and marker_dirty_status_allowed(pre_push_xy) and pre_push_paths[0] not in pre_push_marker_snapshot:
-                    pre_push_dirty_entries.append(pre_push_line)
+                    pre_push_dirty_entries.append(status_record_entry(pre_push_xy, pre_push_record_paths))
             effects.append({"name": "git_push_pre_status", "ok": pre_push_status_rc == 0 and not pre_push_dirty_entries, "returncode": pre_push_status_rc, "stdout_tail": tail(pre_push_status), "stderr_tail": tail(pre_push_status_err), "pre_allowed_marker_entry_count": len(pre_push_marker_snapshot), "blocking_dirty_entries": pre_push_dirty_entries})
             if pre_push_status_rc != 0:
                 reason = "pre_push_status_failed"
@@ -4393,10 +5456,11 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                         ok = False
                         reason = "local_head_post_push_mismatch"
                     else:
-                        post_push_status_rc, post_push_status, post_push_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
+                        post_push_status_rc, post_push_status_records, post_push_status_err = git_status_records(repo, "--untracked-files=all")
+                        post_push_status = status_records_text(post_push_status_records)
                         post_push_dirty_entries = repo_blocking_dirty_entries(repo, busdriver_marker_state_dirs(args))
                         status_unchanged = post_push_status_rc == 0 and post_push_status == pre_push_status
-                        post_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, post_push_status, push_allowed_marker_paths) if post_push_status_rc == 0 else {}
+                        post_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, post_push_status_records, push_allowed_marker_paths) if post_push_status_rc == 0 else {}
                         marker_unchanged = post_push_marker_snapshot == pre_push_marker_snapshot
                         effects.append({"name": "post_push_dirty_check", "ok": post_push_status_rc == 0 and not post_push_dirty_entries and status_unchanged and marker_unchanged, "blocking_dirty_entries": post_push_dirty_entries, "status_unchanged": status_unchanged, "marker_unchanged": marker_unchanged, "returncode": post_push_status_rc, "stdout_tail": tail(post_push_status), "stderr_tail": tail(post_push_status_err)})
                         if post_push_status_rc != 0:
@@ -4407,10 +5471,11 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                             reason = "pushed_with_post_push_dirty_worktree"
             else:
                 post_push_head_rc, post_push_head, _post_push_head_err = git_output(repo, "rev-parse", "HEAD")
-                post_push_status_rc, post_push_status, post_push_status_err = git_output(repo, "status", "--porcelain=v1", "--untracked-files=all")
+                post_push_status_rc, post_push_status_records, post_push_status_err = git_status_records(repo, "--untracked-files=all")
+                post_push_status = status_records_text(post_push_status_records)
                 post_push_dirty_entries = repo_blocking_dirty_entries(repo, busdriver_marker_state_dirs(args))
                 status_unchanged = post_push_status_rc == 0 and post_push_status == pre_push_status
-                post_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, post_push_status, push_allowed_marker_paths) if post_push_status_rc == 0 else {}
+                post_push_marker_snapshot = marker_evidence_snapshot_from_status(repo, post_push_status_records, push_allowed_marker_paths) if post_push_status_rc == 0 else {}
                 marker_unchanged = post_push_marker_snapshot == pre_push_marker_snapshot
                 local_post_failure_ok = post_push_head_rc == 0 and post_push_head == push_head and not post_push_dirty_entries and status_unchanged and marker_unchanged
                 effects.append({"name": "git_push_local_post_failure_verify", "ok": local_post_failure_ok, "local_head": post_push_head, "expected_local_head": push_head, "blocking_dirty_entries": post_push_dirty_entries, "status_unchanged": status_unchanged, "marker_unchanged": marker_unchanged, "status_returncode": post_push_status_rc, "status_stdout_tail": tail(post_push_status), "status_stderr_tail": tail(post_push_status_err)})
@@ -4510,17 +5575,38 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
         return {"ok": False, "decision": legacy_decision_for_mutation("blocked", reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 2
     finally:
         if token and lock_state_dir_initialized:
-            if getattr(release_finalization_lock, "supports_lock_identity", False):
-                release_payload = release_finalization_lock(
-                    repo,
-                    token,
-                    lock_state_dir,
-                    str((lock_payload or {}).get("path") or ""),
-                    str((lock_payload or {}).get("trusted_helper_path") or ""),
-                )
-            else:
-                release_payload = release_finalization_lock(repo, token, lock_state_dir)
-            redacted_release = redact_value(release_payload)
+            # Defense in depth for the same hazard release_finalization_lock() documents: this
+            # `finally` runs after a commit/push may already have LANDED, and an exception raised
+            # here discards that completed result instead of reporting it. The release helper is
+            # contracted not to raise; if it ever does, the mutation outcome still survives and is
+            # reconciled into a truthful `*_release_failed` status by the caller below.
+            try:
+                if getattr(release_finalization_lock, "supports_lock_identity", False):
+                    release_payload = release_finalization_lock(
+                        repo,
+                        token,
+                        lock_state_dir,
+                        str((lock_payload or {}).get("path") or ""),
+                    )
+                else:
+                    release_payload = release_finalization_lock(repo, token, lock_state_dir)
+            except BaseException as exc:  # noqa: BLE001 - never let cleanup erase a real mutation
+                # BaseException, not Exception: by the time this runs the commit has LANDED, and a
+                # MemoryError, RecursionError or a Ctrl-C landing in the release window is exactly
+                # as capable of erasing that truth as an OSError. Nothing above this point catches
+                # these before the side effect is known, which is the rule this must not break.
+                release_payload = {
+                    "released": False,
+                    "reason": "finalization_lock_release_failed",
+                    "error": safe_release_error(exc),
+                }
+            try:
+                redacted_release = redact_value(release_payload)
+            except BaseException:  # noqa: BLE001 - redaction failure must not leak, or erase, truth
+                # Redaction runs regexes over attacker-influenced text and can itself raise. Emit a
+                # fixed literal rather than the unredacted payload: the release truth survives and
+                # nothing unredacted escapes, whichever way redaction failed.
+                redacted_release = dict(RELEASE_REDACTION_FALLBACK)
             release_placeholder.clear()
             if isinstance(redacted_release, dict):
                 release_placeholder.update(redacted_release)
@@ -4542,6 +5628,17 @@ def early_policy_steps(reason: str, operation: str) -> list[dict[str, str]]:
 
 def steps_for(reason: str | None, operation: str | None = None, status: str | None = None) -> list[dict[str, str]]:
     if operation in {"pre-pr-review", "commit", "push", "pr-create", "merge"}:
+        if status in {"commit_outcome_unknown", "commit_outcome_unknown_release_failed"}:
+            release_failed = status == "commit_outcome_unknown_release_failed"
+            return [
+                {
+                    "name": "finalization_lock",
+                    "status": "failed" if release_failed else "passed",
+                    "reason": "finalization_lock_release_failed" if release_failed else "single_flight_finalization",
+                },
+                {"name": operation, "status": "failed", "reason": reason or _COMMIT_OUTCOME_UNKNOWN_REASON},
+                {"name": "postflight_reconciliation", "status": "failed", "reason": reason or _COMMIT_OUTCOME_UNKNOWN_REASON},
+            ]
         if status in _RELEASE_FAILED_STATUSES:
             # The operation COMPLETED and only the lock release failed. `reason` alone cannot say
             # that — `finalization_lock_release_failed` is in neither success nor reconciliation
@@ -4736,30 +5833,6 @@ def main() -> int:
         result = early_policy_result(args, FIXED_EARLY_BLOCKED_OPERATIONS[args.operation])
         print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
         return 2
-    if args.mode == "execute" and args.operation == "verify":
-        verifier_blocker = verifier_dispatch_blocker()
-        if verifier_blocker:
-            blocked_decision = decision("blocked", verifier_blocker)
-            empty_status: dict[str, Any] = {}
-            result = {
-                "schema": SCHEMA,
-                "version": 1,
-                "ok": False,
-                "mode": args.mode,
-                "operation": effective_operation(args),
-                "repo": None,
-                "pr": pr_summary(args.pr, empty_status),
-                "delivery_status": None,
-                "pr_grind_loop": None,
-                "mutating_run": None,
-                "verifiers": [],
-                "steps": steps_for(verifier_blocker, args.operation),
-                "decision": blocked_decision,
-                "run": delivery_run(args, empty_status, blocked_decision, verifier_blocker, create_identity=False),
-                "run_artifact_path": None,
-            }
-            print(json.dumps(redact_value(result), indent=2 if args.pretty else None, sort_keys=True))
-            return 2
 
     if args.mode != "status" and not args.run_id:
         args.run_id = new_run_id()
@@ -4807,28 +5880,6 @@ def main() -> int:
                     result_ok = False
                     reason = str(result_decision.get("reason") or "finalization_lock_release_failed")
             write_run_artifact = True
-        elif args.operation == "verify":
-            if not args.verifier:
-                reason = "no_verifiers"
-                result_ok = False
-                result_decision = decision("blocked", reason)
-                returncode = 2
-                write_run_artifact = True
-            else:
-                verifier_blocker = verifier_dispatch_blocker()
-                if verifier_blocker:
-                    reason = verifier_blocker
-                    result_ok = False
-                    result_decision = decision("blocked", reason)
-                    returncode = 2
-                else:
-                    repo = Path(args.repo or ".").expanduser().resolve()
-                    verifiers = run_verifiers(repo, args.verifier, args.verifier_timeout)
-                    result_ok = all(v["ok"] for v in verifiers)
-                    reason = "verified" if result_ok else "verifier_failed"
-                    result_decision = decision("verified" if result_ok else "blocked", reason)
-                    returncode = 0 if result_ok else 1
-                write_run_artifact = True
         elif args.operation == "pr-grind":
             if not args.pr:
                 reason = "pr_required"
@@ -4916,6 +5967,7 @@ def main() -> int:
             # durable and ARTIFACT_OUTCOME_CONTRACT admits none of them.
             completed_statuses = {
                 "pre_pr_review_complete", "committed", "pushed", "pr_created", "merged",
+                "commit_outcome_unknown", "commit_outcome_unknown_release_failed",
                 "pre_pr_review_complete_release_failed", "committed_release_failed", "pushed_release_failed",
                 "pr_created_release_failed", "merged_release_failed",
             }
