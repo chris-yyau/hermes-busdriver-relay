@@ -1,7 +1,13 @@
 import json
+import hashlib
+import runpy
+import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from relay_role_constants import FULL_RELAY_ROLE_MAP, NON_PROGRAMMATIC_RELAY_ROLES
 
@@ -24,14 +30,21 @@ def run_role_with_fake_status(tmp_path: Path, status_payload: dict, *args: str) 
     scripts = tmp_path / "scripts"
     scripts.mkdir(parents=True)
     role_script = scripts / "hermes-busdriver-relay-role"
-    role_script.write_text(SCRIPT.read_text())
-    role_script.chmod(0o755)
     status_script = scripts / "hermes-busdriver-status"
-    status_script.write_text(
+    status_source = (
         "#!/usr/bin/env python3\n"
         "import json\n"
         f"print(json.dumps({status_payload!r}))\n"
     )
+    role_source = re.sub(
+        r"TRUSTED_STATUS_SHA256 = '[0-9a-f]+'",
+        f"TRUSTED_STATUS_SHA256 = '{hashlib.sha256(status_source.encode()).hexdigest()}'",
+        SCRIPT.read_text(),
+        count=1,
+    )
+    role_script.write_text(role_source)
+    role_script.chmod(0o755)
+    status_script.write_text(status_source)
     status_script.chmod(0o755)
     proc = subprocess.run(
         [sys.executable, str(role_script), *args, "--pretty"],
@@ -77,10 +90,34 @@ def test_relay_role_lists_known_roles_without_config(tmp_path):
 
 
 def test_relay_role_invokes_status_script_as_subprocess():
+    """The status probe stays a CHILD: never imported, so its globals cannot reach this process.
+
+    r32 moved the launch from `subprocess.run` to `run_bounded`, which bounds the child's output at
+    the pipe. The property under test is unchanged and is the reason the assertion is spelled
+    negatively too — an in-process loader is what must never come back.
+    """
     source = SCRIPT.read_text()
-    assert "subprocess.run" in source
+    assert "run_bounded(" in source
     assert "SourceFileLoader" not in source
     assert "importlib" not in source
+
+
+def test_relay_role_status_probe_disables_external_plugin_resolver(monkeypatch):
+    ns = runpy.run_path(str(SCRIPT))
+    captured = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return ns["BoundedOutput"](0, "{}", "", False, False)
+
+    monkeypatch.setitem(ns["load_status_payload"].__globals__, "run_bounded", fake_run)
+    payload, error = ns["load_status_payload"](
+        SimpleNamespace(relay_config=None, relay_state_dir=None)
+    )
+
+    assert error is None
+    assert payload == {}
+    assert "--no-external-resolver" in captured["cmd"]
 
 
 def test_relay_role_resolves_configured_non_coding_reviewer(tmp_path):
@@ -135,13 +172,18 @@ def test_relay_role_resolves_complete_live_role_map(tmp_path):
         assert selected["configured_route"] == [expected_agent]
         assert selected["degraded"] is False
         assert selected["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
-        if role in {"relay.impl.secondary", "relay.impl.fallback"}:
-            assert data["reason"] == "opencode_adapter_not_verified"
-            assert selected["adapter_verified"] is False
-        elif role == "relay.ide.manual":
-            assert data["reason"] == "manual_ide_sidecar_not_programmatic"
+        if role in NON_PROGRAMMATIC_RELAY_ROLES:
+            expected_reason = (
+                "manual_ide_sidecar_not_programmatic"
+                if role == "relay.ide.manual"
+                else "agent_containment_and_credential_broker_unavailable"
+            )
+            assert data["reason"] == expected_reason
         else:
             assert data["reason"] == "selected_agent_available"
+        if role in {"relay.impl.primary", "relay.impl.secondary", "relay.impl.fallback"}:
+            assert selected["adapter_verified"] is False
+            assert selected["dispatch_blocker"] == "agent_containment_and_credential_broker_unavailable"
 
 
 def test_relay_role_fails_closed_for_malformed_status_role_entry(tmp_path):
@@ -163,6 +205,58 @@ def test_relay_role_fails_closed_for_malformed_status_role_entry(tmp_path):
         assert data["dispatch_allowed"] is False
         assert data["reason"] == reason
         assert data["decision"]["dispatch_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        (
+            {"degraded": False, "selected_agent": "opencode", "adapter_verified": True, "dispatch_blocker": None},
+            "status_probe_missing_dispatch_allowed",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True},
+            "status_probe_missing_adapter_verified",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": "yes"},
+            "status_probe_invalid_adapter_verified_shape",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": False},
+            "status_probe_adapter_not_verified",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": True, "dispatch_blocker": "contradiction"},
+            "status_probe_dispatch_allowed_with_blocker",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": False, "adapter_verified": True},
+            "status_probe_missing_dispatch_blocker",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": False, "adapter_verified": True, "dispatch_blocker": ""},
+            "status_probe_invalid_dispatch_blocker_shape",
+        ),
+        (
+            {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": False, "adapter_verified": True, "dispatch_blocker": ["blocked"]},
+            "status_probe_invalid_dispatch_blocker_shape",
+        ),
+    ],
+)
+def test_relay_role_metadata_contradictions_fail_closed(tmp_path: Path, entry: dict, reason: str):
+    code, data = run_role_with_fake_status(
+        tmp_path / reason,
+        status_payload_for_role(entry),
+        "--role",
+        "relay.pr.backstop",
+    )
+
+    assert code == 2
+    assert data["ok"] is False
+    assert data["dispatch_allowed"] is False
+    assert data["decision"]["dispatch_allowed"] is False
+    assert data["reason"] == reason
 
 
 def test_relay_role_fails_closed_for_malformed_status_roles_container(tmp_path):

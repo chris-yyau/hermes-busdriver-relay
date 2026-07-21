@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only Hermes ↔ Busdriver status probe.
 
 This command intentionally does not write to Busdriver, Claude, Hermes, or the
@@ -7,15 +7,330 @@ project repo. It is a Phase-0/status helper, not a launcher.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
+import select
+import stat
+import threading
 import time
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+# The resolver is the one file this read-only probe executes, so it is pinned to the canonical
+# install and to exact bytes. Refresh both together when the installed Busdriver plugin changes.
+CANONICAL_PLUGIN_ROOT = Path.home() / ".claude/plugins/marketplaces/busdriver"
+TRUSTED_RESOLVER_REL = "scripts/lib/resolve-cli.sh"
+TRUSTED_RESOLVER_SHA256 = "994d4176a802f08a49b65117fa9295e1eac45563b457b50979a886b723f97de9"
 
 KEY_ENTRYPOINTS = [
     "hooks/hooks.json",
@@ -57,6 +372,9 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
         "native_busdriver_role": "implementation primary draft worker",
         "route": ["pi"],
         "review_independence_sensitive": False,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
     },
     "relay.impl.secondary": {
         "native_busdriver_role": "implementation secondary draft worker",
@@ -64,7 +382,7 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
-        "dispatch_blocker": "opencode_adapter_not_verified",
+        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
     },
     "relay.impl.fallback": {
         "native_busdriver_role": "implementation fallback draft worker",
@@ -72,74 +390,105 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
-        "dispatch_blocker": "opencode_adapter_not_verified",
+        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
     },
     "relay.review.fast": {
         "native_busdriver_role": "fast read-only reviewer",
         "route": ["grok"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.review.long_context": {
         "native_busdriver_role": "long-context read-only reviewer",
         "route": ["gemini"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.ide.manual": {
         "native_busdriver_role": "manual IDE sidecar",
         "route": ["zed"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
+        "adapter_verified": True,
         "dispatch_blocker": "manual_ide_sidecar_not_programmatic",
     },
     "relay.expert_witness.ultraoracle": {
         "native_busdriver_role": "expert witness escalation",
         "route": ["ultraoracle"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.litmus.reviewer": {
         "native_busdriver_role": "litmus reviewer",
         "route": ["codex"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.blueprint.reviewer_1": {
         "native_busdriver_role": "blueprint reviewer 1",
         "route": ["agy"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.blueprint.reviewer_2": {
         "native_busdriver_role": "blueprint reviewer 2",
         "route": ["claude-code"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.blueprint.reviewer_3": {
         "native_busdriver_role": "blueprint reviewer 3",
         "route": ["grok"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.blueprint.arbiter": {
         "native_busdriver_role": "blueprint arbiter",
         "route": ["codex"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.pr.lead": {
         "native_busdriver_role": "PR lead reviewer",
         "route": ["codex"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.pr.backstop": {
         "native_busdriver_role": "PR security/bugs backstop",
         "route": ["claude-code"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.council.architect": {
         "native_busdriver_role": "council architect",
         "route": ["inline"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.council.pragmatist": {
         "native_busdriver_role": "council pragmatist",
         "route": ["agy"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.council.critic": {
         "native_busdriver_role": "council critic",
         "route": ["codex"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.council.researcher": {
         "native_busdriver_role": "council researcher",
         "route": ["grok"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
     "relay.council.skeptic": {
         "native_busdriver_role": "council skeptic",
         "route": ["claude-code"],
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
     },
 }
 
@@ -177,14 +526,295 @@ MIN_GATE_SCRIPTS = [
 ]
 
 
-def run(cmd: list[str], cwd: Path | None = None, timeout: int = 10) -> dict[str, Any]:
+TRUSTED_EXECUTABLE_DIGESTS = {
+    # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
+    # inode). A supply-chain pin, not an identity check — the path is the identity.
+    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
+    "sandbox-exec": "2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a",
+}
+# Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
+# symlinked name is what this contract refuses. See _validated_root_owned_source().
+TRUSTED_EXECUTABLE_SOURCES = {
+    "git": Path("/usr/bin/git"),
+    "git-real": Path("/Library/Developer/CommandLineTools/usr/bin/git"),
+    "sandbox-exec": Path("/usr/bin/sandbox-exec"),
+}
+
+
+def private_runtime_error(error: str, executable: "str | None" = None, detail: "str | None" = None) -> SystemExit:
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if executable:
+        payload["executable"] = executable
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+# =============================================================================================
+# Fixed root-owned source execution contract. Copy of the primitive in hermes-busdriver-deliver;
+# these are standalone executables with no shared import path, so a contract test asserts the
+# copies agree. The full rationale lives in the deliver copy; the short version:
+#
+# executing a private copy relocated the substitutable name instead of removing it. macOS has no
+# fexecve and will not exec /dev/fd/N, so the kernel re-resolves a *pathname* at exec time, and any
+# pathname we can write is one a same-UID adversary can rename first (r34's two-rename ABA leaves
+# st_nlink at 1 and every descriptor-visible field intact). The source therefore has to live where
+# the adversary cannot write at all: root-owned, non-group/world-writable, root to leaf. The walk
+# proves there is no race rather than trying to win one.
+#
+# /usr/bin/git is the CommandLineTools shim — same inode as /usr/bin/python3, nlink 78 — so nlink==1
+# is waived for it and SF_RESTRICTED (SIP; denies even root) required instead. That shim also
+# honours $DEVELOPER_DIR through xcrun, which no ancestry walk can see, so the child environment is
+# owned here too: see ENV_DENIED_FOR_TRUSTED_DISPATCH.
+# =============================================================================================
+
+SF_RESTRICTED = 0x00080000  # macOS SIP: modification denied even to root.
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"git"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: "str | None" = None) -> SystemExit:
+    """gh gets its own top-level reason: a missing credential-bearing binary is an operational
+    state an administrator resolves by provisioning /usr/local/bin/gh, not an integrity failure."""
+    if reason == "unavailable" and name == "gh":
+        return private_runtime_error("trusted_root_owned_gh_unavailable", name, detail)
+    return private_runtime_error(f"trusted_root_owned_source_{reason}", name, detail)
+
+
+def _require_trusted_directory(st: os.stat_result, name: str, component: str) -> None:
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+
+
+def _open_root_owned_ancestry(path: Path, name: str) -> int:
+    """Walk root-to-parent with O_NOFOLLOW directory descriptors; return the parent fd.
+
+    The fd, not the path: the leaf must be opened relative to the directory just validated.
+    Re-opening by full pathname would re-traverse every component and restore the TOCTOU.
+    """
     try:
-        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
-        return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
-    except FileNotFoundError as e:
-        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(e)}
+        dir_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        _require_trusted_directory(os.fstat(dir_fd), name, "/")
+        for component in path.parts[1:-1]:
+            try:
+                nxt = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(dir_fd)
+            dir_fd = nxt
+            _require_trusted_directory(os.fstat(dir_fd), name, component)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def _require_trusted_leaf(st: os.stat_result, name: str) -> None:
+    if not stat.S_ISREG(st.st_mode):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_regular")
+    if st.st_uid != 0 or (st.st_mode & _NON_OWNER_WRITABLE):
+        raise _trusted_source_refusal(name, "metadata_invalid", "writable_or_unowned")
+    if not (st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_executable")
+    if name in SHIM_BACKED_SOURCES:
+        if not (getattr(st, "st_flags", 0) & SF_RESTRICTED):
+            raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+    elif st.st_nlink != 1:
+        raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+
+
+def _identity(st: os.stat_result) -> tuple:
+    return (
+        st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode,
+        st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+def _read_trusted_source_bytes(fd: int, name: str) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+            raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    """Pure seam: production reaches this only via trusted_executable_path(), which supplies the
+    path from a frozen table. Tests pass harmless already-root-owned system binaries."""
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    parent_fd = _open_root_owned_ancestry(path, name)
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _trusted_source_refusal(name, "metadata_invalid", "symlink") from exc
+            raise _trusted_source_refusal(name, "unavailable", type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            _require_trusted_leaf(opened, name)
+            data = _read_trusted_source_bytes(fd, name)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _identity(os.fstat(fd)) != _identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    """The only production entry point. Takes a name; the path is not negotiable.
+
+    Revalidated on every call rather than cached: the contract is "validated immediately before
+    dispatch", and a cache is a promise about the past.
+    """
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
+def _refusal_reason(exc: SystemExit) -> str:
+    """Lift the machine-readable token back out of the primitive's JSON payload."""
+    try:
+        payload = json.loads(str(exc))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "trusted_root_owned_source_unavailable"
+    if not isinstance(payload, dict):
+        return "trusted_root_owned_source_unavailable"
+    reason = str(payload.get("error") or "trusted_root_owned_source_unavailable")
+    detail = payload.get("detail")
+    return f"{reason}:{detail}" if detail else reason
+
+
+def trusted_git_path() -> Path:
+    """OSError, not SystemExit: git_status() folds the reason into its envelope rather than letting
+    an unauthenticatable git take every unrelated diagnostic down with it. The shared primitive
+    raises SystemExit for parity with every other copy, so the token is lifted out of its payload
+    here and the envelope still names the exact refusal."""
+    try:
+        return trusted_executable_path("git")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+
+
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Explicit allowlist for every child of this probe.
+
+    The caller's environment is untrusted input: PATH decides which `git` runs, and
+    PYTHONPATH/BASH_ENV/LD_*/DYLD_* let a caller inject code into a child's startup or loader.
+    Ambient GIT_* (GIT_DIR, GIT_INDEX_FILE, GIT_EXTERNAL_DIFF, ...) likewise redirect or
+    execute on behalf of git, so GIT_* is rebuilt here rather than inherited.
+    """
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = CONTAINED_PATH
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    if extra:
+        env.update(extra)
+    return git_observation_env(env)
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int = 10, stdin_bytes: bytes | None = None, env: dict[str, str] | None = None) -> dict[str, Any]:
+    try:
+        # text=False so stdin_bytes are handed to the child verbatim — the digest was taken over
+        # those exact bytes, and a decode/re-encode round trip would not preserve them.
+        p = run_bounded(cmd, cwd=cwd, env=child_env() if env is None else env, timeout=timeout, stdin_bytes=stdin_bytes, text=False)
+        if p.overflowed:
+            # This probe retained `stdout_bytes` raw AND a decoded copy of whatever git emitted, and
+            # put both in the envelope with no redaction helper in this file at all. Over the bound
+            # there is nothing to retain and nothing worth emitting.
+            return {"ok": False, "returncode": 125, "stdout": "", "stderr": "child_output_too_large", "stdout_bytes": b""}
+        if p.timed_out:
+            return {"ok": False, "returncode": 124, "stdout": "", "stderr": f"timeout after {timeout}s", "stdout_bytes": b""}
+        if git_observation_stderr_refused(cmd, p.stderr):
+            return {"ok": False, "returncode": 126, "stdout": "", "stderr": "git_observation_stderr", "stdout_bytes": b""}
+        decode = lambda raw: (raw or b"").decode("utf-8", errors="replace").strip()  # noqa: E731
+        # stdout_bytes is kept alongside the decoded text for `-z` reads: NUL framing only survives
+        # in the bytes, and a stripped string cannot be reframed back into records.
+        return {"ok": p.returncode == 0, "returncode": p.returncode, "stdout": decode(p.stdout), "stderr": decode(p.stderr), "stdout_bytes": p.stdout or b""}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "returncode": 124, "stdout": "", "stderr": f"timeout after {timeout}s"}
+        return {"ok": False, "returncode": 124, "stdout": "", "stderr": f"timeout after {timeout}s", "stdout_bytes": b""}
+    except OSError as e:
+        # Covers FileNotFoundError plus NotADirectoryError/PermissionError from an unusable
+        # cwd or executable: a caller-supplied --repo must fail closed, never traceback.
+        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(e), "stdout_bytes": b""}
+
+
+# Enumerated from the CONSUMER, not restated by hand: every character `str.splitlines()` treats as
+# a line boundary can fabricate a porcelain record. git quotes C0 controls in a pathname even under
+# `core.quotePath=false`, but NOT the non-ASCII separators — and splitlines() splits on NEL
+# (U+0085), LS (U+2028) and PS (U+2029) all the same, so a repo-local `core.quotePath=false` plus a
+# directory named `evil<U+2028> M .claude` fabricated a marker record from one untracked file.
+# Framing is therefore taken from `-z` NUL, which the inspected repo cannot reconfigure.
+STATUS_PATH_DELIMITERS = frozenset(
+    {"\t"}
+    | {chr(code) for code in range(0x11000) if len(f"a{chr(code)}b".splitlines()) > 1}
+    | {chr(code) for code in range(0x00, 0x20)}
+    | {chr(0x7F)}
+    | {chr(code) for code in range(0x80, 0xA0)}
+)
+
+
+def escape_status_path(path: str) -> str:
+    """NUL framing protects this parser; escaping protects every consumer of the entry strings."""
+    return "".join(f"\\x{ord(char):02x}" if char in STATUS_PATH_DELIMITERS else char for char in path)
+
+
+def parse_porcelain_z(raw: bytes) -> list[tuple[str, list[str]]]:
+    """NUL-framed `status --porcelain=v1 -z` → [(xy, [paths])]; `-z` never quotes, so never unquote."""
+    fields = raw.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    records: list[tuple[str, list[str]]] = []
+    index = 0
+    while index < len(fields):
+        field = fields[index].decode("utf-8", errors="replace")
+        index += 1
+        if len(field) < 4 or field[2] != " ":
+            continue
+        xy, destination = field[:2], field[3:]
+        if xy[0:1] in {"R", "C"} and index < len(fields):
+            source = fields[index].decode("utf-8", errors="replace")
+            index += 1
+            records.append((xy, [source, destination]))
+            continue
+        records.append((xy, [destination]))
+    return records
+
+
+def porcelain_entries(raw: bytes) -> list[str]:
+    return [f"{xy} " + " -> ".join(escape_status_path(path) for path in paths) for xy, paths in parse_porcelain_z(raw)]
 
 
 def read_json(path: Path) -> tuple[Any | None, str | None]:
@@ -495,11 +1125,27 @@ def relay_equivalent_roles(
     for role, defaults in DEFAULT_RELAY_EQUIVALENT_ROUTES.items():
         default_route = defaults["route"]
         review_sensitive = defaults.get("review_independence_sensitive", True)
-        programmatic_dispatch_allowed = defaults.get("programmatic_dispatch_allowed", True)
-        adapter_verified = defaults.get("adapter_verified", True)
-        dispatch_blocker = defaults.get("dispatch_blocker")
+        metadata_config_error = None
+        raw_programmatic_dispatch_allowed = defaults.get("programmatic_dispatch_allowed")
+        raw_adapter_verified = defaults.get("adapter_verified")
+        if "programmatic_dispatch_allowed" not in defaults:
+            metadata_config_error = "default_role_metadata_missing_programmatic_dispatch_allowed"
+        elif not isinstance(raw_programmatic_dispatch_allowed, bool):
+            metadata_config_error = "default_role_metadata_invalid_programmatic_dispatch_allowed"
+        elif "adapter_verified" not in defaults:
+            metadata_config_error = "default_role_metadata_missing_adapter_verified"
+        elif not isinstance(raw_adapter_verified, bool):
+            metadata_config_error = "default_role_metadata_invalid_adapter_verified"
+        if metadata_config_error is None:
+            programmatic_dispatch_allowed = raw_programmatic_dispatch_allowed
+            adapter_verified = raw_adapter_verified
+            dispatch_blocker = defaults.get("dispatch_blocker")
+        else:
+            programmatic_dispatch_allowed = False
+            adapter_verified = False
+            dispatch_blocker = "default_role_metadata_invalid"
         configured = routes.get(role, default_route)
-        config_error = None
+        config_error = metadata_config_error
         if routes_config_error is not None:
             route = []
             config_error = routes_config_error
@@ -531,6 +1177,7 @@ def relay_equivalent_roles(
             "review_independence_sensitive": review_sensitive,
             "programmatic_dispatch_allowed": programmatic_dispatch_allowed,
             "adapter_verified": adapter_verified,
+            "adapter_proof": defaults.get("adapter_proof"),
             "dispatch_blocker": dispatch_blocker,
             "degraded": bool(config_error) or (avoid and review_sensitive and same_as_coding_agent),
             "config_error": config_error,
@@ -555,25 +1202,120 @@ def relay_equivalent_roles(
     }
 
 
+MARKER_PREVIEW_MAX_BYTES = 4096
+
+
+def marker_preview_lines(
+    path: Path, expected: os.stat_result | None = None, *, parent_fd: int | None = None,
+) -> tuple[list[str] | None, str | None]:
+    """Read the first lines of a marker without ever following a symlink to its target.
+
+    `<repo>/.claude` is attacker-controlled: `--repo` names a repository this probe does not
+    trust. r25 probed every marker with exists()/stat()/is_file()/read_text(), all of which follow
+    symlinks — so stat() reported the TARGET's size and the <=4096 gate failed to exclude typical
+    key material. `.claude/litmus-passed.local -> ~/.ssh/id_rsa` copied three lines of that key
+    into an envelope advertising read_only: true. That is egress, not just disclosure.
+
+    This is the same O_NOFOLLOW + S_ISREG + size bound litmus-status already applies to these
+    exact marker names; status alone had no symlink handling.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path.name if parent_fd is not None else path, flags, dir_fd=parent_fd)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            return None, "refusing_to_read_non_regular_file"
+        if before.st_nlink != 1:
+            return None, "refusing_to_read_linked_file"
+        if expected is not None and (before.st_dev, before.st_ino, before.st_mode) != (
+            expected.st_dev, expected.st_ino, expected.st_mode,
+        ):
+            return None, "marker_identity_changed"
+        if before.st_size > MARKER_PREVIEW_MAX_BYTES:
+            return None, "refusing_to_read_large_marker"
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                return None, "marker_changed_during_read"
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            return None, "marker_changed_during_read"
+        after = os.fstat(fd)
+        stable_fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, key) != getattr(after, key) for key in stable_fields):
+            return None, "marker_changed_during_read"
+        landed = os.lstat(path.name, dir_fd=parent_fd) if parent_fd is not None else os.lstat(path)
+        if (landed.st_dev, landed.st_ino, landed.st_mode) != (before.st_dev, before.st_ino, before.st_mode):
+            return None, "marker_identity_changed"
+        return b"".join(chunks).decode(errors="replace").splitlines()[:3], None
+    except OSError as e:
+        if getattr(e, "errno", None) == errno.ELOOP:
+            return None, "refusing_to_follow_symlink"
+        return None, str(e)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[str, Any] | None:
     if repo_status is None:
         return None
     if not repo_status.get("is_git_repo") or not repo_status.get("root"):
         return None
+    # An unobserved repo has no head/branch/dirty to compare a marker's freshness against, and
+    # emitting the comparison against synthesized nulls reads as "compared, not fresh".
+    if repo_status.get("observed") is False:
+        return {"state_dir": str(Path(repo_status["root"]) / state_dir), "available": False, "reason": "repo_not_observed"}
     root = Path(repo_status["root"])
     state = root / state_dir
-    markers: dict[str, Any] = {"state_dir": str(state), "exists": state.exists(), "files": {}}
+    state_fd: int | None = None
+    state_st: os.stat_result | None = None
+    state_is_symlink = False
+    try:
+        state_st = state.lstat()
+        state_is_symlink = stat.S_ISLNK(state_st.st_mode)
+        if not state_is_symlink and stat.S_ISDIR(state_st.st_mode):
+            state_fd = os.open(
+                state,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(state_fd)
+            if (opened.st_dev, opened.st_ino, opened.st_mode) != (state_st.st_dev, state_st.st_ino, state_st.st_mode):
+                os.close(state_fd)
+                state_fd = None
+    except OSError:
+        state_st = None
+    markers: dict[str, Any] = {"state_dir": str(state), "exists": state_st is not None, "files": {}}
+    if state_is_symlink or (state_st is not None and state_fd is None):
+        markers["state_dir_unsafe"] = True
     now = time.time()
     repo_head_commit_time = repo_status.get("head_commit_time")
-    for name in MARKER_FILES:
-        path = state / name
-        if path.exists():
-            st = path.stat()
+    try:
+        for name in MARKER_FILES:
+            path = state / name
+            if state_fd is None:
+                markers["files"][name] = {"exists": False}
+                continue
+            try:
+                st = os.lstat(name, dir_fd=state_fd)
+            except OSError:
+                markers["files"][name] = {"exists": False}
+                continue
+            is_symlink = stat.S_ISLNK(st.st_mode)
             marker_mtime = int(st.st_mtime)
             marker_age_sec = int(now - st.st_mtime)
             entry: dict[str, Any] = {
                 "exists": True,
+                # lstat, so this is the link's own size, never the target's.
                 "size": st.st_size,
+                "is_symlink": is_symlink,
                 "mtime": marker_mtime,
                 "age_sec": marker_age_sec,
                 "freshness": {
@@ -588,15 +1330,24 @@ def active_markers(repo_status: dict[str, Any] | None, state_dir: str) -> dict[s
                     else marker_mtime > repo_head_commit_time,
                 },
             }
-            if st.st_size <= 4096 and path.is_file() and name not in {"bypass-log.jsonl"}:
-                try:
-                    first = path.read_text(errors="replace").splitlines()[:3]
-                    entry["preview_lines"] = first
-                except OSError:
-                    entry["preview_lines"] = []
+            if is_symlink:
+                entry["read_error"] = "refusing_to_follow_symlink"
+            elif not stat.S_ISREG(st.st_mode):
+                entry["read_error"] = "refusing_to_read_non_regular_file"
+            elif st.st_nlink != 1:
+                entry["read_error"] = "refusing_to_read_linked_file"
+            elif st.st_size > MARKER_PREVIEW_MAX_BYTES:
+                entry["read_error"] = "refusing_to_read_large_marker"
+            elif name not in {"bypass-log.jsonl"}:
+                preview, read_error = marker_preview_lines(path, st, parent_fd=state_fd)
+                if read_error:
+                    entry["read_error"] = read_error
+                else:
+                    entry["preview_lines"] = preview
             markers["files"][name] = entry
-        else:
-            markers["files"][name] = {"exists": False}
+    finally:
+        if state_fd is not None:
+            os.close(state_fd)
     markers["active_count"] = sum(1 for v in markers["files"].values() if v.get("exists"))
     return markers
 
@@ -610,41 +1361,156 @@ def extract_script_refs(commands: list[str]) -> list[str]:
     return sorted(refs)
 
 
+def git_argv(*args: str) -> list[str]:
+    """Build one OS-sandboxed, transport-closed Git observation argv."""
+    return git_observation_argv(*args)
+
+
+GIT_OBSERVATION_INERT_CONFIG = (
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "log.showSignature=false",
+    "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
+    "diff.external=", "core.pager=cat", "core.sshCommand=false", "core.editor=false",
+    "core.askPass=", "credential.helper=",
+    "protocol.allow=never", "protocol.file.allow=never", "protocol.ext.allow=never",
+    "submodule.recurse=false", "fetch.recurseSubmodules=false", "status.showUntrackedFiles=all",
+    "core.fileMode=true",
+)
+GIT_OBSERVATION_SANDBOX_PROFILE = (
+    '(version 1) (allow default) (deny network*) (deny file-write*) '
+    '(allow file-write* (literal "/dev/null")) (deny process-exec) '
+    '(allow process-exec (literal "/Library/Developer/CommandLineTools/usr/bin/git"))'
+)
+GIT_OBSERVATION_ENV_ALLOWLIST = {
+    "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "USER", "LOGNAME", "TERM", "NO_COLOR",
+}
+
+
+def git_observation_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    ambient = os.environ if source is None else source
+    env = {key: value for key, value in ambient.items() if key in GIT_OBSERVATION_ENV_ALLOWLIST or key.startswith("LC_")}
+    env.update({
+        "PATH": CONTAINED_PATH, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    })
+    return env
+
+
+def git_observation_argv(*args: str) -> list[str]:
+    safe_args = list(args)
+    if "status" in safe_args:
+        safe_args = [
+            arg for arg in safe_args
+            if not arg.startswith("--untracked-files") and not arg.startswith("--ignore-submodules")
+        ]
+        at = safe_args.index("status") + 1
+        safe_args[at:at] = ["--untracked-files=all", "--ignore-submodules=none"]
+    if "diff" in safe_args:
+        at = safe_args.index("diff") + 1
+        for flag in reversed(("--no-ext-diff", "--no-textconv")):
+            if flag not in safe_args:
+                safe_args.insert(at, flag)
+    try:
+        sandbox = trusted_executable_path("sandbox-exec")
+        git_real = trusted_executable_path("git-real")
+    except SystemExit as exc:
+        raise OSError(_refusal_reason(exc)) from exc
+    global_options = ["--no-pager"]
+    for pin in GIT_OBSERVATION_INERT_CONFIG:
+        global_options.extend(("-c", pin))
+    return [str(sandbox), "-p", GIT_OBSERVATION_SANDBOX_PROFILE, str(git_real), *global_options, *safe_args]
+
+
+def git_observation_stderr_refused(cmd: list[str], stderr: str | bytes | None) -> bool:
+    """A zero exit with Git errors is not an observation; it is partial, untrusted output."""
+    prefix = [
+        str(TRUSTED_EXECUTABLE_SOURCES["sandbox-exec"]), "-p",
+        GIT_OBSERVATION_SANDBOX_PROFILE, str(TRUSTED_EXECUTABLE_SOURCES["git-real"]),
+    ]
+    return bool(stderr) and cmd[:4] == prefix
+
+
 def git_status(repo: str | None) -> dict[str, Any] | None:
+    """Observe the worktree, or say plainly that it could not be observed.
+
+    An unresolvable trusted git is one of the ways it cannot be observed, and it is reported the
+    same way as any other: this probe is the one an operator runs to find out what is broken, so
+    dying on a git it cannot authenticate would take every unrelated diagnostic in the envelope —
+    Busdriver root, config, hooks, routes, markers, locks — down with it. The refusal is still
+    fail-closed and still names itself; it just does not get to be fatal here.
+    """
     if not repo:
         return None
     path = Path(repo).expanduser().resolve()
-    root_result = run(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    try:
+        return _observed_git_status(path)
+    except OSError as exc:
+        return {"path": str(path), "is_git_repo": False, "observed": False, "error": str(exc)}
+
+
+def _observed_git_status(path: Path) -> dict[str, Any] | None:
+    """Every git call below has its return code checked. r25 checked only --show-toplevel and then
+    read `.stdout` from each later call regardless of exit status: a failed or timed-out
+    `status --porcelain` yields empty stdout, which is byte-identical to a clean tree, so the
+    envelope reported dirty=false with an empty porcelain list and no error anywhere — a clean
+    repository state that was never observed. Branch and HEAD had the same shape, emitting "" as
+    if it were identity. An unobserved repo must block, never certify. This is the sibling of
+    delivery-status.repo_status, which already fails closed this way.
+    """
+    root_result = run(git_argv("rev-parse", "--show-toplevel"), cwd=path)
     if not root_result["ok"]:
-        return {"path": str(path), "is_git_repo": False, "error": root_result["stderr"] or root_result["stdout"]}
+        return {"path": str(path), "is_git_repo": False, "observed": False, "error": root_result["stderr"] or root_result["stdout"]}
     root = Path(root_result["stdout"])
-    branch = run(["git", "branch", "--show-current"], cwd=root)
-    status = run(["git", "status", "--porcelain=v1"], cwd=root)
-    head = run(["git", "rev-parse", "--short", "HEAD"], cwd=root)
-    head_time = run(["git", "show", "-s", "--format=%ct", "HEAD"], cwd=root)
-    git_dir = run(["git", "rev-parse", "--git-dir"], cwd=root)
-    git_dir_path = (root / git_dir["stdout"]).resolve() if git_dir["ok"] and not Path(git_dir["stdout"]).is_absolute() else Path(git_dir["stdout"]) if git_dir["ok"] else None
-    states = {}
-    if git_dir_path:
-        states = {
-            "merge_head": (git_dir_path / "MERGE_HEAD").exists(),
-            "rebase_apply": (git_dir_path / "rebase-apply").exists(),
-            "rebase_merge": (git_dir_path / "rebase-merge").exists(),
-            "cherry_pick_head": (git_dir_path / "CHERRY_PICK_HEAD").exists(),
+    observations = {
+        "branch": run(git_argv("branch", "--show-current"), cwd=root),
+        "status": run(git_argv("status", "--porcelain=v1", "-z"), cwd=root),
+        "head": run(git_argv("rev-parse", "--short", "HEAD"), cwd=root),
+        "git_dir": run(git_argv("rev-parse", "--git-dir"), cwd=root),
+    }
+    failed = next((label for label, result in observations.items() if not result["ok"]), None)
+    if failed is not None:
+        cp = observations[failed]
+        return {
+            "path": str(path),
+            "is_git_repo": True,
+            "observed": False,
+            "root": str(root),
+            "error": "git_observation_failed",
+            "observation_failed": failed,
+            "returncode": cp["returncode"],
+            "stderr": cp["stderr"],
+            "branch": None,
+            "head": None,
+            "head_commit_time": None,
+            "dirty": None,
+            "porcelain": [],
+            "states": {},
         }
-    lines = status["stdout"].splitlines() if status["stdout"] else []
+    # HEAD's commit time is the one call whose failure is tolerable: a repo with an unborn HEAD
+    # has no commit to time, and the freshness comparison already treats None as "cannot compare".
+    head_time = run(git_argv("show", "-s", "--format=%ct", "HEAD"), cwd=root)
+    git_dir_stdout = observations["git_dir"]["stdout"]
+    git_dir_path = (root / git_dir_stdout).resolve() if not Path(git_dir_stdout).is_absolute() else Path(git_dir_stdout)
+    lines = porcelain_entries(observations["status"].get("stdout_bytes") or b"")
     return {
         "path": str(path),
         "is_git_repo": True,
+        "observed": True,
         "root": str(root),
-        "branch": branch["stdout"],
-        "head": head["stdout"],
+        "branch": observations["branch"]["stdout"],
+        "head": observations["head"]["stdout"],
         "head_commit_time": int(head_time["stdout"])
         if head_time["ok"] and head_time["stdout"].isdigit()
         else None,
         "dirty": bool(lines),
         "porcelain": lines,
-        "states": states,
+        "states": {
+            "merge_head": (git_dir_path / "MERGE_HEAD").exists(),
+            "rebase_apply": (git_dir_path / "rebase-apply").exists(),
+            "rebase_merge": (git_dir_path / "rebase-merge").exists(),
+            "cherry_pick_head": (git_dir_path / "CHERRY_PICK_HEAD").exists(),
+        },
     }
 
 
@@ -652,6 +1518,32 @@ def relay_state_root(arg: str | None = None) -> Path:
     if arg:
         return Path(arg).expanduser().resolve()
     return Path(os.environ.get("HERMES_BUSDRIVER_RELAY_STATE", Path.home() / ".hermes" / "busdriver-relay")).expanduser().resolve()
+
+
+def _strip_release_tokens(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {key: _strip_release_tokens(value) for key, value in node.items() if key != "token"}
+    if isinstance(node, list):
+        return [_strip_release_tokens(value) for value in node]
+    return node
+
+
+def public_lock(lock: dict[str, Any]) -> dict[str, Any]:
+    """A lock payload with its release token stripped at every depth.
+
+    Mirrors hermes-busdriver-lock.public_lock(): `token` is the ONLY authenticator `release`
+    checks, so it is a capability, not evidence, and a reader who is not the acquiring holder
+    must never receive it. status is the sharpest case — it is read-only, it publishes to
+    anyone, and it reads lock.json off disk rather than going through the lock CLI, so it is the
+    one consumer that can republish a token the lock's own public_lock() never got to strip.
+
+    The recursion is the deliberate difference from the lock's copy. The lock strips a payload it
+    just built and whose shape it therefore knows; status strips payloads it did not construct
+    and cannot constrain, so `token` under any nesting is still the capability.
+    """
+    published = _strip_release_tokens(lock)
+    published["token_redacted"] = True
+    return published
 
 
 def relay_lock_summary(repo_status: dict[str, Any] | None, operation: str, relay_state_dir: str | None) -> dict[str, Any]:
@@ -665,10 +1557,18 @@ def relay_lock_summary(repo_status: dict[str, Any] | None, operation: str, relay
             payload = json.loads((path / "lock.json").read_text())
         except Exception:
             payload = {"parse_error": True}
+        if not isinstance(payload, dict):
+            # Parsing said "valid JSON", not "a lock". r26 assumed the difference did not matter
+            # and assigned payload["path"] straight after, which a JSON array or scalar turns into
+            # an uncaught TypeError that takes the whole probe down — and readiness forwards the
+            # caller's --relay-state-dir into exactly this loop.
+            payload = {"parse_error": True, "reason": "lock_payload_not_object"}
+        # Strip before anything else touches the payload: every downstream list here is published.
+        payload = public_lock(payload)
         payload["path"] = str(path)
         locks.append(payload)
-        lock_repo = ((payload.get("repo") or {}) if isinstance(payload, dict) else {}).get("root")
-        lock_operation = payload.get("operation") if isinstance(payload, dict) else None
+        lock_repo = (payload.get("repo") or {} if isinstance(payload.get("repo"), dict) else {}).get("root")
+        lock_operation = payload.get("operation")
         if repo_root and lock_repo == repo_root and lock_operation == operation:
             active_for_repo.append(payload)
     return {
@@ -680,11 +1580,58 @@ def relay_lock_summary(repo_status: dict[str, Any] | None, operation: str, relay
     }
 
 
+def resolver_env() -> dict[str, str]:
+    # Same allowlist as child_env, but the resolver shells out to CLIs that live in the
+    # Homebrew/local prefixes, so its PATH is the contained PATH plus those two fixed roots.
+    # BASH_ENV/ENV would let a caller inject a startup file into the verified bytes' own shell.
+    env = child_env()
+    env["PATH"] = f"{CONTAINED_PATH}:/usr/local/bin"
+    return env
+
+
+def trusted_resolver_bytes(root: Path) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Authenticate the resolver before it is allowed to run.
+
+    --plugin-root and BUSDRIVER_PLUGIN_ROOT are caller-controlled, so executing whatever
+    resolve-cli.sh sits under them is arbitrary code execution for anyone who can place a file.
+    The resolver only ever runs when it is the canonical install AND its bytes match the pinned
+    digest; the caller's root is a claim to be checked, never an instruction to be obeyed.
+    """
+    try:
+        canonical = CANONICAL_PLUGIN_ROOT.expanduser().resolve(strict=True)
+    except OSError:
+        return None, {"ok": False, "error": "plugin_root_untrusted", "detail": "canonical_plugin_root_unavailable"}
+    try:
+        claimed = root.expanduser().resolve(strict=True)
+    except OSError:
+        return None, {"ok": False, "error": "plugin_root_untrusted", "detail": "plugin_root_unresolvable"}
+    if claimed != canonical:
+        return None, {"ok": False, "error": "plugin_root_untrusted", "detail": "plugin_root_is_not_the_canonical_busdriver_install"}
+    script = canonical / TRUSTED_RESOLVER_REL
+    if script.is_symlink() or not script.is_file():
+        return None, {"ok": False, "error": "plugin_root_integrity_failed", "detail": "resolver_must_be_a_non_symlink_regular_file"}
+    try:
+        content = script.read_bytes()
+    except OSError as e:
+        return None, {"ok": False, "error": "plugin_root_integrity_failed", "detail": f"resolver_unreadable: {e}"}
+    if hashlib.sha256(content).hexdigest() != TRUSTED_RESOLVER_SHA256:
+        return None, {"ok": False, "error": "plugin_root_integrity_failed", "detail": "resolver_digest_mismatch"}
+    return content, None
+
+
 def resolve_cli(root: Path) -> dict[str, Any]:
-    script = root / "scripts/lib/resolve-cli.sh"
-    if not script.exists():
-        return {"ok": False, "error": "missing scripts/lib/resolve-cli.sh"}
-    res = run(["bash", str(script), "--json"], cwd=root, timeout=20)
+    content, failure = trusted_resolver_bytes(root)
+    if failure is not None:
+        return failure
+    # Execute the verified bytes over stdin rather than re-opening the pathname: a re-open would
+    # reintroduce the TOCTOU window the digest check just closed.
+    res = run(
+        ["/bin/bash", "-s", "--", "--json"],
+        cwd=CANONICAL_PLUGIN_ROOT.expanduser().resolve(),
+        timeout=20,
+        stdin_bytes=content,
+        env=resolver_env(),
+    )
     if not res["ok"]:
         return res
     try:
@@ -703,6 +1650,7 @@ def main() -> int:
     ap.add_argument("--relay-state-dir", help="Hermes Busdriver Relay state dir for lock summary")
     ap.add_argument("--operation", default="repo-mutation", help="Operation class for lock summary")
     ap.add_argument("--drift-baseline", help="Read-only Busdriver drift baseline JSON to compare against")
+    ap.add_argument("--no-external-resolver", action="store_true", help="Do not execute plugin-root resolver bytes")
     ap.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     args = ap.parse_args()
 
@@ -710,7 +1658,7 @@ def main() -> int:
     hooks = hook_inventory(root)
     hook_refs = extract_script_refs(hooks.get("commands", []))
     repo = git_status(args.repo)
-    resolver = resolve_cli(root)
+    resolver = {"ok": False, "error": "external_resolver_disabled"} if args.no_external_resolver else resolve_cli(root)
     cfg_status = user_config_status(args.state_dir, args.user_config)
     cfg_data, _cfg_err = read_json(Path(cfg_status["path"]))
     if not isinstance(cfg_data, dict):

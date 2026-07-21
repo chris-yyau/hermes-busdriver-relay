@@ -21,12 +21,14 @@ FULL_RELAY_ROLE_MAP = {
 }
 
 NON_PROGRAMMATIC_RELAY_ROLES = {
+    "relay.impl.primary",
     "relay.impl.secondary",
     "relay.impl.fallback",
     "relay.ide.manual",
 }
 
 UNVERIFIED_ADAPTER_RELAY_ROLES = {
+    "relay.impl.primary",
     "relay.impl.secondary",
     "relay.impl.fallback",
 }

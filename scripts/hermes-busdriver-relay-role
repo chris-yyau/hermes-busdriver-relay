@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Resolve one relay-owned equivalent role from relay config.
 
 Read-only helper for dispatchers: it selects the configured logical
@@ -9,13 +9,497 @@ mutation/finalization authority.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
+import os
+import select
+import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
+SF_RESTRICTED = 0x00080000
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> SystemExit:
+    payload = {"ok": False, "error": f"trusted_root_owned_source_{reason}", "executable": name}
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+def _trusted_identity(st: os.stat_result) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    try:
+        parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        root_st = os.fstat(parent_fd)
+        if not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != 0 or root_st.st_mode & _NON_OWNER_WRITABLE:
+            raise _trusted_source_refusal(name, "ancestry_untrusted", "/")
+        for component in path.parts[1:-1]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                  dir_fd=parent_fd)
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+            directory_st = os.fstat(parent_fd)
+            if (not stat.S_ISDIR(directory_st.st_mode) or directory_st.st_uid != 0
+                    or directory_st.st_mode & _NON_OWNER_WRITABLE):
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            reason = "metadata_invalid" if exc.errno == errno.ELOOP else "unavailable"
+            raise _trusted_source_refusal(name, reason, type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                    or opened.st_mode & _NON_OWNER_WRITABLE
+                    or not opened.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+                raise _trusted_source_refusal(name, "metadata_invalid")
+            if name in SHIM_BACKED_SOURCES:
+                if not getattr(opened, "st_flags", 0) & SF_RESTRICTED:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+            elif opened.st_nlink != 1:
+                raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+            chunks, total = [], 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _trusted_identity(os.fstat(fd)) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if _trusted_identity(final) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
+
 STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
+TRUSTED_STATUS_SHA256 = '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'
+MAX_AUTHENTICATED_STATUS_BYTES = 1 << 20
+STATUS_STDIN_LOADER = (
+    "import sys\n"
+    "virtual = sys.argv[1]\n"
+    "program = sys.stdin.buffer.read()\n"
+    "sys.argv = [virtual, *sys.argv[2:]]\n"
+    "namespace = {'__name__': '__main__', '__file__': virtual, '__package__': None, '__cached__': None}\n"
+    "exec(compile(program, virtual, 'exec'), namespace)\n"
+)
+
+
+def read_authenticated_status_script() -> bytes:
+    before = STATUS_SCRIPT.lstat()
+    if STATUS_SCRIPT.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise OSError("status_metadata_invalid")
+    fd = os.open(STATUS_SCRIPT, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("status_identity_changed")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or opened.st_nlink != 1:
+            raise OSError("status_metadata_invalid")
+        if opened.st_size > MAX_AUTHENTICATED_STATUS_BYTES:
+            raise OSError("status_too_large")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHENTICATED_STATUS_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_AUTHENTICATED_STATUS_BYTES:
+            raise OSError("status_too_large")
+        after = os.fstat(fd)
+        if (
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_uid != os.getuid()
+            or after.st_nlink != 1
+            or after.st_size != opened.st_size
+            or stat.S_IMODE(after.st_mode) != stat.S_IMODE(opened.st_mode)
+            or len(data) != after.st_size
+        ):
+            raise OSError("status_changed_during_read")
+        landed = os.lstat(STATUS_SCRIPT)
+        if (landed.st_dev, landed.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("status_replaced_during_read")
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != TRUSTED_STATUS_SHA256:
+        raise OSError("status_integrity_failed")
+    return data
+
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# The status probe re-derives its own trusted runtime from its frozen root-owned table, so it needs
+# no ambient help at all. Nothing is forwarded any more: HERMES_BUSDRIVER_PRIVATE_RUNTIME was the
+# last entry, and it existed to point a child at a directory of private copies that no longer
+# exists. Parity with child_env() in hermes-busdriver-delivery-status.
+FORWARDED_CHILD_ENV_KEYS: "tuple[str, ...]" = ()
+
+
+def child_env() -> dict[str, str]:
+    """Explicit allowlist for the status child, mirroring child_env() in delivery-status.
+
+    Inheriting os.environ handed the child a caller-controlled PATH plus PYTHONPATH/BASH_ENV/
+    LD_*/DYLD_*, each of which injects code into a child's startup or loader. No credential is
+    forwarded: this probe resolves a role from config and never talks to GitHub.
+    """
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = CONTAINED_PATH
+    env.update({key: os.environ[key] for key in FORWARDED_CHILD_ENV_KEYS if isinstance(os.environ.get(key), str)})
+    return env
 
 
 def fail_closed_payload(reason: str, role: str | None = None, details: list[str] | None = None) -> dict[str, Any]:
@@ -48,13 +532,23 @@ def print_payload(payload: dict[str, Any], pretty: bool) -> None:
 
 
 def load_status_payload(args: argparse.Namespace) -> tuple[dict[str, Any] | None, str | None]:
-    cmd = [sys.executable, str(STATUS_SCRIPT)]
+    # -I runs the trusted status script isolated: no PYTHONPATH, no user site-packages, no cwd on
+    # sys.path, so a caller cannot shadow a stdlib import inside the child. Parity with
+    # python_child() in hermes-busdriver-delivery-status.
+    try:
+        status_program = read_authenticated_status_script()
+    except OSError as exc:
+        return None, f"status_probe_integrity_failed:{str(exc) or type(exc).__name__}"
+    cmd = [str(trusted_executable_path("python3")), "-I", "-c", STATUS_STDIN_LOADER, str(STATUS_SCRIPT), "--no-external-resolver"]
     if args.relay_config:
         cmd.extend(["--relay-config", args.relay_config])
     if args.relay_state_dir:
         cmd.extend(["--relay-state-dir", args.relay_state_dir])
     try:
-        proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=60)
+        bounded = run_bounded(cmd, timeout=60, env=child_env(), stdin_bytes=status_program)
+        if bounded.overflowed or bounded.timed_out:
+            raise subprocess.SubprocessError("status_child_output_unusable")
+        proc = subprocess.CompletedProcess(cmd, bounded.returncode, bounded.stdout, bounded.stderr)
     except subprocess.TimeoutExpired:
         return None, "status_probe_timeout"
     if proc.returncode != 0:
@@ -96,14 +590,28 @@ def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, bool
         config_error = selected.get("config_error")
         reason = config_error if isinstance(config_error, str) and config_error else "selected_agent_unavailable"
         return "degraded", False, False, selected, reason
-    programmatic_dispatch_allowed = selected.get("programmatic_dispatch_allowed", True)
+    if "programmatic_dispatch_allowed" not in selected:
+        return "degraded", False, False, selected, "status_probe_missing_dispatch_allowed"
+    programmatic_dispatch_allowed = selected["programmatic_dispatch_allowed"]
     if not isinstance(programmatic_dispatch_allowed, bool):
         return "degraded", False, False, selected, "status_probe_invalid_dispatch_allowed_shape"
-    if not programmatic_dispatch_allowed:
-        dispatch_blocker = selected.get("dispatch_blocker")
-        reason = dispatch_blocker if isinstance(dispatch_blocker, str) and dispatch_blocker else "selected_agent_not_programmatically_dispatchable"
-        return "resolved", True, False, selected, reason
-    return "resolved", True, True, selected, "selected_agent_available"
+    if "adapter_verified" not in selected:
+        return "degraded", False, False, selected, "status_probe_missing_adapter_verified"
+    adapter_verified = selected["adapter_verified"]
+    if not isinstance(adapter_verified, bool):
+        return "degraded", False, False, selected, "status_probe_invalid_adapter_verified_shape"
+    if programmatic_dispatch_allowed:
+        if not adapter_verified:
+            return "degraded", False, False, selected, "status_probe_adapter_not_verified"
+        if selected.get("dispatch_blocker") is not None:
+            return "degraded", False, False, selected, "status_probe_dispatch_allowed_with_blocker"
+        return "resolved", True, True, selected, "selected_agent_available"
+    if "dispatch_blocker" not in selected:
+        return "degraded", False, False, selected, "status_probe_missing_dispatch_blocker"
+    dispatch_blocker = selected["dispatch_blocker"]
+    if not isinstance(dispatch_blocker, str) or not dispatch_blocker.strip():
+        return "degraded", False, False, selected, "status_probe_invalid_dispatch_blocker_shape"
+    return "resolved", True, False, selected, dispatch_blocker
 
 
 def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
