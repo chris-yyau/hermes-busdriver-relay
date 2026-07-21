@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Run the safe Hermes Busdriver Relay v1 smoke checks.
 
 This smoke runner is intentionally non-mutating for Busdriver and target repos.
@@ -8,12 +8,419 @@ cache files ignored by git.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
-import shutil
+import os
+import select
+import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+
+# The most this process will hold of any child's output. Small on purpose: every consumer of these
+# bytes emits at most a 4000-char tail, so this is already an order of magnitude more than anything
+# legitimate needs, and the child choosing the number is the bug being fixed.
+#
+# Kept byte-identical across the relays that capture output (agent-draft, the pi and opencode
+# wrappers, gate, deliver, delivery-status, smoke). These are standalone executables with no shared
+# import path — the same reason SENSITIVE_PATTERNS is restated rather than imported — so a contract
+# test asserts the copies agree.
+MAX_CAPTURED_BYTES = 64 * 1024
+
+
+class BoundedOutput:
+    """What a child was allowed to say. `overflowed` means it said more, so it said nothing."""
+
+    __slots__ = ("returncode", "stdout", "stderr", "overflowed", "timed_out")
+
+    def __init__(self, returncode: int, stdout, stderr, overflowed: bool, timed_out: bool):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.overflowed, self.timed_out = overflowed, timed_out
+
+
+def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
+    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    try:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            seen[0] += len(chunk)
+            room = limit - len(kept)
+            if room > 0:
+                kept += chunk[:room]
+            if seen[0] > limit:
+                overflow.set()
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
+    out, err = bytearray(), bytearray()
+    out_seen, err_seen = [0], [0]
+    overflow = threading.Event()
+    threads = [
+        threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
+        threading.Thread(target=_drain_bounded, args=(stderr_pipe, limit, err, err_seen, overflow), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    return threads, out, err, out_seen, err_seen, overflow
+
+
+def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
+    if out_seen[0] > limit or err_seen[0] > limit:
+        return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
+    if not text:
+        return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
+    return BoundedOutput(code, out.decode(errors="replace"), err.decode(errors="replace"), False, timed_out)
+
+
+def _kill_bounded_group(process) -> None:
+    """Kill the session led by *process*; fall back only when the group cannot be addressed."""
+    try:
+        os.killpg(process.pid, 9)
+        return
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+class _BoundedExitWatch:
+    """Observe child exit through a kernel handle without reaping or recycling its PID."""
+
+    __slots__ = ("kind", "resource")
+
+    def __init__(self, pid: int):
+        if hasattr(select, "kqueue"):
+            kqueue = select.kqueue()
+            change = select.kevent(
+                pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            try:
+                kqueue.control([change], 0, 0)
+            except BaseException:
+                kqueue.close()
+                raise
+            self.kind, self.resource = "kqueue", kqueue
+            return
+
+        pidfd_open = getattr(os, "pidfd_open", None)
+        poll_type = getattr(select, "poll", None)
+        if pidfd_open is not None and poll_type is not None:
+            pidfd = pidfd_open(pid, 0)
+            poller = poll_type()
+            try:
+                poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            self.kind, self.resource = "pidfd", (pidfd, poller)
+            return
+
+        raise OSError(errno.ENOTSUP, "nonreaping_process_exit_watch_unavailable")
+
+    def exited(self) -> bool:
+        if self.kind == "kqueue":
+            return bool(self.resource.control(None, 1, 0))
+        _pidfd, poller = self.resource
+        return bool(poller.poll(0))
+
+    def close(self) -> None:
+        if self.kind == "kqueue":
+            self.resource.close()
+            return
+        pidfd, _poller = self.resource
+        os.close(pidfd)
+
+
+def _bounded_exit_watch(process) -> _BoundedExitWatch:
+    return _BoundedExitWatch(process.pid)
+
+
+def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -> BoundedOutput:
+    """Bound output, deadline, descendants, drain and reap for a new-session child."""
+    exit_watch = None
+    threads = []
+    stdin_thread = None
+    try:
+        try:
+            exit_watch = _bounded_exit_watch(process)
+        except (OSError, ValueError) as exc:
+            # No safe exit observer means no safe later group signal. Kill while the leader is still
+            # ours, reap it, close every pipe, and refuse the run without exposing child-authored bytes.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            detail = f"process_exit_watch_unavailable:{type(exc).__name__}"
+            return BoundedOutput(125, "" if text else b"", detail if text else detail.encode(), False, False)
+
+        threads, out, err, out_seen, err_seen, overflow = _start_bounded_drains(
+            process.stdout, process.stderr, limit
+        )
+
+        if process.stdin is not None:
+            def feed_stdin() -> None:
+                try:
+                    if stdin_bytes is not None:
+                        process.stdin.write(stdin_bytes)
+                        process.stdin.flush()
+                except (OSError, BrokenPipeError, ValueError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except (OSError, ValueError, AttributeError):
+                        pass
+            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+            stdin_thread.start()
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        timed_out = False
+        killed = False
+        observed_exit = False
+        watch_error = None
+        try:
+            while True:
+                if overflow.is_set():
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                try:
+                    if exit_watch.exited():
+                        observed_exit = True
+                        break
+                except (OSError, ValueError) as exc:
+                    watch_error = f"process_exit_watch_failed:{type(exc).__name__}"
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    _kill_bounded_group(process)
+                    killed = True
+                    break
+                time.sleep(0.01)
+        finally:
+            exit_watch.close()
+
+        # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
+        # cannot be reused until every possible process-group signal below has finished.
+        for thread in threads:
+            thread.join(timeout=0.05)
+        if observed_exit and not killed:
+            _kill_bounded_group(process)
+            killed = True
+        if overflow.is_set() or any(thread.is_alive() for thread in threads):
+            if not killed:
+                _kill_bounded_group(process)
+                killed = True
+
+        reap_deadline = time.monotonic() + 5.0
+        try:
+            process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired did not reap. A final signal is still bound to the unreaped leader.
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=max(0.0, reap_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        for thread in threads:
+            thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in threads):
+            # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
+            out_seen[0] = max(out_seen[0], limit + 1)
+            err_seen[0] = max(err_seen[0], limit + 1)
+
+        if watch_error is not None:
+            return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        code = process.returncode if process.returncode is not None else 125
+        if timed_out:
+            code = 124
+        return _bounded_result(code, out, err, out_seen, err_seen, limit, timed_out, text)
+    except BaseException:
+        try:
+            if exit_watch is not None:
+                exit_watch.close()
+        except BaseException:
+            pass
+        if process.returncode is None:
+            _kill_bounded_group(process)
+            try:
+                process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+        for thread in threads:
+            try:
+                thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        if stdin_thread is not None:
+            try:
+                stdin_thread.join(timeout=0.1)
+            except BaseException:
+                pass
+        raise
+
+def run_bounded(
+    cmd: list[str],
+    cwd=None,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+    stdin_bytes: bytes | None = None,
+    limit: int = MAX_CAPTURED_BYTES,
+    text: bool = True,
+) -> BoundedOutput:
+    """Launch a new process group and bound bytes, time, descendants, drains and reaping."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        return BoundedOutput(127, "" if text else b"", detail if text else detail.encode(), False, False)
+    return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
+
+
+
+
+TRUSTED_EXECUTABLE_DIGESTS = {
+    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+}
+TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
+SF_RESTRICTED = 0x00080000
+_NON_OWNER_WRITABLE = stat.S_IWGRP | stat.S_IWOTH
+SHIM_BACKED_SOURCES = frozenset({"python3"})
+ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
+    "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
+})
+MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+
+
+def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> SystemExit:
+    payload = {"ok": False, "error": f"trusted_root_owned_source_{reason}", "executable": name}
+    if detail:
+        payload["detail"] = detail
+    return SystemExit(json.dumps(payload, sort_keys=True))
+
+
+def _trusted_identity(st: os.stat_result) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_gid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _validated_root_owned_source(path: Path, name: str) -> Path:
+    expected = TRUSTED_EXECUTABLE_DIGESTS[name]
+    if not path.is_absolute():
+        raise _trusted_source_refusal(name, "metadata_invalid", "not_absolute")
+    try:
+        parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise _trusted_source_refusal(name, "ancestry_untrusted", "/") from exc
+    try:
+        root_st = os.fstat(parent_fd)
+        if not stat.S_ISDIR(root_st.st_mode) or root_st.st_uid != 0 or root_st.st_mode & _NON_OWNER_WRITABLE:
+            raise _trusted_source_refusal(name, "ancestry_untrusted", "/")
+        for component in path.parts[1:-1]:
+            try:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                  dir_fd=parent_fd)
+            except OSError as exc:
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component) from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+            directory_st = os.fstat(parent_fd)
+            if (not stat.S_ISDIR(directory_st.st_mode) or directory_st.st_uid != 0
+                    or directory_st.st_mode & _NON_OWNER_WRITABLE):
+                raise _trusted_source_refusal(name, "ancestry_untrusted", component)
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            reason = "metadata_invalid" if exc.errno == errno.ELOOP else "unavailable"
+            raise _trusted_source_refusal(name, reason, type(exc).__name__) from exc
+        try:
+            opened = os.fstat(fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                    or opened.st_mode & _NON_OWNER_WRITABLE
+                    or not opened.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+                raise _trusted_source_refusal(name, "metadata_invalid")
+            if name in SHIM_BACKED_SOURCES:
+                if not getattr(opened, "st_flags", 0) & SF_RESTRICTED:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "not_sip_restricted")
+            elif opened.st_nlink != 1:
+                raise _trusted_source_refusal(name, "metadata_invalid", "multiply_linked")
+            chunks, total = [], 0
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_TRUSTED_EXECUTABLE_BYTES:
+                    raise _trusted_source_refusal(name, "metadata_invalid", "oversized")
+                chunks.append(chunk)
+            if hashlib.sha256(b"".join(chunks)).hexdigest() != expected:
+                raise _trusted_source_refusal(name, "integrity_failed")
+            if _trusted_identity(os.fstat(fd)) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "descriptor")
+            final = os.lstat(path.name, dir_fd=parent_fd)
+            if _trusted_identity(final) != _trusted_identity(opened):
+                raise _trusted_source_refusal(name, "identity_changed", "path")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return path
+
+
+def trusted_executable_path(name: str) -> Path:
+    source = TRUSTED_EXECUTABLE_SOURCES.get(name)
+    if source is None:
+        raise _trusted_source_refusal(name, "unsupported")
+    return _validated_root_owned_source(source, name)
+
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATUS = ROOT / "scripts" / "hermes-busdriver-status"
@@ -33,6 +440,26 @@ FINALIZATION_CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization
 RELAY_BRIEF = ROOT / "scripts" / "hermes-busdriver-relay-brief"
 AGENT_BALANCE_PLAN = ROOT / "scripts" / "hermes-busdriver-agent-balance-plan"
 SMOKE = ROOT / "scripts" / "hermes-busdriver-smoke"
+TRUSTED_HELPER_PATHS = {
+    "status": STATUS,
+    "runtime": RUNTIME,
+    "finalization_readiness": FINALIZATION_READINESS,
+    "gate": GATE,
+}
+TRUSTED_HELPER_DIGESTS = {'status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd',
+                          'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
+                          'finalization_readiness': '0e02bb4ac29093254560adec60ad4af7ce272761e16f73a1cab6372cb791ef33',
+                          'gate': '48ec2229d1889e2236f790751ebd7d6b0007b4195e0b8e8f12ff4608d2173c8e'}
+MAX_TRUSTED_HELPER_BYTES = 1024 * 1024
+TRUSTED_HELPER_STDIN_LOADER = (
+    "import sys\n"
+    "virtual=sys.argv[1]\n"
+    "sys.argv=[virtual,*sys.argv[2:]]\n"
+    "source=sys.stdin.buffer.read()\n"
+    "ns={'__name__':'__main__','__file__':virtual,'__package__':None}\n"
+    "exec(compile(source,virtual,'exec'),ns,ns)\n"
+)
+DEFAULT_PYTEST_TIMEOUT = 600
 PY_COMPILE_SCRIPTS = [
     STATUS,
     RELAY_ROLE,
@@ -54,20 +481,103 @@ PY_COMPILE_SCRIPTS = [
 ]
 
 
-def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> dict[str, Any]:
+CONTAINED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def child_env() -> dict[str, str]:
+    """Explicit allowlist for every child of this smoke runner.
+
+    The caller's environment is untrusted input: PATH decides which binary runs, and
+    PYTHONPATH/PYTHONHOME/BASH_ENV/LD_*/DYLD_* inject code into a child's startup or loader.
+    Ambient GIT_* redirects git, so nothing from it is inherited.
+    """
+    allowed = {"HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR"}
+    env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
+    env["PATH"] = CONTAINED_PATH
+    return env
+
+
+def python_child(*args: str) -> list[str]:
+    # -B: never dirty the candidate with bytecode. -I: no PYTHONPATH, user site, or cwd imports.
+    return [str(trusted_executable_path("python3")), "-B", "-I", *args]
+
+
+def python_syntax_check(*paths: Path) -> list[str]:
+    # py_compile writes pyc files even under -B. Compile the trusted source bytes in memory.
+    code = "import pathlib,sys; [compile(pathlib.Path(p).read_bytes(), p, 'exec') for p in sys.argv[1:]]"
+    return python_child("-c", code, *map(str, paths))
+
+
+def run(
+    cmd: list[str], cwd: Path = ROOT, timeout: int = 120, stdin_bytes: bytes | None = None,
+) -> dict[str, Any]:
     try:
-        p = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        p = run_bounded(cmd, cwd=cwd, timeout=timeout, env=child_env(), stdin_bytes=stdin_bytes)
+    except OSError as e:
+        return {"cmd": cmd, "returncode": 127, "ok": False, "stdout": "", "stderr": str(e)}
+    if p.overflowed:
+        # This runner prints its whole result to stdout and has no redaction helper, so a pytest
+        # failure echoing an env dict landed verbatim in the envelope. Over the bound, nothing does.
+        return {"cmd": cmd, "returncode": 125, "ok": False, "stdout": "", "stderr": "child_output_too_large"}
+    if p.timed_out:
         return {
             "cmd": cmd,
             "returncode": 124,
             "ok": False,
-            "stdout": stdout.strip(),
-            "stderr": (stderr.strip() or f"timed out after {timeout}s"),
+            "stdout": p.stdout.strip(),
+            "stderr": (p.stderr.strip() or f"timed out after {timeout}s"),
         }
     return {"cmd": cmd, "returncode": p.returncode, "ok": p.returncode == 0, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
+
+
+def authenticated_helper_bytes(name: str) -> bytes:
+    path = TRUSTED_HELPER_PATHS[name]
+    expected = TRUSTED_HELPER_DIGESTS[name]
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_TRUSTED_HELPER_BYTES:
+            raise OSError("trusted_helper_metadata_invalid")
+        chunks: list[bytes] = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                raise OSError("trusted_helper_changed_during_read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise OSError("trusted_helper_changed_during_read")
+        after = os.fstat(fd)
+        stable = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, key) != getattr(after, key) for key in stable):
+            raise OSError("trusted_helper_changed_during_read")
+        landed = os.lstat(path)
+        if (landed.st_dev, landed.st_ino, landed.st_mode) != (before.st_dev, before.st_ino, before.st_mode):
+            raise OSError("trusted_helper_changed_during_read")
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise OSError("trusted_helper_integrity_failed")
+    return data
+
+
+def run_python_helper(name: str, *args: str, timeout: int = 120) -> dict[str, Any]:
+    path = TRUSTED_HELPER_PATHS[name]
+    try:
+        source = authenticated_helper_bytes(name)
+    except OSError as exc:
+        return {
+            "cmd": [str(path), *args], "returncode": 125, "ok": False, "stdout": "",
+            "stderr": str(exc), "error": "trusted_helper_integrity_failed",
+        }
+    return run(
+        python_child("-c", TRUSTED_HELPER_STDIN_LOADER, str(path), *args),
+        timeout=timeout,
+        stdin_bytes=source,
+    )
 
 
 def mark_summary_parse_error(check: dict[str, Any], error: Exception) -> None:
@@ -77,17 +587,18 @@ def mark_summary_parse_error(check: dict[str, Any], error: Exception) -> None:
         check["returncode"] = 1
 
 
-def pytest_cmd() -> list[str]:
-    probe = subprocess.run([sys.executable, "-c", "import pytest"], text=True, capture_output=True)
-    if probe.returncode == 0:
-        return [sys.executable, "-m", "pytest"]
-    pytest_bin = shutil.which("pytest")
-    if pytest_bin:
-        return [pytest_bin]
-    uvx = shutil.which("uvx")
-    if uvx:
-        return [uvx, "--from", "pytest", "pytest"]
-    return [sys.executable, "-m", "pytest"]
+def pytest_cmd() -> list[str] | None:
+    """Resolve pytest from this interpreter only, or fail closed.
+
+    A `pytest`/`uvx` picked off the caller's PATH is attacker-choosable, so the old
+    fallback is gone: if this interpreter cannot import pytest, smoke reports that
+    truthfully instead of running some other binary.
+    """
+    try:
+        probe = run_bounded(python_child("-c", "import pytest"), timeout=60, env=child_env())
+    except OSError:
+        return None
+    return python_child("-m", "pytest", "-p", "no:cacheprovider") if probe.returncode == 0 and not probe.timed_out else None
 
 
 def summarize_finalization_readiness(readiness: dict[str, Any]) -> dict[str, Any]:
@@ -132,14 +643,27 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = []
-    checks.append(run([sys.executable, "-m", "py_compile", *map(str, PY_COMPILE_SCRIPTS)]))
-    checks.append(run([*pytest_cmd(), "tests/contract", "-q"], timeout=180))
+    checks.append(run(python_syntax_check(*PY_COMPILE_SCRIPTS)))
+    pytest_base = pytest_cmd()
+    if pytest_base is None:
+        checks.append({
+            "cmd": python_child("-m", "pytest", "-p", "no:cacheprovider"),
+            "returncode": 127,
+            "ok": False,
+            "stdout": "",
+            "stderr": "/usr/bin/python3 cannot import pytest; smoke will not run pytest from the caller PATH",
+            "error": "pytest_unavailable",
+        })
+    else:
+        checks.append(run([*pytest_base, "tests/contract", "-q"], timeout=DEFAULT_PYTEST_TIMEOUT))
 
     if args.plugin_root:
-        cmd = [sys.executable, str(STATUS), "--plugin-root", args.plugin_root]
+        # Smoke checks presence/shape, never route resolution, so it does not ask the status
+        # probe to execute resolver bytes.
+        cmd = ["--plugin-root", args.plugin_root, "--no-external-resolver"]
         if args.repo:
             cmd += ["--repo", args.repo]
-        checks.append(run(cmd, timeout=60))
+        checks.append(run_python_helper("status", *cmd, timeout=60))
         if checks[-1]["ok"]:
             try:
                 status = json.loads(checks[-1]["stdout"])
@@ -154,10 +678,10 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001
                 mark_summary_parse_error(checks[-1], e)
 
-        runtime_cmd = [sys.executable, str(RUNTIME), "--plugin-root", args.plugin_root]
+        runtime_cmd = ["--plugin-root", args.plugin_root]
         if args.repo:
             runtime_cmd += ["--repo", args.repo]
-        checks.append(run(runtime_cmd, timeout=60))
+        checks.append(run_python_helper("runtime", *runtime_cmd, timeout=60))
         if checks[-1]["ok"]:
             try:
                 runtime = json.loads(checks[-1]["stdout"])
@@ -172,10 +696,10 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001
                 mark_summary_parse_error(checks[-1], e)
 
-        readiness_cmd = [sys.executable, str(FINALIZATION_READINESS), "--plugin-root", args.plugin_root]
+        readiness_cmd = ["--plugin-root", args.plugin_root]
         if args.repo:
             readiness_cmd += ["--repo", args.repo]
-        checks.append(run(readiness_cmd, timeout=90))
+        checks.append(run_python_helper("finalization_readiness", *readiness_cmd, timeout=90))
         if checks[-1]["ok"]:
             try:
                 readiness = json.loads(checks[-1]["stdout"])
@@ -185,8 +709,8 @@ def main() -> int:
                 mark_summary_parse_error(checks[-1], e)
 
         if args.repo:
-            gate_cmd = [sys.executable, str(GATE), "preflight", "--plugin-root", args.plugin_root, "--repo", args.repo]
-            checks.append(run(gate_cmd, timeout=60))
+            gate_cmd = ["preflight", "--plugin-root", args.plugin_root, "--repo", args.repo]
+            checks.append(run_python_helper("gate", *gate_cmd, timeout=60))
             if checks[-1]["ok"]:
                 try:
                     gate = json.loads(checks[-1]["stdout"])

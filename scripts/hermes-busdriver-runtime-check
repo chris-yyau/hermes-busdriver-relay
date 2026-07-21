@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only H13 hook-runtime equivalence checker for Hermes Busdriver Relay.
 
 This script does NOT execute Busdriver gates and does NOT mutate repos. It reports

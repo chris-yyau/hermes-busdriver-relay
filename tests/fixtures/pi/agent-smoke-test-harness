@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Non-installed runnable agent-smoke contract fixture."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[3]
+AGENT_DRAFT = ROOT / "tests" / "fixtures" / "pi" / "agent-draft-test-harness"
+SCHEMA = "hermes-busdriver-agent-smoke/v0"
+
+
+def run(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+
+
+def must(cmd: list[str], cwd: Path | None = None) -> None:
+    cp = run(cmd, cwd=cwd)
+    if cp.returncode != 0:
+        raise RuntimeError(f"command failed: {cmd}\nstdout={cp.stdout}\nstderr={cp.stderr}")
+
+
+def init_repo(root: Path) -> None:
+    must(["git", "init"], cwd=root)
+    must(["git", "config", "user.email", "smoke@example.com"], cwd=root)
+    must(["git", "config", "user.name", "Hermes Agent Smoke"], cwd=root)
+    (root / "src").mkdir()
+    (root / "src" / "README.txt").write_text("initial\n")
+    (root / ".gitignore").write_text(".env\n")
+    must(["git", "add", "."], cwd=root)
+    must(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], cwd=root)
+
+
+def summarize_report(data: dict[str, Any]) -> dict[str, Any]:
+    decision = data.get("decision") or {}
+    postflight = data.get("postflight") or {}
+    return {
+        "ok": data.get("ok"),
+        "status": data.get("status"),
+        "agent": data.get("agent"),
+        "agent_returncode": (data.get("agent_result") or {}).get("returncode"),
+        "changed_files": postflight.get("changed_files"),
+        "decision": {
+            "agent_implementation_draft_allowed": decision.get("agent_implementation_draft_allowed"),
+            "commit_allowed": decision.get("commit_allowed"),
+            "push_allowed": decision.get("push_allowed"),
+            "pr_allowed": decision.get("pr_allowed"),
+            "merge_allowed": decision.get("merge_allowed"),
+            "deploy_allowed": decision.get("deploy_allowed"),
+        },
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--plugin-root", required=True)
+    ap.add_argument("--agent", default="pi", choices=["pi", "opencode"])
+    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"))
+    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"))
+    ap.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"))
+    ap.add_argument("--opencode-agent", default=os.environ.get("OPENCODE_BD_AGENT", "build"))
+    ap.add_argument("--opencode-model", default=os.environ.get("OPENCODE_BD_MODEL", ""))
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--keep-repo", action="store_true")
+    ap.add_argument("--pretty", action="store_true")
+    args = ap.parse_args()
+
+    tmp_obj = None if args.keep_repo else tempfile.TemporaryDirectory(prefix="hermes-agent-smoke-")
+    repo = Path(tempfile.mkdtemp(prefix="hermes-agent-smoke-")) if tmp_obj is None else Path(tmp_obj.name)
+    try:
+        init_repo(repo)
+        expected = f"{args.agent} adapter smoke ok"
+        target = f"src/{args.agent}_smoke.txt"
+        prompt = (
+            f"Create or overwrite {target} with exactly this content, including the trailing newline:\n"
+            "```text\n"
+            f"{expected}\n"
+            "```\n"
+            "Do not add punctuation. Do not commit. Do not modify any other file."
+        )
+        cmd = [
+            sys.executable, str(AGENT_DRAFT), "--plugin-root", args.plugin_root,
+            "--repo", str(repo), "--agent", args.agent, "--prompt", prompt,
+            "--scope-include", target, "--verifier", f"file=grep -qx {json.dumps(expected)} {target}",
+            "--timeout", str(args.timeout),
+        ]
+        if args.agent == "pi":
+            cmd += ["--pi-bin", args.pi_bin, "--pi-model", args.pi_model]
+        else:
+            cmd += ["--opencode-bin", args.opencode_bin, "--opencode-agent", args.opencode_agent]
+            if args.opencode_model:
+                cmd += ["--opencode-model", args.opencode_model]
+        cp = run(cmd, timeout=args.timeout + 120)
+        try:
+            draft = json.loads(cp.stdout)
+        except Exception:
+            try:
+                draft = json.loads(cp.stderr)
+            except Exception:
+                draft = {"parse_error": True, "stdout": cp.stdout, "stderr": cp.stderr}
+        status = run(["git", "status", "--short"], cwd=repo)
+        result = {
+            "schema": SCHEMA,
+            "ok": cp.returncode == 0 and bool(draft.get("ok")),
+            "repo": str(repo),
+            "kept_repo": args.keep_repo,
+            "agent_draft_returncode": cp.returncode,
+            "summary": summarize_report(draft) if isinstance(draft, dict) else {},
+            "git_status_after": status.stdout.splitlines(),
+            "target": target,
+            "target_content": (repo / target).read_text() if (repo / target).exists() else None,
+        }
+        print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
+        return 0 if result["ok"] else 2
+    finally:
+        if tmp_obj is not None:
+            tmp_obj.cleanup()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
