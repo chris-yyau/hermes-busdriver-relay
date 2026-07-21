@@ -35,29 +35,64 @@ FINALIZATION_AUTHORITY_SCHEMA = "hermes-busdriver-finalization-authority/v0"
 PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
 TRUSTED_BUSDRIVER_PLUGIN_COMMIT = "835dc1784a7ae5c34a5f8f58d6731a482f64df0a"
 TRUSTED_BUSDRIVER_PLUGIN_VERSION = "1.90.0"
-TRUSTED_PR_GRIND_LOOP_SHA256 = "7a5a1c1ca803d639603e4090c771657af0d776e78bcb83142387671a154f1515"
-TRUSTED_PR_GRIND_CHECK_SHA256 = "af549d313336205136e376d6ad35622ca504ba1e4f7d4d7d88ace2b134036b49"
-TRUSTED_LOCK_SHA256 = "7b6ee2464dbf52db35270021dba853a14f44e6fb81474597e2e1136e32a398f0"
+TRUSTED_PR_GRIND_LOOP_SHA256 = "7d10b14dea118f2a1791672c80efc4265129dce06be94fcb318acb9ca9be73c7"
+TRUSTED_PR_GRIND_CHECK_SHA256 = "7da58d0c8b9abc486d64e30259ce5f45baa1de51324e593db81173c3f69b0470"
+TRUSTED_LOCK_SHA256 = "aaceb611bec1165b34045ee9b2f700982029692a7935af7e404598ea4100db5c"
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {
-    "scripts/hermes-busdriver-status": "24934065ab9433c2dbfd2b5198d257155cc1c1bc9b284f23d2d4fc62e70aee93",
+    "scripts/hermes-busdriver-status": "7772656f5df165cdb264c0b1318c3c6e729197f199d288304ac10230e061e4fb",
     "scripts/hermes-busdriver-relay-role": "6c5355d57fd186f13741ad1038ca9a559a335bd21b63da865556afffa0dbe01d",
     "scripts/hermes-busdriver-runtime-check": "981dd22f3b164d1ccd90076eb735f0be735dfe3f431ce6cf9db2c4d556e503a6",
     "scripts/hermes-busdriver-gate": "8f36e0eb727d77d7bd0b88db2d396aca6550605b7c5ef396b5587c8f6b214520",
-    "scripts/hermes-busdriver-agent-draft": "e7610dd11c0f5c6d8e3cf8a937b83136a8f89a2bbf6cd45b2d4414d4d4ec9dac",
+    "scripts/hermes-busdriver-agent-draft": "699bc80cbd996de75e109b733ed09d00982ece6e4d0e4ad3207e365a61b63b77",
     "scripts/hermes-busdriver-agent-balance-plan": "58a64901f350e9dafcb4f69ddf2ab66198bcd03a2bc3b216425d88bce8f191f9",
     "scripts/hermes-busdriver-agent-smoke": "969b7149fbc83c688d2e9857b475bd474383bef067774617feca1764029780da",
-    "scripts/hermes-busdriver-pr-grind-check": "af549d313336205136e376d6ad35622ca504ba1e4f7d4d7d88ace2b134036b49",
-    "scripts/hermes-busdriver-pr-grind-loop": "7a5a1c1ca803d639603e4090c771657af0d776e78bcb83142387671a154f1515",
-    "scripts/hermes-busdriver-litmus-status": "0c045ec533ae921f0ff8fa2e444db9efc0a60bb611e7bac74e66197660729500",
-    "scripts/hermes-busdriver-finalization-readiness": "67b064fbac161bab49971a6eb974824ce9365b6425c8371960a9edb940554689",
+    "scripts/hermes-busdriver-pr-grind-check": "7da58d0c8b9abc486d64e30259ce5f45baa1de51324e593db81173c3f69b0470",
+    "scripts/hermes-busdriver-pr-grind-loop": "7d10b14dea118f2a1791672c80efc4265129dce06be94fcb318acb9ca9be73c7",
+    "scripts/hermes-busdriver-litmus-status": "dd5814b1a2eee4e6cfb9d71256f2a2524b1a8fda32702e922b3ae5e30dc12bee",
+    "scripts/hermes-busdriver-finalization-readiness": "a90b05c06e22a54a8e69b7ab7569b31a2f9dbe58370605f1fc8801ba515287c6",
     "scripts/hermes-busdriver-finalization-contract-status": "795a2b53f96aafa8bca369ffa44e06a00392ff2a4f012fae3bce9d21e5a782dd",
-    "scripts/hermes-busdriver-delivery-status": "a798078d7f5bc2306e16f4c9ecf5fe983dcfd4568eaa73f310515c6997c7f638",
-    "scripts/hermes-busdriver-smoke": "f2a742ab932eca7d0edba20284d1e6b4f83d8efd584fe077bc2466d537240344",
-    "scripts/hermes-busdriver-lock": "7b6ee2464dbf52db35270021dba853a14f44e6fb81474597e2e1136e32a398f0",
+    "scripts/hermes-busdriver-delivery-status": "16613577d08ab3a04fdc583819bddcaec883c6b96d773db48e1656c656f1a0ab",
+    "scripts/hermes-busdriver-smoke": "9c943092ea834040e8814dd1b8901e02272aa25976dca39b45c18f8d25c2c588",
+    "scripts/hermes-busdriver-lock": "aaceb611bec1165b34045ee9b2f700982029692a7935af7e404598ea4100db5c",
 }
+# Enumerated independently of TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS above, so that
+# `materialize_delivery_status_runtime`'s set comparison is an actual cross-check: adding a script
+# to one inventory and forgetting the other must fail closed rather than silently agree. Deriving
+# this from the digest map's own keys made that check unfailable.
+DELIVERY_STATUS_RUNTIME_INVENTORY = (
+    "scripts/hermes-busdriver-status",
+    "scripts/hermes-busdriver-relay-role",
+    "scripts/hermes-busdriver-runtime-check",
+    "scripts/hermes-busdriver-gate",
+    "scripts/hermes-busdriver-agent-draft",
+    "scripts/hermes-busdriver-agent-balance-plan",
+    "scripts/hermes-busdriver-agent-smoke",
+    "scripts/hermes-busdriver-pr-grind-check",
+    "scripts/hermes-busdriver-pr-grind-loop",
+    "scripts/hermes-busdriver-litmus-status",
+    "scripts/hermes-busdriver-finalization-readiness",
+    "scripts/hermes-busdriver-finalization-contract-status",
+    "scripts/hermes-busdriver-delivery-status",
+    "scripts/hermes-busdriver-smoke",
+    "scripts/hermes-busdriver-lock",
+)
 DELIVERY_STATUS_RUNTIME_SOURCES = {
-    relative: ROOT / relative for relative in TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS
+    "scripts/hermes-busdriver-agent-balance-plan": ROOT / "scripts" / "hermes-busdriver-agent-balance-plan",
+    "scripts/hermes-busdriver-agent-draft": ROOT / "scripts" / "hermes-busdriver-agent-draft",
+    "scripts/hermes-busdriver-agent-smoke": ROOT / "scripts" / "hermes-busdriver-agent-smoke",
+    "scripts/hermes-busdriver-gate": ROOT / "scripts" / "hermes-busdriver-gate",
+    "scripts/hermes-busdriver-pr-grind-check": ROOT / "scripts" / "hermes-busdriver-pr-grind-check",
+    "scripts/hermes-busdriver-pr-grind-loop": ROOT / "scripts" / "hermes-busdriver-pr-grind-loop",
+    "scripts/hermes-busdriver-litmus-status": ROOT / "scripts" / "hermes-busdriver-litmus-status",
+    "scripts/hermes-busdriver-finalization-readiness": ROOT / "scripts" / "hermes-busdriver-finalization-readiness",
+    "scripts/hermes-busdriver-finalization-contract-status": ROOT / "scripts" / "hermes-busdriver-finalization-contract-status",
+    "scripts/hermes-busdriver-delivery-status": ROOT / "scripts" / "hermes-busdriver-delivery-status",
+    "scripts/hermes-busdriver-relay-role": ROOT / "scripts" / "hermes-busdriver-relay-role",
+    "scripts/hermes-busdriver-runtime-check": ROOT / "scripts" / "hermes-busdriver-runtime-check",
+    "scripts/hermes-busdriver-smoke": ROOT / "scripts" / "hermes-busdriver-smoke",
+    "scripts/hermes-busdriver-status": ROOT / "scripts" / "hermes-busdriver-status",
+    "scripts/hermes-busdriver-lock": ROOT / "scripts" / "hermes-busdriver-lock",
 }
 TRUSTED_EXECUTABLE_DIGESTS = {
     "git": "f9d9ddc8cba6309af5606cdb7668b0fe703aba90b6a128c0b7d8fd601baf7fd4",
@@ -169,7 +204,7 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for delivery-status before failing closed; defaults to max(180, nested helper timeouts + 30s margin)",
     )
     parser.add_argument("--verifier-timeout", type=int, default=180, help="Seconds to wait for each verifier command")
-    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports read-only pr-grind and gated commit; status is a read-only same-process lookup authenticated by a process-scoped capability, while cross-process lookup fails closed with artifact_writer_authentication_unavailable; other execute operations use the fixed blockers listed below")
+    parser.add_argument("--mode", default="plan", choices=["plan", "execute", "status"], help="Delivery mode; execute supports read-only pr-grind and gated commit; status accepts only same-process artifacts authenticated by a live process-scoped capability, while every unverifiable or cross-process artifact fails closed as run_not_found; other execute operations use the fixed blockers listed below")
     parser.add_argument("--operation", default="plan", choices=["plan", "verify", "pr-grind", "pre-pr-review", "commit", "push", "pr-create", "merge"], help="Delivery operation; only commit currently reaches evidence and finalization lock")
     parser.add_argument("--run-id", help="Optional durable delivery run id echoed in the envelope and artifact filename")
     parser.add_argument("--commit-message", help="Commit message for execute commit")
@@ -270,6 +305,9 @@ def materialize_delivery_status_runtime(destination: Path) -> Path:
     for relative, content in authenticated.items():
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
+        # mkdir's mode is masked by the caller's umask; chmod is not. The private-runtime
+        # validators require exactly 0700, so a bundle must not depend on the caller's umask.
+        target.parent.chmod(0o700)
         target.write_bytes(content)
         target.chmod(0o500)
     return destination / "scripts" / "hermes-busdriver-delivery-status"
@@ -277,9 +315,13 @@ def materialize_delivery_status_runtime(destination: Path) -> Path:
 
 def materialize_delivery_status_executables(destination: Path) -> Path:
     trusted_bin = destination / "trusted-bin"
-    trusted_bin.mkdir(mode=0o700)
+    trusted_bin.mkdir()
+    trusted_bin.chmod(0o700)
     for name, expected_digest in TRUSTED_EXECUTABLE_DIGESTS.items():
-        source = trusted_executable_path(name)
+        try:
+            source = trusted_executable_path(name)
+        except RuntimeError as exc:
+            raise OSError("delivery_status_executable_integrity_failed") from exc
         content = source.read_bytes()
         if hashlib.sha256(content).hexdigest() != expected_digest:
             raise OSError("delivery_status_executable_integrity_failed")
@@ -349,7 +391,7 @@ def run_delivery_status(args: argparse.Namespace, *, include_lock_status: bool =
             "stdout_tail": tail(e.stdout),
             "stderr": tail(e.stderr),
         }, 124
-    except OSError as e:
+    except (OSError, RuntimeError) as e:
         return {
             "ok": False,
             "error": "delivery_status_runtime_integrity_failed",
@@ -499,7 +541,7 @@ def staged_diff_hash(repo: Path) -> str | None:
             env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return None
     if cp.returncode != 0 or not cp.stdout:
         return None
@@ -519,7 +561,7 @@ def reviewed_tree_diff_hash(repo: Path, parent_head: str, tree: str) -> str | No
             env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return None
     if cp.returncode != 0 or not cp.stdout:
         return None
@@ -572,7 +614,7 @@ def diff_hash(repo: Path, *spec: str) -> str | None:
             env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return None
     if cp.returncode != 0 or not cp.stdout:
         return None
@@ -651,7 +693,7 @@ def live_remote_branch_head(repo: Path, branch: str, remote: str = "origin") -> 
         )
     except subprocess.TimeoutExpired:
         return None, "remote_branch_lookup_timeout"
-    except OSError:
+    except (OSError, RuntimeError):
         return None, "remote_branch_lookup_failed"
     if cp.returncode != 0:
         return None, "remote_branch_lookup_failed"
@@ -681,13 +723,25 @@ def remote_head_ancestor_status(repo: Path, remote_head: str | None) -> tuple[bo
         )
     except subprocess.TimeoutExpired:
         return False, "remote_head_ancestor_check_timeout"
-    except OSError:
+    except (OSError, RuntimeError):
         return False, "remote_head_ancestor_check_failed"
     if cp.returncode == 0:
         return True, None
     if cp.returncode == 1:
         return False, "remote_head_not_ancestor_for_push"
     return False, "remote_head_ancestor_unavailable_for_push"
+
+
+def update_ref_command(ref: str, new_value: str, expected_old: str) -> list[str]:
+    """A compare-and-swap on `ref`, with the same hook pin `push_command` carries.
+
+    `git update-ref` fires the `reference-transaction` hook. `git_mutation_config_safety` checks
+    the repo's hook config once, far upstream of the ref actually moving, so a concurrent actor
+    can still drop a hook into the default path inside that window and get code execution as the
+    Hermes user. The pin closes the window for every ref move on the commit path — publish and
+    rollback alike.
+    """
+    return ["git", "-c", f"core.hooksPath={os.devnull}", "update-ref", ref, new_value, expected_old]
 
 
 def push_command(repo: Path, remote: str, branch: str, remote_head: str | None, source_ref: str = "HEAD") -> list[str]:
@@ -940,7 +994,7 @@ def commit_staged_index(
         candidate_commit = str(commit_tree_effect.get("stdout_tail") or "").strip()
         if not commit_tree_effect.get("ok") or not re.fullmatch(r"[0-9a-fA-F]{40,64}", candidate_commit):
             return {"cmd": ["git", "commit-tree"], "returncode": int(commit_tree_effect.get("returncode") or 1), "ok": False, "stdout_tail": "", "stderr_tail": commit_tree_effect.get("stderr_tail", ""), "elapsed_seconds": round(time.time() - started, 3), "error": "git_commit_tree_failed", "substeps": substeps, "before_head": before, "after_head": before}
-        commit_cmd = ["git", "update-ref", branch_ref, candidate_commit, before]
+        commit_cmd = update_ref_command(branch_ref, candidate_commit, before)
         commit_effect = run_safe(commit_cmd, repo, timeout=60, env=env)
         substeps.append({"name": "git_update_ref_commit_cas", **commit_effect, "candidate_commit": candidate_commit, "expected_old_head": before})
         if not commit_effect.get("ok"):
@@ -954,11 +1008,75 @@ def commit_staged_index(
         substeps.append({"name": "git_commit", **commit_effect})
     after_effect = run_safe(["git", "rev-parse", "HEAD"], repo, timeout=30, env=env)
     substeps.append({"name": "git_rev_parse_after", **after_effect})
-    after = str(after_effect.get("stdout_tail") or "").strip() if after_effect.get("ok") else before
+    # A failed head read is an UNKNOWN head, never `before`. Substituting `before` here would
+    # fabricate an observation the code never made, and every downstream question asked of it —
+    # most of all `merge-base --is-ancestor candidate before`, which the candidate's own parent
+    # makes answer "no" by construction — would return a confident answer about a head nobody saw.
+    after_authoritative = bool(after_effect.get("ok"))
+    after = str(after_effect.get("stdout_tail") or "").strip() if after_authoritative else ""
+    if disable_hooks and not after_authoritative:
+        # An unobserved head is NOT drift. Our publish CAS succeeded, so `candidate_commit` went
+        # onto the branch; we simply failed to read the head back. Falling into the rollback below
+        # on `"" != candidate_commit` would CAS away this invocation's own valid publish in the
+        # ordinary case where nothing raced at all — the branch is still exactly where we put it,
+        # so the rollback CAS WINS and destroys a real commit. Only an authoritative, mismatched
+        # observation is evidence of drift. The mutation is a fact; its fate is just unobserved.
+        return {
+            "cmd": commit_cmd,
+            "returncode": 1,
+            "ok": False,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "elapsed_seconds": round(time.time() - started, 3),
+            "candidate_commit": candidate_commit,
+            "substeps": substeps,
+            "before_head": before,
+            "commit_verified": True,
+            "effect_completed": True,
+            "reconciliation_required": True,
+            "error": "post_publish_ref_advance_reachability_unverified",
+            "after_head": "",
+            "post_publish_head_stderr": after_effect.get("stderr_tail", ""),
+        }
     if disable_hooks and after != candidate_commit:
-        reset_effect = run_safe(["git", "update-ref", branch_ref, before, candidate_commit], repo, timeout=60, env=env)
+        # Our publish CAS succeeded, so `candidate_commit` was on the branch; the head then moved.
+        # Try to take it back with a CAS against our own commit.
+        reset_effect = run_safe(update_ref_command(branch_ref, before, candidate_commit), repo, timeout=60, env=env)
         substeps.append({"name": "git_update_ref_before_after_hook_drift", **reset_effect})
-        return {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "error": "post_publish_ref_advanced", "candidate_commit": candidate_commit, "substeps": substeps, "before_head": before, "after_head": after}
+        base = {"cmd": commit_cmd, "returncode": 1, "ok": False, "stdout_tail": after, "stderr_tail": "", "elapsed_seconds": round(time.time() - started, 3), "candidate_commit": candidate_commit, "substeps": substeps, "before_head": before}
+        if reset_effect.get("ok"):
+            # The rollback CAS won: the ref was still at our commit, and it is now back at `before`.
+            # The commit object survives but is off the branch — a true no-side-effect outcome.
+            return {**base, "error": "post_publish_ref_advance_rolled_back", "after_head": before}
+        # The rollback CAS lost: this invocation published `candidate_commit` to the branch and
+        # could not take it back. The mutation is a fact from here on; only WHERE the branch
+        # ended up is still open, and every answer below is a completed mutation awaiting
+        # reconciliation. A published commit must never authenticate as no-side-effect.
+        published = {
+            **base,
+            "commit_verified": True,
+            "effect_completed": True,
+            "reconciliation_required": True,
+        }
+        # `after` is authoritative here: the unobservable case returned above, before any rollback.
+        ancestor_effect = run_safe(["git", "merge-base", "--is-ancestor", candidate_commit, after], repo, timeout=30, env=env)
+        substeps.append({"name": "git_merge_base_is_ancestor_candidate_after", **ancestor_effect})
+        ancestor_rc = int(ancestor_effect.get("returncode") or 0)
+        if ancestor_rc == 0 and ancestor_effect.get("ok"):
+            # Reachable: our commit is in the branch's history and another actor built on top.
+            return {**published, "error": "post_publish_ref_advanced", "after_head": after}
+        if ancestor_rc == 1:
+            # `--is-ancestor` exits 1 for a definitive "not reachable": another actor moved the
+            # branch somewhere that excludes our commit. That is a reconciliation problem, not an
+            # undo — we still published to this ref and never removed what we published.
+            return {**published, "error": "post_publish_ref_advance_not_reachable", "after_head": after}
+        # Any other exit is the check itself failing: the fate is simply unknown.
+        return {
+            **published,
+            "error": "post_publish_ref_advance_reachability_unverified",
+            "after_head": after,
+            "reachability_check_stderr": ancestor_effect.get("stderr_tail", ""),
+        }
     verified_commit = candidate_commit or after
     after_tree_effect = run_safe(["git", "rev-parse", f"{verified_commit}^{{tree}}"], repo, timeout=30, env=env) if verified_commit and verified_commit != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
     substeps.append({"name": "git_rev_parse_after_tree", **after_tree_effect})
@@ -970,9 +1088,9 @@ def commit_staged_index(
         # unsafe: another actor may already own index or worktree bytes.  Keep
         # all bytes intact and require explicit reconciliation.
         if after and after != before:
-            reset_effect = run_safe(["git", "update-ref", branch_ref, before, verified_commit], repo, timeout=60, env=env)
+            reset_effect = run_safe(update_ref_command(branch_ref, before, verified_commit), repo, timeout=60, env=env)
         else:
-            reset_effect = {"cmd": ["git", "update-ref", branch_ref, before, after or before], "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "skipped": True}
+            reset_effect = {"cmd": update_ref_command(branch_ref, before, after or before), "returncode": 0, "ok": True, "stdout_tail": "", "stderr_tail": "", "skipped": True}
         substeps.append({"name": "git_update_ref_before_after_hook_drift", **reset_effect})
         tracked_dirty, untracked_dirty, status_effect = non_marker_dirty_paths()
         substeps.append({
@@ -982,6 +1100,17 @@ def commit_staged_index(
             "untracked_dirty": untracked_dirty,
             "reconciliation_required": True,
         })
+        rollback_ok = bool(reset_effect.get("ok"))
+        # A rollback CAS that wins (or is skipped because nothing was published) leaves the branch
+        # at `before`: the original reason is a truthful no-side-effect blocker. A rollback CAS
+        # that LOSES proves the opposite — this invocation published a commit and could not take
+        # it back — so it must carry its own reason and report as a completed mutation awaiting
+        # reconciliation, never as blocked.
+        published = {} if rollback_ok else {
+            "error": f"{error}_rollback_failed",
+            "commit_verified": True,
+            "effect_completed": True,
+        }
         return {
             "cmd": commit_cmd,
             "returncode": 1,
@@ -990,9 +1119,10 @@ def commit_staged_index(
             "stderr_tail": commit_effect.get("stderr_tail", ""),
             "elapsed_seconds": round(time.time() - started, 3),
             "error": error,
+            **published,
             "expected_tree": expected_tree,
             "actual_tree": after_tree,
-            "reset_to_before_ok": bool(reset_effect.get("ok")),
+            "reset_to_before_ok": rollback_ok,
             "restore_reviewed_index_ok": False,
             "restore_reviewed_worktree_ok": False,
             "reconciliation_required": True,
@@ -1001,7 +1131,7 @@ def commit_staged_index(
             "post_rollback_untracked_dirty": untracked_dirty,
             "substeps": substeps,
             "before_head": before,
-            "after_head": before if reset_effect.get("ok") else after,
+            "after_head": before if rollback_ok else after,
         }
 
     parent_effect = run_safe(["git", "rev-list", "--parents", "-n", "1", verified_commit], repo, timeout=30, env=env) if verified_commit and verified_commit != before else {"ok": False, "returncode": 1, "stdout_tail": "", "stderr_tail": ""}
@@ -1128,7 +1258,7 @@ def git_mutation_config_safety(repo: Path) -> tuple[bool, str | None]:
             timeout=30,
             env=safe_git_mutation_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return False, "local_git_hooks_unreadable_for_mutation"
     if common.returncode != 0 or not common.stdout.strip():
         return False, "local_git_hooks_unreadable_for_mutation"
@@ -1180,7 +1310,7 @@ def github_remote_url(repo: Path, remote: str = "origin") -> str | None:
             timeout=30,
             env=safe_git_mutation_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return None
     if cp.returncode != 0:
         return None
@@ -1297,7 +1427,7 @@ def valid_local_branch_name(repo: Path, branch: str | None) -> bool:
             timeout=30,
             env=safe_git_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return False
     return cp.returncode == 0
 
@@ -1760,12 +1890,16 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
     bundle_guard = tempfile.TemporaryDirectory(prefix="hermes-pr-grind-bundle-")
     private_scripts = Path(bundle_guard.name) / "scripts"
     private_scripts.mkdir()
+    # Exactly 0700, independent of the caller's umask: pr-grind-loop validates this directory
+    # with _validate_private_metadata(..., 0o700), so a 022-umask 0755 makes the whole operation
+    # unable to reach `clean`. mkdir(mode=...) would be masked; chmod is not.
+    private_scripts.chmod(0o700)
     for name, content in authenticated.items():
         private = private_scripts / name
         private.write_bytes(content)
         private.chmod(0o500)
     try:
-        materialize_delivery_status_executables(Path(bundle_guard.name))
+        trusted_bin = materialize_delivery_status_executables(Path(bundle_guard.name))
     except OSError as e:
         bundle_guard.cleanup()
         return {"ok": False, "status": "blocked", "clean": False, "error": "pr_grind_executable_bundle_integrity_failed", "detail": type(e).__name__}, 2
@@ -1798,8 +1932,11 @@ def run_pr_grind_loop(repo: Path, args: argparse.Namespace) -> tuple[dict[str, A
     ]
     if args.plugin_root:
         cmd += ["--plugin-root", args.plugin_root]
-    runtime_env = safe_git_env()
-    runtime_env["HERMES_BUSDRIVER_PRIVATE_RUNTIME"] = "1"
+    # Same shape as run_delivery_status: the digest-verified private bin leads, and the rest is
+    # the fixed system PATH. safe_git_env()'s default PATH keeps the user-writable Homebrew
+    # prefixes, which have no business being reachable from a private-runtime child.
+    runtime_path = os.pathsep.join((str(trusted_bin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+    runtime_env = safe_git_env({"PATH": runtime_path, "HERMES_BUSDRIVER_PRIVATE_RUNTIME": "1"})
     try:
         cp = subprocess.run(cmd, cwd=str(repo), shell=False, text=True, capture_output=True, check=False, timeout=max(args.max_wait_seconds + args.check_timeout + 30.0, 30.0), env=runtime_env)
     except subprocess.TimeoutExpired as e:
@@ -2057,8 +2194,15 @@ def artifact_base() -> Path:
 
 
 def artifact_name(run_id: str) -> str:
+    """A unique final artifact filename that still carries its run-id token.
+
+    The stamp/token/pid prefix is second-granular, so two writes for one run id inside one process
+    second collided and the later replace() destroyed the earlier artifact. The random component
+    is what makes the name unique; the parts before it are for discoverability only, and nothing
+    reads freshness out of any of them.
+    """
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return f"{stamp}-{artifact_token(run_id)}-{os.getpid()}.json"
+    return f"{stamp}-{artifact_token(run_id)}-{os.getpid()}-{uuid.uuid4().hex}.json"
 
 
 # O_CLOEXEC is an optimization (it keeps these fds out of exec'd children); O_NOFOLLOW and
@@ -2372,7 +2516,15 @@ _COMMIT_FAILURE_REASONS = {
     "pre_commit_reviewed_untracked_worktree",
     "git_commit_tree_failed",
     "commit_parent_changed_during_publish",
-    "post_publish_ref_advanced",
+    # The one publish-race outcome where the commit is NOT on the branch: the rollback CAS won,
+    # so the ref is back at `before`. Every outcome reached after a LOST rollback CAS —
+    # `post_publish_ref_advanced`, `post_publish_ref_advance_not_reachable`,
+    # `post_publish_ref_advance_reachability_unverified`, and every `*_rollback_failed` reason —
+    # is deliberately not here: one reason must never authenticate both a published commit and no
+    # side effect, and a publish this invocation could not undo is a mutation, not a blocker.
+    "post_publish_ref_advance_rolled_back",
+    # Post-publish verification failures whose rollback CAS won: the branch is back at `before`.
+    # Their `*_rollback_failed` counterparts are reconciliation reasons, not failures.
     "committed_tree_or_parent_mismatch_after_hooks",
     "committed_message_mismatch_after_hooks",
     "git_commit_failed_or_hook_drift",
@@ -2449,6 +2601,25 @@ _COMMIT_RECONCILIATION_REASONS = {
     "post_commit_dirty_check_failed",
     "post_commit_dirty_restore_failed",
     "post_commit_reviewed_untracked_clean_failed",
+    "post_commit_head_verification_failed",
+    # Publish CAS succeeded and the rollback CAS lost, so the commit is published and this
+    # invocation did not take it back. The three reasons below differ only in what the branch
+    # looks like afterwards — reachable, provably not reachable, or unknown — and none of those
+    # answers can undo the publish, so all three are completed mutations requiring
+    # reconciliation, never no-side-effect blockers.
+    #
+    # Our commit is reachable from the advanced head: another actor built on it.
+    "post_publish_ref_advanced",
+    # Another actor moved the branch somewhere that excludes our commit.
+    "post_publish_ref_advance_not_reachable",
+    # Reachability could not be established: the head read failed, or the ancestry check did.
+    "post_publish_ref_advance_reachability_unverified",
+    # fail_and_restore_reviewed_tree published a commit, failed its post-publish verification,
+    # and then LOST the rollback CAS: the commit stayed on the branch. Derived by that helper as
+    # f"{error}_rollback_failed" from each error literal it can be called with.
+    "committed_tree_or_parent_mismatch_after_hooks_rollback_failed",
+    "committed_message_mismatch_after_hooks_rollback_failed",
+    "git_commit_failed_or_hook_drift_rollback_failed",
 }
 _PUSH_RECONCILIATION_REASONS = {
     "remote_head_post_push_mismatch",
@@ -2582,11 +2753,37 @@ def artifact_is_valid(data: dict[str, Any], run_id: str) -> bool:
         data.get("schema") == SCHEMA
         and data.get("version") == 1
         and isinstance(data.get("ok"), bool)
+        # Freshness is only decidable if every accepted artifact carries a usable sequence, so a
+        # missing or malformed one is a schema failure rather than a body ordered by something else.
+        and artifact_sequence_valid(data.get("artifact_sequence"))
         and decision_metadata_safe(decision_data)
         and run_metadata_safe(run, run_id)
         and (mutating_run is None or mutating_run_metadata_safe(mutating_run, run_id))
         and outcome_consistent
     )
+
+
+_ARTIFACT_SEQUENCE = 0
+
+
+def next_artifact_sequence() -> int:
+    """The process-local monotonic freshness counter, advanced once per write attempt.
+
+    This — not any filesystem timestamp — is what orders two authentic artifacts for one run id.
+    mtime/ctime are attacker-writable by anyone sharing the UID; a number inside the HMAC-covered
+    body is not forgeable without the writer key this process never persists.
+
+    A write that fails after reaching this point still CONSUMES its number: reusing it would let a
+    later artifact tie an earlier one, which is the one ambiguity the tie-break cannot resolve.
+    """
+    global _ARTIFACT_SEQUENCE
+    _ARTIFACT_SEQUENCE += 1
+    return _ARTIFACT_SEQUENCE
+
+
+def artifact_sequence_valid(value: Any) -> bool:
+    """A positive integer, and not a bool — True would otherwise pass as 1 and tie a real write."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
 def new_artifact_auth_key() -> tuple[str, bytes]:
@@ -2605,11 +2802,21 @@ def artifact_auth_message(data: dict[str, Any], path: Path) -> bytes:
     writer signs artifact_base()/name and the lookup verifies the same base/name it discovered —
     both from artifact_base(), which is abspath-normalized and never symlink-resolved, so the
     string is deterministic between the two without depending on the filesystem's current shape.
+
+    The canonical form is ASCII-safe, not merely UTF-8-encoded. POSIX argv admits lone surrogates
+    and run_id flows from argv into this body, so ensure_ascii=False made signing raise
+    UnicodeEncodeError on input a caller fully controls — after a mutation could already have
+    landed, where an escaping error suppresses the truthful envelope. \\uXXXX escaping is a
+    lossless encoding of the same value, so nothing is normalized away: the decoded Python string
+    round-trips exactly, and writer and verifier derive identical bytes from identical values.
     """
     unsigned = dict(data)
     unsigned.pop("writer_authentication", None)
-    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return b"hermes-busdriver-delivery-artifact-v1\0" + str(path).encode() + b"\0" + canonical
+    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    # os.fsencode, not str().encode(): the artifact base comes from the environment, which POSIX
+    # lets carry bytes that are not valid UTF-8. Signing must bind the path the kernel sees rather
+    # than raise on it, and the same round-trip is what the verifier's own fsencode reproduces.
+    return b"hermes-busdriver-delivery-artifact-v1\0" + os.fsencode(path) + b"\0" + canonical
 
 
 def artifact_path_claims_bind(data: dict[str, Any], path: Path) -> bool:
@@ -2675,12 +2882,15 @@ def read_fd_bounded(fd: int, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def read_artifact_entry(dir_fd: int, name: str) -> tuple[dict[str, Any], float] | None:
+def read_artifact_entry(dir_fd: int, name: str) -> dict[str, Any] | None:
     """Open one artifact entry no-follow RELATIVE to dir_fd and validate it via fstat.
 
-    Returns (data, mtime) only for a regular, owner-only 0600, single-link JSON object of at most
+    Returns the body only for a regular, owner-only 0600, single-link JSON object of at most
     ARTIFACT_MAX_BYTES. The file is never reached by path, so no component of the configured tree
     is traversed a second time.
+
+    No filesystem metadata is returned. The stat is used to REJECT entries, never to order them:
+    handing an mtime back to callers is what let a same-UID utime() decide which artifact won.
 
     Order is the point. The open is non-blocking, so a FIFO cannot wedge it; the fstat then
     rejects every non-regular entry before a byte is read. The size verdict comes from that same
@@ -2706,15 +2916,22 @@ def read_artifact_entry(dir_fd: int, name: str) -> tuple[dict[str, Any], float] 
         if len(raw) > ARTIFACT_MAX_BYTES:
             return None
         data = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    # Staying inside the 1 MiB bound is not the same as being parseable. Over-deep nesting raises
+    # RecursionError and an integer past CPython's digit cap raises a bare ValueError; neither is a
+    # JSONDecodeError, so both used to escape as a traceback from a file an attacker chose the
+    # bytes of. They are entry-local rejections like any other malformed body.
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
     finally:
         os.close(fd)
-    return (data, st.st_mtime) if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else None
 
 
-def artifact_entries(run_id: str) -> list[tuple[float, str, Path, dict[str, Any]]]:
-    """Every no-follow-readable artifact entry structurally valid for run_id, newest last.
+def artifact_entries(run_id: str) -> list[tuple[str, Path, dict[str, Any]]]:
+    """Every no-follow-readable artifact entry structurally valid for run_id, in filename order.
+
+    Filename order is for determinism only — it carries no freshness meaning. Ordering by anything
+    the filesystem records would put the choice back in reach of a same-UID utime().
 
     An unsafe, unreadable, or symlinked artifact directory yields no entries: it is not evidence
     of anything, so callers fall back to their existing missing-directory behavior rather than
@@ -2725,45 +2942,39 @@ def artifact_entries(run_id: str) -> list[tuple[float, str, Path, dict[str, Any]
         dir_fd = artifact_dir_fd(create=False)
     except ArtifactDirectoryInvalid:
         return []
-    entries: list[tuple[float, str, Path, dict[str, Any]]] = []
+    entries: list[tuple[str, Path, dict[str, Any]]] = []
     try:
         try:
             names = [name for name in os.listdir(dir_fd) if name.endswith(".json")]
         except OSError:
             return []
         for name in names:
-            entry = read_artifact_entry(dir_fd, name)
-            if entry is None:
+            data = read_artifact_entry(dir_fd, name)
+            if data is None or not artifact_is_valid(data, run_id):
                 continue
-            data, mtime = entry
-            if not artifact_is_valid(data, run_id):
-                continue
-            entries.append((mtime, name, base / name, data))
+            entries.append((name, base / name, data))
     finally:
         os.close(dir_fd)
-    return sorted(entries)
+    return sorted(entries, key=lambda entry: entry[0])
 
 
 def artifact_for_run_id(run_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """The freshest AUTHENTICATED artifact for run_id, decided only by its signed sequence.
+
+    Authentication and schema validity come first, so nothing an unauthenticated body claims can
+    influence the choice; among the survivors the winner is the largest signed sequence. The
+    filename tie-break is defence against an impossibility — this process never issues one number
+    twice — not an ordering rule, and no filesystem metadata takes part in either step.
+    """
     matches = [
-        (path, data)
-        for _mtime, _name, path, data in artifact_entries(run_id)
+        (data["artifact_sequence"], name, path, data)
+        for name, path, data in artifact_entries(run_id)
         if authenticate_artifact(data, path)
     ]
-    return matches[-1] if matches else None
-
-
-def has_process_external_artifact(run_id: str) -> bool:
-    """Return true only for structurally valid artifacts whose process-scoped writer key is unavailable."""
-    for _mtime, _name, _path, data in artifact_entries(run_id):
-        auth = data.get("writer_authentication")
-        if (
-            artifact_auth_shape_valid(auth)
-            and isinstance(auth, dict)
-            and auth["key_id"] not in _ARTIFACT_AUTH_KEYS
-        ):
-            return True
-    return False
+    if not matches:
+        return None
+    _sequence, _name, path, data = max(matches, key=lambda match: (match[0], match[1]))
+    return path, data
 
 
 def write_artifact(result: dict[str, Any]) -> None:
@@ -2783,6 +2994,8 @@ def write_artifact(result: dict[str, Any]) -> None:
         result["run_artifact_path"] = str(path)
         if isinstance(result.get("run"), dict):
             result["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
+        # Top-level and set BEFORE the MAC, so the canonical signed body already covers it.
+        result["artifact_sequence"] = next_artifact_sequence()
         key_id, key = new_artifact_auth_key()
         result["writer_authentication"] = {
             "schema": ARTIFACT_AUTH_SCHEMA,
@@ -2860,6 +3073,9 @@ def confirm_artifact_directory_identity(dir_fd: int, name: str) -> None:
 def clear_artifact_result_fields(result: dict[str, Any]) -> None:
     result["run_artifact_path"] = None
     result.pop("writer_authentication", None)
+    # The consumed number is not returned to the counter; only the failed result's claim to one is
+    # withdrawn, so the stdout fallback reports no artifact state it does not have.
+    result.pop("artifact_sequence", None)
     if isinstance(result.get("run"), dict):
         result["run"]["artifacts"] = []
 
@@ -2903,11 +3119,9 @@ def status_mode_result(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     found = artifact_for_run_id(args.run_id)
     if found is None:
-        missing_reason = (
-            "artifact_writer_authentication_unavailable"
-            if has_process_external_artifact(args.run_id)
-            else "run_not_found"
-        )
+        # Unverifiable bytes are not evidence that Hermes wrote an artifact. A plausible unknown
+        # key_id is forgeable by any same-UID writer, so it cannot select a distinct wire reason.
+        missing_reason = "run_not_found"
         result_decision = decision("blocked", missing_reason)
         result = {
             "schema": SCHEMA,
@@ -3097,17 +3311,31 @@ def repo_root_from_status(delivery_status: dict[str, Any]) -> Path | None:
 
 
 def git_output(repo: Path, *args: str) -> tuple[int, str, str]:
+    # Three distinct unusable-git channels, never collapsed: 126 = the trusted git bytes were
+    # rejected, 124 = git ran but hung, 127 = git could not be launched. Reporting drift as a
+    # timeout tells an operator to retry a command that can never succeed.
     try:
         git_bin = trusted_executable_path("git")
+    except RuntimeError as exc:
+        return 126, "", f"trusted_runtime_executable_integrity_failed:git:{exc}"
+    try:
         git_args = list(args)
         if git_args and git_args[0] == "diff":
             git_args[1:1] = ["--no-ext-diff", "--no-textconv"]
-        cp = subprocess.run([str(git_bin), "-C", str(repo), "-c", "core.fsmonitor=false", *git_args], text=True, capture_output=True, check=False, env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}), timeout=30)
-    except (subprocess.TimeoutExpired, RuntimeError):
+        # text=False: `git ... -z` emits raw pathname bytes, which need not be valid UTF-8.
+        # Decoding them here with errors="replace" keeps a hostile filename from raising
+        # inside the helper instead of returning a value its callers can act on.
+        cp = subprocess.run([str(git_bin), "-C", str(repo), "-c", "core.fsmonitor=false", *git_args], text=False, capture_output=True, check=False, env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}), timeout=30)
+    except subprocess.TimeoutExpired:
         return 124, "", "git command timed out"
     except OSError as e:
         return 127, "", str(e)
-    return cp.returncode, cp.stdout.rstrip("\n"), cp.stderr.rstrip("\n")
+    def decode(raw: str | bytes | None) -> str:
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace").rstrip("\n")
+        return (raw or "").rstrip("\n")
+
+    return cp.returncode, decode(cp.stdout), decode(cp.stderr)
 
 
 def safe_git_env(extra: dict[str, str] | None = None, *, allow_gh_repo: bool = False) -> dict[str, str]:
@@ -3162,7 +3390,7 @@ def live_remote_head(repo: Path, branch: str) -> tuple[str | None, str | None]:
         )
     except subprocess.TimeoutExpired:
         return None, "remote_head_lookup_timeout"
-    except OSError:
+    except (OSError, RuntimeError):
         return None, "remote_head_lookup_failed"
     if cp.returncode != 0:
         return None, "remote_head_lookup_failed"
@@ -3362,7 +3590,7 @@ def staged_changes_status(repo: Path) -> tuple[bool, str | None]:
             env=safe_git_env({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}),
             timeout=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return False, "staged_diff_status_failed"
     if cp.returncode == 1:
         return True, None
@@ -3401,6 +3629,12 @@ def delivery_status_unstaged_or_untracked_entries(delivery_status: dict[str, Any
         value = repo.get(key)
         if isinstance(value, list):
             entries.extend(str(item) for item in value if isinstance(item, str))
+        if repo.get(f"{key}_truncated") is True:
+            # delivery-status bounds these lists, so what is absent from one is not thereby absent
+            # from the worktree. This value decides whether a commit or push may proceed; reading
+            # a cut-off tail as "nothing blocking" would fail open on exactly the biggest, dirtiest
+            # repos. An entry nobody can name still blocks.
+            entries.append(f"<{key}_truncated_total_{repo.get(f'{key}_total_count')}>")
     return entries
 
 
@@ -3485,7 +3719,7 @@ def staged_marker_entries(repo: Path, state_dir_names: tuple[str, ...] | list[st
             timeout=30,
             env=safe_git_mutation_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, RuntimeError):
         return ["<staged marker check failed>"]
     if cp.returncode != 0:
         return ["<staged marker check failed>"]
@@ -3670,6 +3904,19 @@ def mutating_run_envelope(args: argparse.Namespace, operation: str, status: str,
     }
 
 
+# Every status meaning "the operation finished; releasing the finalization lock afterwards did
+# not". The operation itself passed in all of them, so `steps_for` reads this rather than trying
+# to infer completion from the release-failure reason, which is the same for every one.
+_RELEASE_FAILED_STATUSES = {
+    "pre_pr_review_complete_release_failed",
+    "committed_release_failed",
+    "pushed_release_failed",
+    "pr_created_release_failed",
+    "merged_release_failed",
+    "already_up_to_date_release_failed",
+}
+
+
 def side_effect_completed_release_failed_status(operation: str, effects: list[dict[str, Any]]) -> str:
     completed = {
         "pre-pr-review": ("busdriver_write_pr_marker", "pre_pr_review_complete_release_failed"),
@@ -3696,7 +3943,7 @@ def release_failure_reconciliation(operation: str, mutating_run: dict[str, Any] 
         mutating_run["status"] = "already_up_to_date_release_failed"
         mutating_run["reason"] = reason
         mutating_run["authority"] = mutating_authority(operation, False, reason)
-        return legacy_decision_for_mutation("already_up_to_date_release_failed", reason), steps_for(reason, operation), 2
+        return legacy_decision_for_mutation("already_up_to_date_release_failed", reason), steps_for(reason, operation, "already_up_to_date_release_failed"), 2
     side_effects = mutating_run.get("side_effects") if isinstance(mutating_run.get("side_effects"), list) else []
     release_status = side_effect_completed_release_failed_status(operation, side_effects)
     if release_status == "finalization_lock_release_failed":
@@ -3713,7 +3960,7 @@ def release_failure_reconciliation(operation: str, mutating_run: dict[str, Any] 
     mutating_run["status"] = release_status
     mutating_run["reason"] = reason
     mutating_run["authority"] = mutating_authority(operation, False, reason)
-    return legacy_decision_for_mutation(release_status, reason), steps_for(reason, operation), 2
+    return legacy_decision_for_mutation(release_status, reason), steps_for(reason, operation, release_status), 2
 
 
 def run_busdriver_pre_pr_review(repo: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -3956,17 +4203,42 @@ def execute_mutating_operation(args: argparse.Namespace, delivery_status: dict[s
                 reviewed_untracked_snapshot=reviewed_untracked_snapshot,
                 disable_hooks=True,
             )
-            after = git_output(repo, "rev-parse", "HEAD")[1]
+            after_rc, after, after_err = git_output(repo, "rev-parse", "HEAD")
             helper_after = effect.get("after_head")
+            # `landed` is the helper's own verification that the commit object exists. Once it is
+            # true the mutation happened, and no failure of the OUTER HEAD re-read may downgrade
+            # the report to blocked/git_commit_failed — that would be a false no-mutation claim
+            # sending an operator to re-commit work that is already in the repository. The helper
+            # reports an unobserved post-publish head as empty rather than fabricating one, so
+            # its explicit `effect_completed` is the authority in that case, not the head value.
+            landed = bool(
+                effect.get("commit_verified") is True
+                and (
+                    effect.get("effect_completed") is True
+                    or (isinstance(helper_after, str) and helper_after and helper_after != before)
+                )
+            )
+            outer_head_verified = bool(after_rc == 0 and after and after == helper_after)
             effect.update({"before_head": before, "after_head": after, "verified_after_head": helper_after})
-            commit_completed = bool(effect.get("commit_verified") is True and isinstance(helper_after, str) and helper_after != before and after == helper_after)
+            commit_completed = bool(landed and outer_head_verified)
             post_commit_warning = effect.get("warning")
-            if commit_completed and post_commit_warning:
+            if landed and not outer_head_verified:
+                effect.update({
+                    "effect_completed": True,
+                    "reconciliation_required": True,
+                    "post_commit_head_verification_error": after_err or f"outer_head_lookup_rc={after_rc} head={after!r} verified={helper_after!r}",
+                })
+            elif commit_completed and post_commit_warning:
                 effect.update({"effect_completed": True, "reconciliation_required": True})
             effects.append({"name": "git_commit", **effect})
             ok = bool(effect.get("ok") and commit_completed and not post_commit_warning)
-            reason = str(post_commit_warning or "committed") if effect.get("ok") and commit_completed else str(effect.get("error") or "git_commit_failed")
-            commit_status = "committed" if commit_completed else "blocked"
+            if landed and not outer_head_verified:
+                reason = "post_commit_head_verification_failed"
+            elif effect.get("ok") and commit_completed:
+                reason = str(post_commit_warning or "committed")
+            else:
+                reason = str(effect.get("error") or "git_commit_failed")
+            commit_status = "committed" if landed else "blocked"
             authority = mutating_authority(operation, ok, reason, authority_sources)
             mut_run = mutating_run_envelope(args, operation, commit_status, reason, repo, authority, effects, lock_payload, None)
             return {"ok": ok, "decision": legacy_decision_for_mutation(commit_status, reason), "mutating_run": mut_run, "steps": steps_for(reason, operation)}, 0 if ok else int(effect.get("returncode") or 1)
@@ -4268,8 +4540,19 @@ def early_policy_steps(reason: str, operation: str) -> list[dict[str, str]]:
     ]
 
 
-def steps_for(reason: str | None, operation: str | None = None) -> list[dict[str, str]]:
+def steps_for(reason: str | None, operation: str | None = None, status: str | None = None) -> list[dict[str, str]]:
     if operation in {"pre-pr-review", "commit", "push", "pr-create", "merge"}:
+        if status in _RELEASE_FAILED_STATUSES:
+            # The operation COMPLETED and only the lock release failed. `reason` alone cannot say
+            # that — `finalization_lock_release_failed` is in neither success nor reconciliation
+            # set below, so deriving from it reported a landed commit as `blocked` with
+            # `postflight_reconciliation: skipped`. Both false, and the stuck lock is precisely
+            # the thing that needs a human.
+            return [
+                {"name": "finalization_lock", "status": "failed", "reason": "finalization_lock_release_failed"},
+                {"name": operation, "status": "passed", "reason": "finalization_lock_release_failed"},
+                {"name": "postflight_reconciliation", "status": "failed", "reason": "finalization_lock_release_failed"},
+            ]
         if reason == "push_failed_target_observed_reconciliation_required":
             return [
                 {"name": "finalization_lock", "status": "passed", "reason": "single_flight_finalization"},
@@ -4277,7 +4560,11 @@ def steps_for(reason: str | None, operation: str | None = None) -> list[dict[str
                 {"name": "postflight_reconciliation", "status": "failed", "reason": reason},
             ]
         success_reasons = {"busdriver_pre_pr_review_marker_written", "committed", "pushed", "remote_branch_already_at_reviewed_head", "pr_created"}
-        completed_warning_reasons = {"post_commit_concurrent_work_preserved", "post_commit_external_dirty_drift", "post_commit_untracked_dirty", "post_commit_non_marker_dirty_remaining", "post_commit_status_failed", "post_commit_dirty_check_failed", "post_commit_dirty_restore_failed", "post_commit_reviewed_untracked_clean_failed", "pushed_with_post_push_dirty_worktree", "post_push_status_failed", "local_head_post_push_mismatch", "post_push_local_drift_after_failed_push", "pushed_after_failed_push_remote_verified", "pr_created_after_failed_command_reconciled", "pr_created_non_open_postcondition"}
+        # Every commit reconciliation reason reports status "committed" (the mutation happened),
+        # so its steps must show the operation passed and reconciliation OUTSTANDING. Derived from
+        # the contract set rather than restated, so a new reconciliation reason can never fall
+        # through to `postflight_reconciliation: skipped` — a claim that nothing needs fixing.
+        completed_warning_reasons = _COMMIT_RECONCILIATION_REASONS | {"pushed_with_post_push_dirty_worktree", "post_push_status_failed", "local_head_post_push_mismatch", "post_push_local_drift_after_failed_push", "pushed_after_failed_push_remote_verified", "pr_created_after_failed_command_reconciled", "pr_created_non_open_postcondition"}
         operation_passed = reason in success_reasons or reason in completed_warning_reasons
         return [
             {"name": "finalization_lock", "status": "passed" if operation_passed else "checked", "reason": "single_flight_finalization"},

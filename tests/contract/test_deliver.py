@@ -6,7 +6,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import runpy
+import secrets
 import shlex
 import shutil
 import signal
@@ -15,6 +17,8 @@ import subprocess
 import pytest
 import sys
 from pathlib import Path
+
+from pr_grind_fixtures import bind_github_origin, pr_grind_payload
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +46,18 @@ def init_repo(path: Path) -> Path:
     path.mkdir()
     assert run(["git", "init"], path).returncode == 0
     return path
+
+
+def git_argv_tail(argv: list[str]) -> list[str]:
+    """Drop leading `git -c key=value` pins so a matcher sees the subcommand and its arguments.
+
+    Mutating git commands pin config (`core.hooksPath`) ahead of the subcommand, so matching on a
+    raw argv prefix silently stops matching the moment a pin is added.
+    """
+    rest = list(argv[1:])
+    while rest[:1] == ["-c"]:
+        rest = rest[2:]
+    return rest
 
 
 def fake_busdriver(path: Path) -> Path:
@@ -100,7 +116,9 @@ def test_production_help_discloses_process_scoped_status_authentication_boundary
     assert cp.returncode == 0
     assert "process-scoped" in cp.stdout
     assert "cross-process" in cp.stdout
-    assert "artifact_writer_authentication_unavailable" in cp.stdout
+    assert "run_not_found" in cp.stdout
+    # Help must not advertise a reason that claims provenance the process cannot verify.
+    assert "artifact_writer_authentication_unavailable" not in cp.stdout
 
 
 def safe_loop_decision(status: str = "clean", reason: str = "latest_pr_head_clean_read_only") -> dict:
@@ -1070,16 +1088,19 @@ def test_clean_pr_grind_fixture_still_does_not_authorize_merge(tmp_path: Path):
     (repo / "README.md").write_text("# test\n")
     assert run(["git", "add", "README.md"], repo).returncode == 0
     assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    bind_github_origin(repo)
     plugin = fake_busdriver(tmp_path / "busdriver")
     pr_result = tmp_path / "pr-grind-clean.json"
-    pr_result.write_text(json.dumps({"status": "clean", "clean": True, "checks": {"failed": 0, "pending": 0}, "actionable_comments": []}))
+    pr_result.write_text(json.dumps(pr_grind_payload()))
 
     cp, data = invoke(repo, plugin, "--pr", "7", "--pr-grind-result-file", str(pr_result))
 
     assert cp.returncode == 0
     assert data["ok"] is True
     assert data["pr"] == {"number": "7", "available": True, "ok": True, "status": "clean", "clean": True}
-    assert data["delivery_status"]["decision"]["status"] == "pr_clean_read_only"
+    assert data["delivery_status"]["decision"]["status"] == "blocked"
+    assert "fixture_evidence_not_authoritative" in data["delivery_status"]["decision"]["blockers"]
+    assert data["delivery_status"]["pr_grind"]["source"] == "fixture"
     assert data["decision"]["status"] == "plan_only"
     assert_finalization_blocked(data["decision"])
 
@@ -1635,10 +1656,10 @@ def test_status_mode_reads_latest_valid_artifact_for_run_id_without_writing(tmp_
     assert data["run_artifact_path"] is None
     assert data["status_lookup"]["found"] is False
     assert data["status_lookup"]["run_id"] == "lookup-123"
-    assert data["status_lookup"]["reason"] == "artifact_writer_authentication_unavailable"
+    assert data["status_lookup"]["reason"] == "run_not_found"
     assert "artifact_path" not in data["status_lookup"]
     assert_delivery_run_envelope(
-        data["run"], "lookup-123", "status", "blocked", "artifact_writer_authentication_unavailable"
+        data["run"], "lookup-123", "status", "blocked", "run_not_found"
     )
     assert_finalization_blocked(data["decision"])
 
@@ -1673,7 +1694,7 @@ def test_status_mode_rejects_modified_legacy_v1_artifact_without_writer_authenti
     assert cp.returncode == 1
     assert data["status_lookup"]["found"] is False
     assert "artifact_path" not in data["status_lookup"]
-    assert data["status_lookup"]["reason"] == "artifact_writer_authentication_unavailable"
+    assert data["status_lookup"]["reason"] == "run_not_found"
     assert_finalization_blocked(data["decision"])
 
 
@@ -1721,12 +1742,12 @@ def test_status_mode_returns_latest_valid_failed_delivery_status_artifact(tmp_pa
     assert cp.returncode == 1
     assert data["status_lookup"] == {
         "found": False,
-        "reason": "artifact_writer_authentication_unavailable",
+        "reason": "run_not_found",
         "run_id": "lookup-failed-latest",
     }
     assert data["run"]["phase"] == "status"
     assert data["run"]["status"] == "blocked"
-    assert data["run"]["reason"] == "artifact_writer_authentication_unavailable"
+    assert data["run"]["reason"] == "run_not_found"
     assert data["run"]["artifacts"] == []
     assert_finalization_blocked(data["decision"])
 
@@ -2202,23 +2223,23 @@ def test_artifact_lookup_does_not_follow_ancestor_symlink(monkeypatch, tmp_path:
     assert_finalization_blocked(result["decision"])
 
 
-def test_has_process_external_artifact_does_not_follow_ancestor_symlink(monkeypatch, tmp_path: Path):
-    # The external-artifact probe is the other half of the status reason. Data behind an
-    # ancestor symlink must not be admitted as evidence that some other process wrote a run.
+def test_artifact_entries_do_not_follow_an_ancestor_symlink(monkeypatch, tmp_path: Path):
+    # Entry collection is the only remaining reader of the artifact tree, so it is where the
+    # no-follow traversal must hold: bytes reached through a swapped ancestor are not candidates.
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     real_parent = tmp_path / "real-parent"
     runs = real_parent / "delivery-runs"
     monkeypatch.setenv(ARTIFACT_ENV, str(runs))
     run_id = "ancestor-external"
     ns["write_artifact"](_nofollow_payload(run_id, tmp_path))
-    ns["_ARTIFACT_AUTH_KEYS"].clear()
-    assert ns["has_process_external_artifact"](run_id) is True, "control: process-external via its real path"
+    assert len(ns["artifact_entries"](run_id)) == 1, "control: reachable via its real path"
 
     link = tmp_path / "link"
     link.symlink_to(real_parent, target_is_directory=True)
     monkeypatch.setenv(ARTIFACT_ENV, str(link / "delivery-runs"))
 
-    assert ns["has_process_external_artifact"](run_id) is False
+    assert ns["artifact_entries"](run_id) == []
+    assert ns["artifact_for_run_id"](run_id) is None
 
 
 def test_artifact_file_symlink_remains_rejected(monkeypatch, tmp_path: Path):
@@ -2238,7 +2259,7 @@ def test_artifact_file_symlink_remains_rejected(monkeypatch, tmp_path: Path):
     monkeypatch.setenv(ARTIFACT_ENV, str(linked_runs))
 
     assert ns["artifact_for_run_id"](run_id) is None
-    assert ns["has_process_external_artifact"](run_id) is False
+    assert ns["artifact_entries"](run_id) == []
 
 
 def test_artifact_directory_identity_drift_unlinks_artifact_and_fails_closed(monkeypatch, tmp_path: Path):
@@ -2504,7 +2525,7 @@ def test_artifact_read_accepts_exactly_the_limit_and_rejects_one_byte_over(monke
 
     before_fds = _open_fd_count()
     entry = _read_entry(ns, base, "at-limit.json")
-    assert entry is not None and len(entry[0]["pad"]) > 0
+    assert entry is not None and len(entry["pad"]) > 0
     assert _read_entry(ns, base, "over-limit.json") is None
     assert _open_fd_count() == before_fds, "a bounded read leaked a descriptor"
 
@@ -2791,7 +2812,7 @@ def test_ordinary_artifact_write_failure_clears_blocked_mutating_run(error_kind,
     assert ns["artifact_is_valid"](data, data["run"]["run_id"]) is False
 
 
-def test_delivery_executes_materialized_lock_bytes_after_source_replacement(monkeypatch, tmp_path: Path):
+def test_delivery_executes_retained_lock_bytes_after_source_replacement(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     source = tmp_path / "lock-source"
     trusted_bytes = b"#!/usr/bin/env python3\n# trusted\n"
@@ -2801,23 +2822,282 @@ def test_delivery_executes_materialized_lock_bytes_after_source_replacement(monk
     monkeypatch.setitem(globals_, "TRUSTED_LOCK_SHA256", hashlib.sha256(trusted_bytes).hexdigest())
     calls = []
 
-    def fake_run_lock_helper(cmd, timeout=30):
-        calls.append(cmd)
-        assert Path(cmd[2]).read_bytes() == trusted_bytes
+    def fake_run_lock_helper(cmd, program, timeout=30):
+        calls.append((cmd, program))
+        assert program == trusted_bytes
         source.write_text("raise SystemExit('mutable source executed')\n")
         payload = {"acquired": True, "token": "token", "path": str(tmp_path / "canonical.lock")} if cmd[3] == "acquire" else {"released": True}
         return payload, {"returncode": 0, "ok": True}
 
     monkeypatch.setitem(globals_, "run_lock_helper", fake_run_lock_helper)
     acquired = ns["acquire_finalization_lock"](tmp_path)
-    released = ns["release_finalization_lock"](
-        tmp_path, acquired["token"], None, acquired["path"], acquired["trusted_helper_path"]
-    )
+    released = ns["release_finalization_lock"](tmp_path, acquired["token"], None, acquired["path"])
 
     assert acquired["acquired"] is True
     assert released["released"] is True
-    assert calls[0][2] == calls[1][2]
-    assert calls[1][calls[1].index("--lock-path") + 1] == acquired["path"]
+    # Release runs the bytes acquire authenticated, not a re-read of a replaced pathname.
+    assert calls[0][1] == calls[1][1] == trusted_bytes
+    assert calls[1][0][2] == "-"
+    assert calls[1][0][calls[1][0].index("--lock-path") + 1] == acquired["path"]
+
+
+def test_release_executes_retained_bytes_when_a_git_hook_replaces_the_lock_source(monkeypatch, tmp_path: Path):
+    """A same-UID git hook must not swap the helper deliver executes from its release `finally`.
+
+    r25 materialized the authenticated lock bytes into a `tempfile.mkdtemp()` directory and then
+    executed that PATHNAME again at release. Between the two, `commit`/`push` run repository hooks
+    as the same UID, and a 0o700 directory does not stop its owner unlinking the 0o500 file inside
+    it and dropping in a payload. The release helper then executed attacker code with the delivery
+    capability. Retained in-memory bytes have no pathname to swap, so the race has no target.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["acquire_finalization_lock"].__globals__
+    source = tmp_path / "hermes-busdriver-lock"
+    breadcrumb = tmp_path / "attacker-executed"
+    lock_path = tmp_path / "canonical.lock"
+    source.write_text(
+        "import json, sys\n"
+        f"print(json.dumps({{'acquired': True, 'token': 'tok', 'path': {str(lock_path)!r}}}"
+        " if sys.argv[1] == 'acquire' else {'released': True}))\n"
+    )
+    monkeypatch.setitem(globals_, "LOCK_SOURCE", source)
+    monkeypatch.setitem(globals_, "TRUSTED_LOCK_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+
+    acquired = ns["acquire_finalization_lock"](tmp_path)
+    assert acquired["acquired"] is True, acquired
+
+    # The malicious hook, running as the same UID between acquire and release.
+    source.unlink()
+    source.write_text(f"import pathlib\npathlib.Path({str(breadcrumb)!r}).write_text('pwned')\nprint('{{}}')\n")
+
+    released = ns["release_finalization_lock"](tmp_path, acquired["token"], None, acquired["path"])
+
+    assert released["released"] is True
+    assert not breadcrumb.exists(), "release executed attacker-replaced helper bytes"
+    # No pathname is handed back for a later caller to re-read and re-execute.
+    assert "trusted_helper_path" not in acquired
+
+
+@pytest.mark.parametrize(
+    "mutate, expected",
+    [
+        (lambda src: (src.unlink(), src.symlink_to("/etc/passwd")), "trusted_lock_source_metadata_invalid"),
+        (lambda src: src.chmod(0o777), "trusted_lock_source_metadata_invalid"),
+        (lambda src: src.with_name("hardlink").hardlink_to(src), "trusted_lock_source_metadata_invalid"),
+    ],
+    ids=["symlink", "group_and_other_writable", "extra_hard_link"],
+)
+def test_lock_source_metadata_is_authenticated_before_the_bytes_are_retained(monkeypatch, tmp_path: Path, mutate, expected):
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["acquire_finalization_lock"].__globals__
+    source = tmp_path / "hermes-busdriver-lock"
+    source.write_text("print('{}')\n")
+    source.chmod(0o500)
+    monkeypatch.setitem(globals_, "LOCK_SOURCE", source)
+    monkeypatch.setitem(globals_, "TRUSTED_LOCK_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+    mutate(source)
+
+    acquired = ns["acquire_finalization_lock"](tmp_path)
+
+    assert acquired["acquired"] is False
+    assert acquired["reason"] == expected
+
+
+def test_lock_source_integrity_failure_blocks_acquire(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["acquire_finalization_lock"].__globals__
+    source = tmp_path / "hermes-busdriver-lock"
+    source.write_text("print('{}')\n")
+    monkeypatch.setitem(globals_, "LOCK_SOURCE", source)
+    monkeypatch.setitem(globals_, "TRUSTED_LOCK_SHA256", "0" * 64)
+
+    acquired = ns["acquire_finalization_lock"](tmp_path)
+
+    assert acquired == {"acquired": False, "reason": "trusted_lock_integrity_failed"}
+
+
+# --- v16-r26B: hostile pathnames must not fabricate status/marker records ---
+
+# Separators that Python's splitlines() treats as line boundaries. git quotes the C0 ones in a
+# pathname even under core.quotePath=false, but emits NEL/LS/PS raw once that config is off — so
+# these three fabricated records against real git, and the rest are covered to keep it that way.
+SPLITLINES_SEPARATORS = {
+    "LF": "\n", "CR": "\r", "VT": "\v", "FF": "\f", "FS": "\x1c", "GS": "\x1d", "RS": "\x1e",
+    "NEL": "\x85", "LS": "\u2028", "PS": "\u2029",
+}
+
+
+def _hostile_repo(tmp_path: Path, name: str, separator: str) -> tuple[Path, str]:
+    """A repo whose ONE untracked file is named so a splitlines() parser sees a marker record."""
+    repo = init_repo(tmp_path / name)
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    # The attacker's own repo-local config: GIT_CONFIG_NOSYSTEM does not reach .git/config.
+    assert run(["git", "config", "core.quotePath", "false"], repo).returncode == 0
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "litmus-passed.local").write_text("real marker\n")
+    assert run(["git", "add", ".claude/litmus-passed.local"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    hostile_dir = repo / f"evil{separator} M .claude"
+    hostile_dir.mkdir()
+    (hostile_dir / "litmus-passed.local").write_text("fabricator\n")
+    return repo, f"evil{separator} M .claude/litmus-passed.local"
+
+
+@pytest.mark.parametrize("separator", SPLITLINES_SEPARATORS.values(), ids=list(SPLITLINES_SEPARATORS))
+def test_hostile_pathname_never_fabricates_a_status_record(tmp_path: Path, separator: str):
+    ns = runpy.run_path(str(DELIVER))
+    repo, hostile_path = _hostile_repo(tmp_path, f"repo-framing-{ord(separator):04x}", separator)
+
+    rc, records, _err = ns["git_status_records"](repo, "--untracked-files=all")
+
+    assert rc == 0
+    # ONE file on disk is ONE record. splitlines() made this two for NEL/LS/PS.
+    assert len(records) == 1
+    xy, paths = records[0]
+    assert xy == "??"
+    assert paths == [hostile_path]
+
+
+@pytest.mark.parametrize("separator", SPLITLINES_SEPARATORS.values(), ids=list(SPLITLINES_SEPARATORS))
+def test_hostile_pathname_never_fabricates_an_allowed_marker_record(tmp_path: Path, separator: str):
+    """One untracked file must never produce a record claiming a committed marker is dirty.
+
+    Measured against real git before the fix: NEL, LS and PS each split one `?? "evil…` record into
+    a second ` M .claude/litmus-passed.local"` fragment (git quotes C0 controls even under
+    core.quotePath=false, but not these). `marker_path_allowed()` strips the stray trailing quote,
+    so that phantom was accepted as marker evidence for a file the attacker never touched. The
+    other seven separators are pinned here so a future config or git change cannot quietly join
+    them.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo, _hostile = _hostile_repo(tmp_path, f"repo-marker-framing-{ord(separator):04x}", separator)
+    _rc, records, _err = ns["git_status_records"](repo, "--untracked-files=all")
+
+    # The acceptance check commit_staged_index runs per record, quote-stripping included.
+    accepted = [
+        paths[0]
+        for xy, paths in records
+        if paths[0].strip().strip('"').rstrip("/") == ".claude/litmus-passed.local"
+        and ns["marker_dirty_status_allowed"](xy)
+    ]
+
+    assert accepted == []
+    assert ns["marker_evidence_snapshot_from_status"](repo, records, {".claude/litmus-passed.local"}) == {}
+
+
+@pytest.mark.parametrize("separator", SPLITLINES_SEPARATORS.values(), ids=list(SPLITLINES_SEPARATORS))
+def test_hostile_pathname_entry_carries_no_raw_separator_into_the_envelope(tmp_path: Path, separator: str):
+    """NUL framing protects this parser; escaping protects the next one."""
+    ns = runpy.run_path(str(DELIVER))
+    repo, _hostile = _hostile_repo(tmp_path, f"repo-entry-framing-{ord(separator):04x}", separator)
+
+    rc, entries = ns["repo_status_lines"](repo)
+
+    assert rc == 0
+    assert len(entries) == 1
+    assert separator not in entries[0]
+    assert len(entries[0].splitlines()) == 1
+    assert f"\\x{ord(separator):02x}" in entries[0]
+
+
+def test_porcelain_z_parses_rename_records_as_source_and_destination():
+    ns = runpy.run_path(str(DELIVER))
+
+    records = ns["parse_porcelain_z"](b"R  new.txt\x00old.txt\x00 M plain.txt\x00")
+
+    assert records == [("R ", ["old.txt", "new.txt"]), (" M", ["plain.txt"])]
+
+
+@pytest.mark.parametrize("truncated_key", ["unstaged_entries", "untracked_entries"])
+def test_truncated_delivery_status_entry_lists_never_read_as_a_clean_worktree(truncated_key):
+    """A bounded list cannot prove absence, so truncation must block rather than look clean.
+
+    `commit_blocking_dirty_entries` decides whether a commit or push may proceed by reading
+    `unstaged_entries`/`untracked_entries` out of the delivery-status envelope. Once those lists
+    are bounded, an empty-looking tail is not evidence of a clean worktree — the blocking entry
+    may simply have been cut. Truncation is unknown, and unknown must fail closed.
+    """
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    args = argparse.Namespace(busdriver_state_dir_name=None)
+    delivery_status = {
+        "repo": {
+            "unstaged_entries": [], "untracked_entries": [],
+            "unstaged_entries_truncated": False, "untracked_entries_truncated": False,
+            f"{truncated_key}_truncated": True,
+            f"{truncated_key}_total_count": 5000,
+        }
+    }
+
+    blocking = ns["commit_blocking_dirty_entries"](delivery_status, args)
+
+    assert blocking, "a truncated entry list must not be read as an empty one"
+    assert any(truncated_key in entry for entry in blocking)
+
+
+def test_untruncated_empty_delivery_status_entry_lists_still_read_as_clean():
+    """The fail-closed guard must not block every ordinary clean worktree."""
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    args = argparse.Namespace(busdriver_state_dir_name=None)
+    delivery_status = {
+        "repo": {
+            "unstaged_entries": [], "untracked_entries": [],
+            "unstaged_entries_truncated": False, "untracked_entries_truncated": False,
+            "unstaged_entries_total_count": 0, "untracked_entries_total_count": 0,
+        }
+    }
+
+    assert ns["commit_blocking_dirty_entries"](delivery_status, args) == []
+
+
+def test_delivery_status_runtime_inventory_is_independent_of_the_digest_map():
+    """The inventory cross-check must be able to fail.
+
+    r23/M10: `DELIVERY_STATUS_RUNTIME_SOURCES` was a comprehension over
+    `TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS`' own keys, so `set(A) != set(B)` could never be
+    True and `delivery_status_runtime_inventory_mismatch` was dead code. It read like a manifest
+    cross-check while asserting nothing; the closure was complete by accident of the comprehension.
+    """
+    tree = ast.parse(PRODUCTION_DELIVER.read_text())
+    assignments = {
+        target.id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    sources = assignments["DELIVERY_STATUS_RUNTIME_SOURCES"]
+    referenced = {n.id for n in ast.walk(sources) if isinstance(n, ast.Name)}
+    assert "TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS" not in referenced, (
+        "the source inventory must not be derived from the digest map it is checked against"
+    )
+    # And the two really do enumerate the same runtime today.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert set(ns["DELIVERY_STATUS_RUNTIME_SOURCES"]) == set(ns["TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS"])
+
+
+@pytest.mark.parametrize("drift", ["digest_key_added", "digest_key_deleted", "source_key_added", "source_key_deleted"])
+def test_delivery_status_runtime_inventory_mismatch_fails_closed(drift, monkeypatch, tmp_path: Path):
+    """A key present in one inventory and absent from the other must refuse to materialize."""
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    globals_ = ns["materialize_delivery_status_runtime"].__globals__
+    sources = dict(ns["DELIVERY_STATUS_RUNTIME_SOURCES"])
+    digests = dict(ns["TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS"])
+    extra = "scripts/hermes-busdriver-newly-added"
+    if drift == "digest_key_added":
+        digests[extra] = "0" * 64
+    elif drift == "digest_key_deleted":
+        digests.pop("scripts/hermes-busdriver-lock")
+    elif drift == "source_key_added":
+        sources[extra] = tmp_path / "hermes-busdriver-newly-added"
+    else:
+        sources.pop("scripts/hermes-busdriver-lock")
+    monkeypatch.setitem(globals_, "DELIVERY_STATUS_RUNTIME_SOURCES", sources)
+    monkeypatch.setitem(globals_, "TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS", digests)
+
+    with pytest.raises(OSError) as excinfo:
+        ns["materialize_delivery_status_runtime"](tmp_path / "runtime")
+    assert "delivery_status_runtime_inventory_mismatch" in str(excinfo.value)
 
 
 def test_delivery_status_executes_authenticated_private_runtime(monkeypatch, tmp_path: Path):
@@ -3219,6 +3499,7 @@ def test_artifact_validator_rejects_authority_positive_mutating_run(tmp_path: Pa
     payload = {
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
+        "artifact_sequence": 1,
         "ok": True,
         "mode": "execute",
         "operation": "commit",
@@ -3251,6 +3532,7 @@ def test_artifact_validator_rejects_cross_envelope_outcome_and_phase_mismatches(
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
         "ok": True,
+        "artifact_sequence": 1,
         "mode": "execute",
         "operation": "pr-grind",
         "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
@@ -3321,6 +3603,9 @@ def artifact_contract_payload(
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
         "ok": ok,
+        # Stands in for what write_artifact stamps: the schema requires a signed freshness
+        # sequence, and payloads that go on to be persisted get the real counter value there.
+        "artifact_sequence": 1,
         "mode": "execute",
         "operation": operation,
         "decision": {"status": status, "reason": reason, **false_flags},
@@ -3353,6 +3638,13 @@ def artifact_contract_payload(
         ("pr-grind", False, "blocked", "delivery_status_failed", "delivery_status"),
         ("commit", True, "committed", "committed", "commit"),
         ("commit", False, "blocked", "git_commit_failed", "commit"),
+        ("commit", False, "committed", "post_publish_ref_advanced", "commit"),
+        # r22: the publish CAS succeeded and the rollback CAS lost — the commit is on the branch
+        # and only its reachability is unknown, so this is a mutation, not a blocker.
+        ("commit", False, "committed", "post_publish_ref_advance_reachability_unverified", "commit"),
+        ("commit", False, "committed", "committed_message_mismatch_after_hooks_rollback_failed", "commit"),
+        ("commit", False, "blocked", "post_publish_ref_advance_rolled_back", "commit"),
+        ("commit", False, "blocked", "committed_message_mismatch_after_hooks", "commit"),
         ("commit", False, "committed", "post_commit_concurrent_work_preserved", "commit"),
         ("commit", False, "committed", "post_commit_external_dirty_drift", "commit"),
         ("commit", False, "committed", "post_commit_untracked_dirty", "commit"),
@@ -3474,6 +3766,10 @@ def _mutating_artifact_payload(
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
         "ok": ok,
+        # Hand-built bodies stand in for what write_artifact produces, so they carry the same
+        # signed freshness sequence the schema now requires. write_artifact overwrites it with the
+        # real counter value for the payloads that go on to be persisted.
+        "artifact_sequence": 1,
         "mode": "execute",
         "operation": operation,
         "decision": {"status": outer_status, "reason": outer_reason, **false_flags},
@@ -3548,6 +3844,7 @@ def test_artifact_validator_rejects_delivery_status_outcome_with_unexpected_muta
     payload = {
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
+        "artifact_sequence": 1,
         "ok": False,
         "mode": "execute",
         "operation": "commit",
@@ -3985,6 +4282,16 @@ def test_commit_staged_index_error_literals_are_covered_by_contract_truth():
     covered = ns["_COMMIT_FAILURE_REASONS"] | ns["_COMMIT_RECONCILIATION_REASONS"]
     assert (direct | helper) - covered == set()
 
+    # r22: the helper mints a SECOND reason per literal — f"{error}_rollback_failed" when its
+    # rollback CAS loses — which no collector of call-site constants can see. Each one is a
+    # published commit, so each must carry reconciliation truth and none may be a failure.
+    rollback_failed = {f"{reason}_rollback_failed" for reason in helper}
+    assert rollback_failed <= ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert rollback_failed.isdisjoint(ns["_COMMIT_FAILURE_REASONS"])
+    assert f'f"{{error}}_rollback_failed"' in PRODUCTION_DELIVER.read_text(), (
+        "the derived-reason shape this closure mirrors changed; re-derive it from the helper"
+    )
+
 
 def test_commit_error_literal_closure_catches_a_new_helper_call_reason():
     # Semantic guard for the closure above: a reason that reaches the wire ONLY through the
@@ -4008,52 +4315,29 @@ def test_commit_error_literal_closure_catches_a_new_helper_call_reason():
     assert (direct | helper) - covered == {"uncontracted_helper_reason"}
 
 
-def test_process_external_artifact_requires_complete_authentication_shape(monkeypatch, tmp_path: Path):
+def test_authentication_shape_gate_rejects_every_malformed_auth_block(monkeypatch, tmp_path: Path):
+    # The shape gate runs before any key lookup, so a body whose auth block is malformed is
+    # rejected without ever touching the key table. Well-formed but unknown is rejected too — by
+    # the key lookup — and both verdicts land on the same wire reason.
     ns = runpy.run_path(str(PRODUCTION_DELIVER))
     artifact_dir = tmp_path / "delivery-runs"
     artifact_dir.mkdir(mode=0o700)
     monkeypatch.setenv(ARTIFACT_ENV, str(artifact_dir))
     run_id = "external-auth-shape"
-    false_flags = {key: False for key in BLOCKED_KEYS}
-    payload = {
-        "schema": "hermes-busdriver-deliver/v0",
-        "version": 1,
-        "ok": True,
-        "mode": "execute",
-        "operation": "pr-grind",
-        "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
-        "run": {
-            "schema": "hermes-busdriver-delivery-run/v0",
-            "version": 1,
-            "run_id": run_id,
-            "created_at": "2026-07-15T00:00:00Z",
-            "phase": "pr_grind",
-            "status": "pr_grind_clean",
-            "reason": "latest_pr_head_clean_read_only",
-            "repo_root": str(tmp_path),
-            "pr_number": None,
-            "authority": false_flags,
-            "artifacts": [],
-        },
-        "mutating_run": None,
-        "writer_authentication": {
-            "schema": "hermes-busdriver-delivery-artifact-auth/v1",
-            "algorithm": "hmac-sha256-process-scoped",
-            "key_id": "a" * 32,
-            "mac": "b" * 64,
-        },
-    }
-    artifact = artifact_dir / "external.json"
-    artifact.write_text(json.dumps(payload))
-    artifact.chmod(0o600)
-    assert ns["has_process_external_artifact"](run_id) is True
+    artifact = artifact_dir / "20990101-000000-external.json"
+    payload = _forged_artifact_body(run_id, tmp_path, artifact)
+    payload["writer_authentication"]["key_id"] = "a" * 32
+    payload["writer_authentication"]["mac"] = "b" * 64
+    _write_entry(artifact_dir, artifact.name, json.dumps(payload).encode())
+    assert ns["artifact_auth_shape_valid"](payload["writer_authentication"]) is True, "control: well-formed shape"
+    assert ns["authenticate_artifact"](payload, artifact) is False, "well-formed but not ours"
+    assert _status_reason(ns, run_id) == "run_not_found"
 
     for field in ("schema", "algorithm", "key_id", "mac"):
-        malformed = json.loads(json.dumps(payload))
+        malformed = copy.deepcopy(payload)
         malformed["writer_authentication"].pop(field)
-        artifact.write_text(json.dumps(malformed))
-        artifact.chmod(0o600)
-        assert ns["has_process_external_artifact"](run_id) is False, f"missing {field}"
+        assert ns["artifact_auth_shape_valid"](malformed["writer_authentication"]) is False, f"missing {field}"
+        assert ns["authenticate_artifact"](malformed, artifact) is False, f"missing {field}"
 
     invalid_values = {
         "schema": [1, "hermes-busdriver-delivery-artifact-auth/v0"],
@@ -4063,11 +4347,12 @@ def test_process_external_artifact_requires_complete_authentication_shape(monkey
     }
     for field, values in invalid_values.items():
         for value in values:
-            malformed = json.loads(json.dumps(payload))
+            malformed = copy.deepcopy(payload)
             malformed["writer_authentication"][field] = value
-            artifact.write_text(json.dumps(malformed))
-            artifact.chmod(0o600)
-            assert ns["has_process_external_artifact"](run_id) is False, f"invalid {field}: {value!r}"
+            assert ns["artifact_auth_shape_valid"](malformed["writer_authentication"]) is False, f"invalid {field}: {value!r}"
+            assert ns["authenticate_artifact"](malformed, artifact) is False, f"invalid {field}: {value!r}"
+            _write_entry(artifact_dir, artifact.name, json.dumps(malformed).encode())
+            assert _status_reason(ns, run_id) == "run_not_found", f"invalid {field}: {value!r}"
 
 
 def test_status_lookup_rejects_schema_valid_unsigned_forged_artifact(monkeypatch, tmp_path: Path):
@@ -4081,6 +4366,7 @@ def test_status_lookup_rejects_schema_valid_unsigned_forged_artifact(monkeypatch
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
         "ok": True,
+        "artifact_sequence": 1,
         "mode": "execute",
         "operation": "pr-grind",
         "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
@@ -4116,6 +4402,7 @@ def test_artifact_signing_capability_is_parent_memory_only(monkeypatch, tmp_path
         "schema": "hermes-busdriver-deliver/v0",
         "version": 1,
         "ok": True,
+        "artifact_sequence": 1,
         "mode": "execute",
         "operation": "pr-grind",
         "decision": {"status": "pr_grind_clean", "reason": "latest_pr_head_clean_read_only", **false_flags},
@@ -4587,7 +4874,7 @@ def test_commit_staged_index_preserves_concurrent_reviewed_path_after_cas_rollba
     update_ref_calls = {"count": 0}
 
     def fake_run_safe(cmd, *args, **kwargs):
-        if cmd[:2] == ["git", "update-ref"]:
+        if git_argv_tail(cmd)[:1] == ["update-ref"]:
             update_ref_calls["count"] += 1
             if update_ref_calls["count"] == 2:
                 (repo / "tracked.txt").write_text("concurrent-after-publish\n")
@@ -4722,17 +5009,18 @@ def test_commit_staged_index_fails_closed_when_post_commit_status_unavailable(mo
     before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
     (repo / "tracked.txt").write_text("reviewed\n")
     assert run(["git", "add", "tracked.txt"], repo).returncode == 0
-    real_git_output = ns["git_output"]
+    # git_raw is the single choke point every status read goes through since NUL framing landed.
+    real_git_raw = ns["git_raw"]
     status_calls = {"count": 0}
 
-    def fake_git_output(repo_arg, *args):
+    def fake_git_raw(repo_arg, *args):
         if args[:1] == ("status",):
             status_calls["count"] += 1
             if status_calls["count"] > 2:
-                return 128, "", "status unavailable"
-        return real_git_output(repo_arg, *args)
+                return 128, b"", "status unavailable"
+        return real_git_raw(repo_arg, *args)
 
-    monkeypatch.setitem(ns["commit_staged_index"].__globals__, "git_output", fake_git_output)
+    monkeypatch.setitem(ns["commit_staged_index"].__globals__, "git_raw", fake_git_raw)
 
     effect = ns["commit_staged_index"](repo, "status unavailable", {"BUSDRIVER_STATE_DIR": ".claude"})
 
@@ -5025,7 +5313,7 @@ def test_commit_staged_index_can_disable_untrusted_hooks_for_finalization(tmp_pa
 
     assert effect["ok"] is True
     assert marker.exists() is False
-    assert effect["cmd"][:2] == ["git", "update-ref"]
+    assert git_argv_tail(effect["cmd"])[:1] == ["update-ref"]
     assert any(substep["name"] == "git_commit_tree" for substep in effect["substeps"])
     assert any(substep["name"] == "git_update_ref_commit_cas" for substep in effect["substeps"])
 
@@ -5048,7 +5336,7 @@ def test_commit_staged_index_cas_never_removes_concurrent_commit(monkeypatch, tm
     concurrent: dict[str, str | None] = {"oid": None}
 
     def racing_run_safe(argv, *args, **kwargs):
-        if argv[:2] == ["git", "update-ref"] and concurrent["oid"] is None:
+        if git_argv_tail(argv)[:1] == ["update-ref"] and concurrent["oid"] is None:
             parent_tree = run(["git", "rev-parse", f"{original}^{{tree}}"], repo).stdout.strip()
             oid = run(["git", "commit-tree", parent_tree, "-p", original, "-m", "concurrent"], repo).stdout.strip()
             assert run(["git", "update-ref", branch_ref, oid, original], repo).returncode == 0
@@ -5082,8 +5370,8 @@ def test_commit_staged_index_preserves_ref_advanced_after_successful_cas(monkeyp
 
     def racing_run_safe(argv, *args, **kwargs):
         effect = real_run_safe(argv, *args, **kwargs)
-        if argv[:3] == ["git", "update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
-            candidate = argv[3]
+        if git_argv_tail(argv)[:2] == ["update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
+            candidate = git_argv_tail(argv)[2]
             tree = run(["git", "rev-parse", f"{candidate}^{{tree}}"], repo).stdout.strip()
             oid = run(["git", "commit-tree", tree, "-p", candidate, "-m", "concurrent"], repo).stdout.strip()
             assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
@@ -5098,8 +5386,15 @@ def test_commit_staged_index_preserves_ref_advanced_after_successful_cas(monkeyp
     assert concurrent["oid"]
     assert effect["candidate_commit"] != concurrent["oid"]
     assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == concurrent["oid"]
+    # The published commit is reachable from the advanced HEAD, so the run landed: reporting it
+    # as a no-side-effect failure would send an operator to re-commit work already in the repo.
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    assert effect["after_head"] == concurrent["oid"]
+    assert run(["git", "merge-base", "--is-ancestor", effect["candidate_commit"], concurrent["oid"]], repo).returncode == 0
     rollback = next(step for step in effect["substeps"] if step["name"] == "git_update_ref_before_after_hook_drift")
-    assert rollback["cmd"] == ["git", "update-ref", branch_ref, effect["before_head"], effect["candidate_commit"]]
+    assert git_argv_tail(rollback["cmd"]) == ["update-ref", branch_ref, effect["before_head"], effect["candidate_commit"]]
     assert rollback["ok"] is False
 
 
@@ -5163,35 +5458,40 @@ def test_commit_staged_index_rejects_hook_modified_index(tmp_path: Path):
     [
         (" M dir/file with space.txt", ["dir/file with space.txt"]),
         ("R  old name.txt -> new name.txt", ["old name.txt", "new name.txt"]),
-        (' M "dir/file\\nname.txt"', ["dir/file\nname.txt"]),
-        ('C  "old\\tname.txt" -> "new\\tname.txt"', ["old\tname.txt", "new\tname.txt"]),
-        (' M "\\303\\251.txt"', ["é.txt"]),
-        ('R  "old -> name.txt" -> "new.txt"', ["old -> name.txt", "new.txt"]),
-        ('R  "old.txt" -> "new -> name.txt"', ["old.txt", "new -> name.txt"]),
-        ('R  old_file.txt -> "new -> name.txt"', ["old_file.txt", "new -> name.txt"]),
-        ('R  old -> name.txt -> new.txt', ["old -> name.txt", "new.txt"]),
-        ('R  old -> name.txt -> "new -> name.txt"', ["old -> name.txt", "new -> name.txt"]),
         ("?? path/with\\backslash.txt", ["path/with\\backslash.txt"]),
+        ("?? untracked-dir/", ["untracked-dir"]),
+        # v16-r27 item 7: `-z` never quotes, so a `"` is an ordinary character IN the filename.
+        (' M ".claude/freeze.local"', ['".claude/freeze.local"']),
+        (' M "dir/file\\nname.txt"', ['"dir/file\\nname.txt"']),
+        ('C  "old\\tname.txt" -> "new\\tname.txt"', ['"old\\tname.txt"', '"new\\tname.txt"']),
     ],
 )
-def test_porcelain_entry_paths_handles_spaces_renames_and_c_quoting(entry: str, expected: list[str]):
+def test_porcelain_entry_paths_handles_spaces_renames_and_literal_quotes(entry: str, expected: list[str]):
     ns = runpy.run_path(str(DELIVER))
 
     assert ns["porcelain_entry_paths"](entry) == expected
 
 
-def test_porcelain_entry_paths_property_style_quoted_rename_round_trip():
+def test_porcelain_entry_paths_round_trips_what_the_z_producer_emits():
+    """The only producer is status_record_entry, so that is the round trip that has to hold.
+
+    Quoting was a `--porcelain=v1`-without-`-z` artifact. Both status producers now use `-z`, which
+    frames with NUL and never quotes — so decoding quotes cannot round-trip a real path; it can
+    only mangle a hostile one.
+    """
     ns = runpy.run_path(str(DELIVER))
+    paths = [
+        "plain.txt",
+        "dir/file with space.txt",
+        '".claude/freeze.local"',
+        "quote\"in\"middle.txt",
+        "path/with\\backslash.txt",
+        "é.txt",
+    ]
 
-    def quote(path: str) -> str:
-        return '"' + path.replace("\\", "\\\\").replace('"', '\\"').replace("\t", "\\t").replace("\n", "\\n") + '"'
-
-    old_paths = ["old -> name.txt", "old spaced.txt", "old\tname.txt"]
-    new_paths = ["new -> name.txt", "new spaced.txt", "new\nname.txt"]
-    for old_path in old_paths:
-        for new_path in new_paths:
-            entry = f"R  {quote(old_path)} -> {quote(new_path)}"
-            assert ns["porcelain_entry_paths"](entry) == [old_path, new_path]
+    for path in paths:
+        assert ns["porcelain_entry_paths"](ns["status_record_entry"](" M", [path])) == [path]
+        assert ns["porcelain_entry_paths"](ns["status_record_entry"]("R ", ["old.txt", path])) == ["old.txt", path]
 
 
 def test_marker_file_fingerprint_does_not_follow_symlink_swapped_after_lstat(monkeypatch, tmp_path: Path):
@@ -5251,7 +5551,7 @@ def test_marker_snapshot_rejects_marker_that_disappears_before_fingerprint(monke
 
     monkeypatch.setitem(ns["marker_evidence_snapshot_from_status"].__globals__, "marker_file_fingerprint", lambda _repo, _path: "<missing>")
 
-    snapshot = ns["marker_evidence_snapshot_from_status"](repo, "?? .claude/litmus-passed.local\n", {".claude/litmus-passed.local"})
+    snapshot = ns["marker_evidence_snapshot_from_status"](repo, [("??", [".claude/litmus-passed.local"])], {".claude/litmus-passed.local"})
 
     assert snapshot == {}
     assert ns["marker_fingerprint_valid"]("<missing>") is False
@@ -5266,7 +5566,7 @@ def test_marker_evidence_snapshot_excludes_too_large_marker(tmp_path: Path):
     marker = marker_dir / "litmus-passed.local"
     marker.write_bytes(b"x" * (ns["MARKER_FINGERPRINT_MAX_BYTES"] + 1))
 
-    snapshot = ns["marker_evidence_snapshot_from_status"](repo, "?? .claude/litmus-passed.local\n", {".claude/litmus-passed.local"})
+    snapshot = ns["marker_evidence_snapshot_from_status"](repo, [("??", [".claude/litmus-passed.local"])], {".claude/litmus-passed.local"})
 
     assert snapshot == {}
     assert ns["marker_file_fingerprint"](repo, ".claude/litmus-passed.local").startswith("<too-large:")
@@ -5480,6 +5780,97 @@ def test_push_exact_remote_target_is_noop_with_no_authority_and_release_is_enfor
         assert result["decision"]["reason"] == result["mutating_run"]["reason"] == "finalization_lock_release_failed"
 
 
+@pytest.mark.parametrize(
+    ("operation", "release_status"),
+    [
+        ("commit", "committed_release_failed"),
+        ("push", "pushed_release_failed"),
+        ("pr-create", "pr_created_release_failed"),
+        ("merge", "merged_release_failed"),
+        ("pre-pr-review", "pre_pr_review_complete_release_failed"),
+    ],
+)
+def test_steps_never_report_a_completed_mutation_as_blocked_when_lock_release_fails(operation, release_status):
+    """A landed commit whose lock release failed is not a blocked commit.
+
+    r23/M3: `release_failure_reconciliation` sets reason `finalization_lock_release_failed`, which
+    is in neither `success_reasons` nor `_COMMIT_RECONCILIATION_REASONS`, so `steps_for` fell
+    through to `commit: blocked` / `postflight_reconciliation: skipped` — while the decision beside
+    it truthfully said `committed_release_failed`. The steps claimed nothing happened and nothing
+    needs fixing; both are false, and a stuck lock needs manual recovery most of all.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    effect_name = {
+        "commit": "git_commit", "push": "git_push", "pr-create": "gh_pr_create",
+        "merge": "gh_pr_merge", "pre-pr-review": "busdriver_write_pr_marker",
+    }[operation]
+    mutating_run = {
+        "status": {"commit": "committed", "push": "pushed", "pr-create": "pr_created", "merge": "merged", "pre-pr-review": "pre_pr_review_complete"}[operation],
+        "side_effects": [{"name": effect_name, "ok": True}],
+    }
+    reconciliation = ns["release_failure_reconciliation"](operation, mutating_run, {"released": False, "reason": "release_failed"})
+    assert reconciliation is not None
+    result_decision, steps, rc = reconciliation
+
+    assert rc == 2
+    assert result_decision["status"] == release_status
+    assert mutating_run["status"] == release_status
+    steps_by_name = {step["name"]: step for step in steps}
+    # The mutation completed. Saying otherwise is the lie.
+    assert steps_by_name[operation]["status"] == "passed"
+    assert steps_by_name[operation]["reason"] == "finalization_lock_release_failed"
+    # The lock is still held and the run needs a human. Never "skipped".
+    assert steps_by_name["postflight_reconciliation"]["status"] == "failed"
+    assert steps_by_name["postflight_reconciliation"]["reason"] == "finalization_lock_release_failed"
+    assert steps_by_name["finalization_lock"]["status"] == "failed"
+    assert steps_by_name["finalization_lock"]["reason"] == "finalization_lock_release_failed"
+
+
+def test_landed_commit_with_failed_lock_release_signs_truthful_steps(monkeypatch, capsys, tmp_path: Path):
+    """The signed envelope for a landed-but-lock-stuck commit must carry the truthful steps."""
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-release-failed-envelope")
+    artifact_dir = tmp_path / "runs"
+    globals_ = ns["main"].__globals__
+    delivery_status = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": str(repo)}, "markers": {"blocking": []},
+        "decision": {"status": "draft_changes_need_busdriver_finalization", "blockers": [], **{key: False for key in BLOCKED_KEYS}},
+    }
+    mutation_result = {
+        "ok": True,
+        "decision": {"status": "committed", "reason": "committed", **{key: False for key in BLOCKED_KEYS}},
+        "mutating_run": {"status": "committed", "reason": "committed", "side_effects": [{"name": "git_commit", "ok": True}]},
+        "steps": [{"name": "commit", "status": "passed", "reason": "committed"}],
+    }
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
+
+    def fake_execute(_args, _status):
+        return mutation_result, 0
+
+    fake_execute.last_release = {"released": False, "reason": "release_failed"}
+    monkeypatch.setitem(globals_, "execute_mutating_operation", fake_execute)
+    monkeypatch.setenv(ns["ARTIFACT_ENV"], str(artifact_dir))
+    monkeypatch.setattr(sys, "argv", [str(DELIVER), "--repo", str(repo), "--plugin-root", str(fake_busdriver(tmp_path / "busdriver-release-failed")), "--mode", "execute", "--operation", "commit", "--commit-message", "msg"])
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 2
+    assert data["decision"]["status"] == data["mutating_run"]["status"] == "committed_release_failed"
+    assert data["decision"]["reason"] == "finalization_lock_release_failed"
+    steps_by_name = {step["name"]: step for step in data["steps"]}
+    assert steps_by_name["commit"]["status"] == "passed"
+    assert steps_by_name["postflight_reconciliation"]["status"] == "failed"
+    assert steps_by_name["finalization_lock"]["status"] == "failed"
+    # The steps are not just printed — they are what the signed artifact durably claims.
+    written = json.loads(next(artifact_dir.glob("*.json")).read_text())
+    assert written["writer_authentication"]
+    assert {step["name"]: step["status"] for step in written["steps"]} == {
+        "finalization_lock": "failed", "commit": "passed", "postflight_reconciliation": "failed",
+    }
+
+
 def test_failed_push_with_later_satisfied_target_is_unattributed_and_requires_reconciliation(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(DELIVER))
     repo = init_repo(tmp_path / "repo-failed-push-remote-updated")
@@ -5653,12 +6044,13 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
     globals_ = ns["execute_mutating_operation"].__globals__
     delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
 
-    def fake_git_output(_repo, *args):
+    # Patched at git_raw: status is NUL-framed now, and git_output delegates here anyway.
+    def fake_git_raw(_repo, *args):
         if args[:2] == ("rev-parse", "HEAD"):
-            return 0, "reviewed-local-head", ""
+            return 0, b"reviewed-local-head", ""
         if args[:1] == ("status",):
-            return 0, "?? stray.txt\n", ""
-        return 0, "origin/main", ""
+            return 0, b"?? stray.txt\x00", ""
+        return 0, b"origin/main", ""
 
     push_called = {"value": False}
     def fake_run_safe(cmd, _repo, **_kwargs):
@@ -5677,7 +6069,7 @@ def test_push_blocks_dirty_worktree_at_pre_push_snapshot(monkeypatch, tmp_path: 
     monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: (None, "remote_branch_not_found"))
-    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    monkeypatch.setitem(globals_, "git_raw", fake_git_raw)
     monkeypatch.setitem(globals_, "run_safe", fake_run_safe)
     args = argparse.Namespace(
         operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-pre-push-dirty",
@@ -5840,15 +6232,16 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
             return None, "remote_branch_not_found"
         return "reviewed-local-head", None
 
-    def fake_git_output(_repo, *args):
+    # Patched at git_raw: status is NUL-framed now, and git_output delegates here anyway.
+    def fake_git_raw(_repo, *args):
         if args[:2] == ("rev-parse", "HEAD"):
-            return 0, "reviewed-local-head", ""
+            return 0, b"reviewed-local-head", ""
         if args[:1] == ("status",):
             status_calls["count"] += 1
             if status_calls["count"] == 1:
-                return 0, "", ""
-            return 128, "", "status unavailable"
-        return 0, "origin/main", ""
+                return 0, b"", ""
+            return 128, b"", "status unavailable"
+        return 0, b"origin/main", ""
 
     monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
     monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
@@ -5861,7 +6254,7 @@ def test_push_success_fails_closed_when_post_push_status_unavailable(monkeypatch
     monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
     monkeypatch.setitem(globals_, "remote_head_ancestor_status", lambda *_args: (True, None))
     monkeypatch.setitem(globals_, "live_remote_branch_head", fake_live_remote_branch_head)
-    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    monkeypatch.setitem(globals_, "git_raw", fake_git_raw)
     monkeypatch.setitem(globals_, "run_safe", lambda _cmd, _repo, **_kwargs: {"ok": True, "returncode": 0})
     args = argparse.Namespace(
         operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-push-status-failed",
@@ -6225,7 +6618,10 @@ def test_run_safe_only_forwards_github_credentials_to_gh(monkeypatch, tmp_path: 
     gh_effect = ns["run_safe"](["gh"], tmp_path)
     git_effect = ns["run_safe"](["git"], tmp_path)
 
-    assert gh_effect["stdout_tail"] == "credential-sentinel"
+    # `gh` received the token and echoed it; the tail shows [REDACTED] rather than the value,
+    # which proves BOTH facts at once — it was forwarded, and it cannot reach an envelope or a
+    # run artifact raw (v16-r25 B5: redaction now covers our own credential env values).
+    assert gh_effect["stdout_tail"] == "[REDACTED]"
     assert git_effect["stdout_tail"] == "missing"
 
 
@@ -6511,3 +6907,1644 @@ def test_pr_create_fails_closed_before_any_network_mutation(monkeypatch, tmp_pat
     assert rc == 2
     assert result["decision"]["reason"] == "atomic_pr_create_binding_unavailable"
     assert called["network"] is False
+
+
+def _write_signed_artifact(ns, run_id: str, tmp_path: Path) -> Path:
+    payload = _nofollow_payload(run_id, tmp_path)
+    ns["write_artifact"](payload)
+    return Path(payload["run_artifact_path"])
+
+
+def _sequence_of(path: Path):
+    return json.loads(path.read_bytes())["artifact_sequence"]
+
+
+def _resign(ns, data: dict, path: Path) -> dict:
+    """Re-MAC a mutated body with the live writer key, so only non-MAC checks can reject it."""
+    key = ns["_ARTIFACT_AUTH_KEYS"][data["writer_authentication"]["key_id"]]
+    data["writer_authentication"]["mac"] = hmac.new(
+        key, ns["artifact_auth_message"](data, path), hashlib.sha256
+    ).hexdigest()
+    return data
+
+
+def test_lookup_ignores_mtime_and_returns_the_larger_signed_sequence(monkeypatch, tmp_path: Path):
+    # r17 kept st_mtime in the reader result, sorted on it, and took the last match, so a same-UID
+    # actor needed only utime() — not the writer key — to make a stale but still-valid artifact win.
+    # Freshness must come from the HMAC-covered sequence instead.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "sequence-freshness"
+    stale = _write_signed_artifact(ns, run_id, tmp_path)
+    fresh = _write_signed_artifact(ns, run_id, tmp_path)
+    assert stale != fresh, "two writes for one run id must not share a filename"
+    assert _sequence_of(fresh) > _sequence_of(stale)
+
+    # Metadata is all an unprivileged same-UID actor can reach: make the stale artifact look
+    # newest by every filesystem clock and the fresh one look oldest.
+    os.utime(stale, (10_000_000, 10_000_000))
+    os.utime(fresh, (1_000_000, 1_000_000))
+    # The r17 rule, reconstructed: sort the valid matches by st_mtime and take the last. It now
+    # names the stale artifact — that is the defect, stated as an assertion rather than prose.
+    assert max((stale, fresh), key=lambda p: p.stat().st_mtime) == stale
+
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == fresh, "mtime decided freshness"
+    assert found[1]["artifact_sequence"] == _sequence_of(fresh)
+
+
+def test_read_artifact_entry_returns_the_body_without_filesystem_metadata(monkeypatch, tmp_path: Path):
+    # No mtime/ctime is exposed to callers, so none of them can be tempted to order on it.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    path = _write_signed_artifact(ns, "reader-shape", tmp_path)
+    entry = _read_entry(ns, base, path.name)
+    assert isinstance(entry, dict)
+    assert entry["run"]["run_id"] == "reader-shape"
+
+
+def test_artifact_sequence_is_signed_and_tampering_without_the_mac_is_rejected(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "sequence-tamper"
+    path = _write_signed_artifact(ns, run_id, tmp_path)
+
+    data = json.loads(path.read_bytes())
+    assert ns["authenticate_artifact"](data, path) is True, "control: the untampered body authenticates"
+    data["artifact_sequence"] = data["artifact_sequence"] + 1000
+    assert ns["authenticate_artifact"](data, path) is False, "artifact_sequence is outside the signed body"
+
+    _write_entry(base, path.name, json.dumps(data).encode())
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
+_MISSING_SEQUENCE = object()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_MISSING_SEQUENCE, id="missing"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="bool_true"),
+        pytest.param(False, id="bool_false"),
+        pytest.param("1", id="string"),
+        pytest.param(1.0, id="float"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_invalid_artifact_sequence_is_rejected_by_the_schema_even_when_resigned(monkeypatch, tmp_path: Path, value):
+    # Each body is RE-SIGNED with the live writer key, so the MAC is genuine and only the
+    # independent schema check stands between a malformed sequence and acceptance.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "sequence-schema"
+    path = _write_signed_artifact(ns, run_id, tmp_path)
+
+    control = _resign(ns, json.loads(path.read_bytes()), path)
+    assert ns["authenticate_artifact"](control, path) is True, "control: re-signing is faithful"
+    assert ns["artifact_is_valid"](control, run_id) is True, "control: the written body is valid"
+
+    data = json.loads(path.read_bytes())
+    if value is _MISSING_SEQUENCE:
+        data.pop("artifact_sequence")
+    else:
+        data["artifact_sequence"] = value
+    _resign(ns, data, path)
+    assert ns["authenticate_artifact"](data, path) is True, "control: the mutated body is genuinely signed"
+    assert ns["artifact_is_valid"](data, run_id) is False
+
+    _write_entry(base, path.name, json.dumps(data).encode())
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
+def test_artifact_sequence_is_monotonic_across_writes_and_failed_writes(monkeypatch, tmp_path: Path):
+    # The counter advances once per attempt that reaches payload construction. A failed write
+    # therefore CONSUMES a number rather than leaving it for a later write to reuse: sequences
+    # never repeat within a process, even across failures.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "sequence-monotonic"
+    first = _sequence_of(_write_signed_artifact(ns, run_id, tmp_path))
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(ns["os"], "replace", fail_replace)
+    failed = _nofollow_payload(run_id, tmp_path)
+    with pytest.raises(OSError):
+        ns["write_artifact"](failed)
+    assert failed["run_artifact_path"] is None
+    assert "artifact_sequence" not in failed, "a failed write must not publish a sequence"
+    monkeypatch.undo()
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    second = _sequence_of(_write_signed_artifact(ns, run_id, tmp_path))
+    assert second == first + 2, "the failed attempt did not consume a sequence number"
+
+
+def test_frozen_clock_and_pid_still_produce_distinct_artifact_paths(monkeypatch, tmp_path: Path):
+    # r17 named artifacts by timestamp-second + run id + pid, so two writes inside one process
+    # second for one run id replaced each other. A random component makes every final path unique.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    monkeypatch.setattr(ns["time"], "strftime", lambda *_a, **_k: "20260715-000000")
+    monkeypatch.setattr(ns["os"], "getpid", lambda: 4242)
+    run_id = "collision"
+    first = _write_signed_artifact(ns, run_id, tmp_path)
+    second = _write_signed_artifact(ns, run_id, tmp_path)
+
+    assert first != second
+    assert first.exists() and second.exists(), "a write replaced the earlier artifact"
+    assert sorted(p.name for p in base.iterdir()) == sorted([first.name, second.name])
+    for path in (first, second):
+        # Discoverability and the filter are unchanged: stamp, run-id token, pid, then the
+        # random component, still .json.
+        assert path.name.startswith("20260715-000000-collision-4242-")
+        assert path.name.endswith(".json")
+        assert re.fullmatch(r"[0-9a-f]{32}", path.name[len("20260715-000000-collision-4242-"):-len(".json")])
+
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == second
+    assert _sequence_of(second) > _sequence_of(first)
+
+
+def _hostile_deep_json() -> bytes:
+    """Nesting deep enough to overflow the parser's stack, well inside the 1 MiB bound."""
+    return b"[" * 200_000 + b"]" * 200_000
+
+
+def _hostile_digits_json() -> bytes:
+    """An integer past CPython's 4300-digit conversion cap: a ValueError, not a JSONDecodeError."""
+    return b'{"n": ' + b"1" * 5_000 + b"}"
+
+
+@pytest.mark.parametrize(
+    "body, error",
+    [
+        pytest.param(_hostile_deep_json(), RecursionError, id="over_deep_nesting"),
+        pytest.param(_hostile_digits_json(), ValueError, id="over_limit_integer_digits"),
+    ],
+)
+def test_hostile_bounded_json_is_rejected_entry_locally(monkeypatch, tmp_path: Path, body: bytes, error):
+    # Both bodies are under the 1 MiB bound, so the size guard never sees them: json.loads itself
+    # raises, and r17 caught neither exception, so the traceback escaped the reader.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    assert len(body) <= ns["ARTIFACT_MAX_BYTES"], "control: the hostile body is within the read bound"
+    with pytest.raises(error):
+        json.loads(body)
+
+    _write_entry(base, "20260715-000000-hostile-1.json", body)
+    before_fds = _open_fd_count()
+    assert _read_entry(ns, base, "20260715-000000-hostile-1.json") is None
+    assert _open_fd_count() == before_fds, "the rejected hostile entry leaked a descriptor"
+
+
+def test_hostile_json_entries_cannot_suppress_a_valid_sibling(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "hostile-sibling"
+    valid = _write_signed_artifact(ns, run_id, tmp_path)
+    _write_entry(base, "20260715-000000-hostile-deep.json", _hostile_deep_json())
+    _write_entry(base, "20260715-000000-hostile-digits.json", _hostile_digits_json())
+
+    before_fds = _open_fd_count()
+    assert len(ns["artifact_entries"](run_id)) == 1
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == valid, "a hostile entry suppressed the valid lookup"
+    assert _open_fd_count() == before_fds, "the hostile entries leaked a descriptor"
+
+
+def test_status_lookup_stays_truthful_with_only_hostile_entries(tmp_path: Path):
+    # End to end, through the real CLI: hostile entries are not evidence of a run, and the
+    # dispatcher must fail closed with the normal reason rather than a traceback.
+    base = tmp_path / "delivery-runs"
+    base.mkdir(mode=0o700)
+    _write_entry(base, "20260715-000000-hostile-deep.json", _hostile_deep_json())
+    _write_entry(base, "20260715-000000-hostile-digits.json", _hostile_digits_json())
+    proc = subprocess.run(
+        [sys.executable, str(PRODUCTION_DELIVER), "--mode", "status", "--run-id", "hostile-status"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, ARTIFACT_ENV: str(base)},
+    )
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is False
+    assert payload["status_lookup"] == {"found": False, "reason": "run_not_found", "run_id": "hostile-status"}
+
+
+# ---------------------------------------------------------------------------
+# v16-r19: unverifiable bytes are not evidence; canonical signing is ASCII-safe;
+# trusted-path drift stays inside the JSON contract.
+# ---------------------------------------------------------------------------
+
+
+def _forged_artifact_body(run_id: str, repo_root: Path, path: Path) -> dict:
+    """A body that passes every check except the one that matters: a live writer key.
+
+    Schema-valid, path-claim-bound, sequence-bearing, and carrying a well-formed auth block whose
+    key_id names a key this process never issued and whose MAC is random. This is exactly what a
+    same-UID writer can fabricate without the writer capability.
+    """
+    body = _nofollow_payload(run_id, repo_root)
+    body["artifact_sequence"] = 9999
+    body["run_artifact_path"] = str(path)
+    body["run"]["artifacts"] = [{"kind": "result", "path": str(path)}]
+    body["writer_authentication"] = {
+        "schema": "hermes-busdriver-delivery-artifact-auth/v1",
+        "algorithm": "hmac-sha256-process-scoped",
+        "key_id": secrets.token_hex(16),
+        "mac": secrets.token_hex(32),
+    }
+    return body
+
+
+def _write_forged_artifact(base: Path, run_id: str, repo_root: Path, name: str) -> Path:
+    base.mkdir(mode=0o700, exist_ok=True)
+    path = base / name
+    body = _forged_artifact_body(run_id, repo_root, path)
+    _write_entry(base, name, json.dumps(body).encode())
+    return path
+
+
+def _status_reason(ns, run_id: str) -> str:
+    args = argparse.Namespace(mode="status", operation="status", run_id=run_id, pr=None, pretty=False)
+    result, rc = ns["status_mode_result"](args)
+    assert rc != 0, "an unauthenticated lookup must not report success"
+    return result["status_lookup"]["reason"]
+
+
+
+def test_forged_unknown_key_artifact_cannot_move_status_off_run_not_found(monkeypatch, tmp_path: Path):
+    # The repair: an unverifiable MAC is not evidence of anything. A fully schema-valid 0600 body
+    # with an unknown key_id and a random MAC is indistinguishable from a same-UID fabrication, so
+    # status must say the run was not found rather than imply a Hermes writer existed.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "forged-unknown-key"
+    path = _write_forged_artifact(base, run_id, tmp_path, "20990101-000000-forged.json")
+
+    body = json.loads(path.read_bytes())
+    assert ns["artifact_is_valid"](body, run_id) is True, "control: the forgery is schema-valid"
+    assert ns["artifact_auth_shape_valid"](body["writer_authentication"]) is True, "control: the auth block is well-formed"
+    assert ns["artifact_path_claims_bind"](body, path) is True, "control: the path claims bind"
+    assert path.stat().st_mode & 0o777 == 0o600, "control: the forgery is owner-only"
+
+    assert ns["authenticate_artifact"](body, path) is False
+    assert ns["artifact_for_run_id"](run_id) is None
+    assert _status_reason(ns, run_id) == "run_not_found"
+
+
+def test_genuine_artifact_read_by_a_fresh_process_returns_run_not_found(monkeypatch, tmp_path: Path):
+    # The writer capability lives in one process's memory. A genuine artifact read by any other
+    # process is bytes it cannot verify — same verdict as a forgery, by design.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "fresh-process-lookup"
+    path = _write_signed_artifact(ns, run_id, tmp_path)
+    assert ns["artifact_for_run_id"](run_id) is not None, "control: the writing process authenticates it"
+
+    proc = subprocess.run(
+        [sys.executable, str(PRODUCTION_DELIVER), "--mode", "status", "--run-id", run_id],
+        capture_output=True,
+        text=True,
+        env={**os.environ, ARTIFACT_ENV: str(base)},
+    )
+
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["status_lookup"] == {"found": False, "reason": "run_not_found", "run_id": run_id}
+    assert_finalization_blocked(payload["decision"])
+    assert path.exists(), "the read-only lookup must not remove the artifact it could not verify"
+
+
+def test_live_key_sibling_wins_over_forged_siblings(monkeypatch, tmp_path: Path):
+    # Forgeries are not merely rejected — they must not suppress or outrank a real sibling, even
+    # with a far larger claimed sequence. Only the authenticated set is ranked at all.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    run_id = "forgery-vs-live"
+    valid = _write_signed_artifact(ns, run_id, tmp_path)
+    _write_forged_artifact(base, run_id, tmp_path, "20990101-000000-forged-a.json")
+    _write_forged_artifact(base, run_id, tmp_path, "20990101-000000-forged-b.json")
+
+    assert len(ns["artifact_entries"](run_id)) == 3, "control: all three bodies are schema-valid candidates"
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == valid
+
+    args = argparse.Namespace(mode="status", operation="status", run_id=run_id, pr=None, pretty=False)
+    result, rc = ns["status_mode_result"](args)
+    assert rc == 0
+    assert result["status_lookup"]["found"] is True
+    assert result["status_lookup"]["artifact_path"] == str(valid)
+
+
+def test_status_reason_is_run_not_found_for_every_unauthenticated_shape(monkeypatch, tmp_path: Path):
+    # One reason covers the whole unauthenticated space. Splitting it by what the bytes CLAIM is
+    # what let a fabrication choose the wire reason in the first place.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    empty = "no-artifacts-at-all"
+    assert _status_reason(ns, empty) == "run_not_found"
+
+    forged = "auth-block-fabricated"
+    _write_forged_artifact(base, forged, tmp_path, "20990101-000000-fabricated.json")
+    assert _status_reason(ns, forged) == "run_not_found"
+
+    unsigned = "auth-block-absent"
+    unsigned_path = base / "20990101-000000-unsigned.json"
+    unsigned_body = _forged_artifact_body(unsigned, tmp_path, unsigned_path)
+    unsigned_body.pop("writer_authentication")
+    _write_entry(base, unsigned_path.name, json.dumps(unsigned_body).encode())
+    assert _status_reason(ns, unsigned) == "run_not_found"
+
+    tampered = "mac-random"
+    tampered_path = _write_signed_artifact(ns, tampered, tmp_path)
+    tampered_body = json.loads(tampered_path.read_bytes())
+    tampered_body["writer_authentication"]["mac"] = secrets.token_hex(32)
+    _write_entry(base, tampered_path.name, json.dumps(tampered_body).encode())
+    assert _status_reason(ns, tampered) == "run_not_found"
+
+    dropped = "writer-key-dropped"
+    _write_signed_artifact(ns, dropped, tmp_path)
+    ns["_ARTIFACT_AUTH_KEYS"].clear()
+    assert _status_reason(ns, dropped) == "run_not_found"
+
+
+def test_unverifiable_artifact_evidence_helper_is_gone():
+    # The distinction itself was the defect: any helper that reports "some other process wrote
+    # this" from bytes it cannot authenticate re-creates the spoof, whatever it is called.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    assert "has_process_external_artifact" not in ns
+    source = PRODUCTION_DELIVER.read_text()
+    assert "artifact_writer_authentication_unavailable" not in source
+
+
+# --- M2: canonical signing bytes are deterministic ASCII -------------------
+
+SURROGATE_RUN_IDS = [
+    pytest.param("lone-high-\ud800", id="lone_high_surrogate"),
+    pytest.param("lone-low-\udfff", id="lone_low_surrogate"),
+    pytest.param("pair-split-\ud83d-\ude00", id="split_surrogate_pair"),
+    pytest.param("ordinary-café-π-日本", id="ordinary_non_ascii"),
+]
+
+
+
+@pytest.mark.parametrize("run_id", SURROGATE_RUN_IDS)
+def test_canonical_signing_bytes_are_deterministic_ascii(tmp_path: Path, run_id):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    body = _nofollow_payload(run_id, tmp_path)
+    path = tmp_path / "delivery-runs" / "20260715-000000-x.json"
+
+    message = ns["artifact_auth_message"](body, path)
+    assert isinstance(message, bytes)
+    # The framing carries the raw path bytes; the canonical JSON tail is what must be ASCII.
+    canonical = message.split(b"\0", 2)[2]
+    canonical.decode("ascii")
+    assert ns["artifact_auth_message"](copy.deepcopy(body), path) == message, "canonical bytes must be deterministic"
+
+
+@pytest.mark.parametrize("run_id", SURROGATE_RUN_IDS)
+def test_signed_write_and_read_round_trip_preserves_surrogate_values(monkeypatch, tmp_path: Path, run_id):
+    # ASCII-safe canonicalization must not become lossy normalization: the decoded Python value
+    # has to survive the write/read intact, or the artifact stops describing its own run.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    path = _write_signed_artifact(ns, run_id, tmp_path)
+
+    raw = path.read_bytes()
+    raw.decode("ascii")  # the artifact file itself stays ASCII on disk
+    body = json.loads(raw)
+    assert body["run"]["run_id"] == run_id, "the decoded value must be preserved exactly"
+    assert ns["authenticate_artifact"](body, path) is True
+
+    found = ns["artifact_for_run_id"](run_id)
+    assert found is not None and found[0] == path
+    assert found[1]["run"]["run_id"] == run_id
+
+
+@pytest.mark.parametrize("run_id", SURROGATE_RUN_IDS)
+def test_tampering_a_surrogate_bearing_artifact_is_still_rejected(monkeypatch, tmp_path: Path, run_id):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    path = _write_signed_artifact(ns, run_id, tmp_path)
+
+    body = json.loads(path.read_bytes())
+    assert ns["authenticate_artifact"](body, path) is True, "control: the untampered body authenticates"
+    body["decision"]["reason"] = "tampered-after-signing"
+    assert ns["authenticate_artifact"](body, path) is False
+
+    _write_entry(base, path.name, json.dumps(body).encode())
+    assert ns["artifact_for_run_id"](run_id) is None
+
+
+@pytest.mark.parametrize("run_id", SURROGATE_RUN_IDS)
+def test_main_post_side_effect_artifact_path_survives_a_surrogate_run_id(monkeypatch, capsys, tmp_path: Path, run_id):
+    # The landed-mutation path is where an uncaught signing error does real damage: the commit is
+    # already on disk and the envelope is the only record of it. Either the durable write succeeds
+    # (the ASCII-safe path) or the narrow fallback still tells the truth about the side effect —
+    # never a traceback that suppresses both.
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+    globals_ = ns["main"].__globals__
+    false_flags = {key: False for key in BLOCKED_KEYS}
+    delivery_status = {
+        "schema": "hermes-busdriver-delivery-status/v0", "read_only": True, "ok": True,
+        "repo": {"root": str(repo)}, "markers": {"blocking": []},
+        "decision": {"status": "draft_changes_need_busdriver_finalization", "blockers": [], **false_flags},
+    }
+    mutation_result = {
+        "ok": True,
+        "decision": {"status": "committed", "reason": "committed", **false_flags},
+        "mutating_run": {"status": "committed", "reason": "committed", "side_effects": [{"name": "git_commit", "ok": True}]},
+        "steps": [{"name": "git_commit", "status": "completed", "reason": "committed"}],
+    }
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "execute_mutating_operation", lambda _args, _status: (mutation_result, 0))
+    monkeypatch.setattr(sys, "argv", [
+        str(DELIVER), "--repo", str(repo),
+        "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
+        "--mode", "execute", "--operation", "commit", "--commit-message", "msg",
+        "--run-id", run_id,
+    ])
+
+    rc = ns["main"]()
+    data = json.loads(capsys.readouterr().out)
+
+    assert data["run"]["run_id"] == run_id
+    if data["run_artifact_path"] is not None:
+        # Preferred: the durable artifact succeeds and authenticates in the writing process.
+        assert rc == 0
+        assert data["run"]["reason"] == "committed"
+        path = Path(data["run_artifact_path"])
+        assert ns["authenticate_artifact"](json.loads(path.read_bytes()), path) is True
+    else:
+        # Narrow fallback: still truthful about the landed mutation, never a pre-side-effect lie.
+        assert rc == 1
+        assert data["run"]["reason"] == "artifact_write_failed_after_side_effect"
+        assert data["mutating_run"]["status"] == "committed"
+
+
+# --- M3: trusted executable drift stays inside the JSON contract -----------
+
+def _trusted_path_call_sites(source: str) -> list[tuple[int, str]]:
+    """Every trusted_executable_path(...) call site, with its enclosing function name."""
+    tree = ast.parse(source)
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    sites = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "trusted_executable_path":
+            continue
+        enclosing = [f for f in functions if f.lineno <= node.lineno <= f.end_lineno]
+        enclosing.sort(key=lambda f: f.end_lineno - f.lineno)
+        sites.append((node.lineno, enclosing[0].name if enclosing else "<module>"))
+    return sorted(sites)
+
+
+def _handles_runtime_error(handler: ast.ExceptHandler) -> bool:
+    names = []
+    if isinstance(handler.type, ast.Name):
+        names = [handler.type.id]
+    elif isinstance(handler.type, ast.Tuple):
+        names = [e.id for e in handler.type.elts if isinstance(e, ast.Name)]
+    return "RuntimeError" in names
+
+
+def _guarded_trusted_path_sites(source: str) -> list[tuple[int, str]]:
+    """Sites lexically inside a try body whose handlers name RuntimeError."""
+    tree = ast.parse(source)
+    guarded = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        if not any(_handles_runtime_error(h) for h in node.handlers):
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "trusted_executable_path"
+                ):
+                    guarded.add(inner.lineno)
+    return sorted(guarded)
+
+
+def test_every_trusted_executable_path_call_site_has_an_explicit_runtime_error_handler():
+    # trusted_executable_path raises RuntimeError on ROUTINE pin drift, which is a runtime
+    # condition, not a programming error. Every call site must convert it at its own subprocess
+    # boundary; a site added later without a handler puts a traceback back on the wire.
+    source = PRODUCTION_DELIVER.read_text()
+    sites = _trusted_path_call_sites(source)
+    guarded = set(_guarded_trusted_path_sites(source))
+    assert sites, "the audit found no call sites — the guard would pass vacuously"
+    unguarded = [site for site in sites if site[0] not in guarded]
+    assert unguarded == [], f"trusted_executable_path drift escapes at: {unguarded}"
+
+
+def test_trusted_path_coverage_guard_catches_an_unguarded_call_site():
+    # Semantic guard for the audit above: strip the RuntimeError from one handler and the guard
+    # must fail. A guard that passes on drifted source is not a guard.
+    source = PRODUCTION_DELIVER.read_text()
+    injected = source.replace(
+        "    except (OSError, RuntimeError, subprocess.TimeoutExpired):",
+        "    except (OSError, subprocess.TimeoutExpired):",
+        1,
+    )
+    assert injected != source, "the expected guarded handler shape is gone; update this test"
+    sites = _trusted_path_call_sites(injected)
+    guarded = set(_guarded_trusted_path_sites(injected))
+    assert [site for site in sites if site[0] not in guarded] != []
+
+
+@pytest.mark.parametrize("mode", ["plan", "status", "execute"])
+def test_delivery_status_trusted_path_drift_emits_one_fail_closed_envelope(mode, monkeypatch, capsys, tmp_path: Path):
+    # Routine pin drift while materializing the delivery-status runtime must land on the
+    # documented runtime-integrity failure, not a traceback — plan mode included.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+    base = tmp_path / "delivery-runs"
+    monkeypatch.setenv(ARTIFACT_ENV, str(base))
+
+    def drifted(_name: str):
+        raise RuntimeError("trusted_runtime_executable_integrity_failed:git")
+
+    monkeypatch.setitem(ns["main"].__globals__, "trusted_executable_path", drifted)
+    argv = [
+        str(PRODUCTION_DELIVER), "--repo", str(repo),
+        "--plugin-root", str(fake_busdriver(tmp_path / "busdriver")),
+        "--mode", mode,
+    ]
+    if mode == "status":
+        argv += ["--run-id", "drift-status"]
+    if mode == "execute":
+        argv += ["--operation", "commit", "--commit-message", "msg"]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    rc = ns["main"]()
+    out = capsys.readouterr().out
+    data = json.loads(out)
+
+    assert rc != 0
+    assert out.count("\n") == 1, "exactly one JSON envelope"
+    assert_finalization_blocked(data["decision"])
+    assert data["ok"] is False
+    if mode != "status":
+        assert data["delivery_status"]["error"] == "delivery_status_runtime_integrity_failed"
+    assert data["run_artifact_path"] is None or Path(data["run_artifact_path"]).exists()
+    assert data["run"]["artifacts"] in ([], [{"kind": "result", "path": data["run_artifact_path"]}])
+
+
+def test_run_delivery_status_trusted_path_drift_returns_its_runtime_integrity_failure(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+
+    def drifted(_name: str):
+        raise RuntimeError("trusted_executable_integrity_failed:git")
+
+    monkeypatch.setitem(ns["run_delivery_status"].__globals__, "trusted_executable_path", drifted)
+    args = argparse.Namespace(
+        repo=str(repo), plugin_root=None, pr=None, pr_grind_result_file=None,
+        drift_baseline=None, busdriver_state_dir_name=None, relay_role=None, relay_config=None,
+        mode="plan", operation="plan", run_id=None, pretty=False,
+        delivery_status_timeout=None, verifier_timeout=180,
+    )
+    data, rc = ns["run_delivery_status"](args)
+
+    assert rc == 2
+    assert data["ok"] is False
+    assert data["error"] == "delivery_status_runtime_integrity_failed"
+
+
+@pytest.mark.parametrize(
+    ("helper", "call", "expected"),
+    [
+        pytest.param("staged_diff_hash", lambda ns, repo: ns["staged_diff_hash"](repo), None, id="staged_diff_hash"),
+        pytest.param("diff_hash", lambda ns, repo: ns["diff_hash"](repo, "HEAD"), None, id="diff_hash"),
+        pytest.param(
+            "reviewed_tree_diff_hash",
+            lambda ns, repo: ns["reviewed_tree_diff_hash"](repo, "HEAD", "HEAD^{tree}"),
+            None,
+            id="reviewed_tree_diff_hash",
+        ),
+        pytest.param("github_remote_url", lambda ns, repo: ns["github_remote_url"](repo), None, id="github_remote_url"),
+        pytest.param(
+            "valid_local_branch_name",
+            lambda ns, repo: ns["valid_local_branch_name"](repo, "main"),
+            False,
+            id="valid_local_branch_name",
+        ),
+        pytest.param(
+            "live_remote_branch_head",
+            lambda ns, repo: ns["live_remote_branch_head"](repo, "main"),
+            (None, "remote_branch_lookup_failed"),
+            id="live_remote_branch_head",
+        ),
+        pytest.param(
+            "remote_head_ancestor_status",
+            lambda ns, repo: ns["remote_head_ancestor_status"](repo, "deadbeef"),
+            (False, "remote_head_ancestor_check_failed"),
+            id="remote_head_ancestor_status",
+        ),
+        pytest.param(
+            "live_remote_head",
+            lambda ns, repo: ns["live_remote_head"](repo, "main"),
+            (None, "remote_head_lookup_failed"),
+            id="live_remote_head",
+        ),
+        pytest.param(
+            "staged_changes_status",
+            lambda ns, repo: ns["staged_changes_status"](repo),
+            (False, "staged_diff_status_failed"),
+            id="staged_changes_status",
+        ),
+        pytest.param(
+            "staged_marker_entries",
+            lambda ns, repo: ns["staged_marker_entries"](repo, {".claude"}),
+            ["<staged marker check failed>"],
+            id="staged_marker_entries",
+        ),
+        pytest.param(
+            "git_mutation_config_safety",
+            lambda ns, repo: ns["git_mutation_config_safety"](repo),
+            (False, "local_git_config_unreadable_for_mutation"),
+            id="git_mutation_config_safety",
+        ),
+    ],
+)
+def test_git_helper_trusted_path_drift_uses_its_existing_truthful_error_channel(helper, call, expected, monkeypatch, tmp_path: Path):
+    # Each helper already has a fail-closed return for "git was unusable". Drift is one more way
+    # for git to be unusable, so it belongs in that same channel — not on stderr as a traceback.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+
+    if helper == "live_remote_head":
+        original_git_output = ns["git_output"]
+
+        def configured_upstream(repo_arg, *git_args):
+            if git_args == ("config", "branch.main.remote"):
+                return 0, "origin", ""
+            if git_args == ("config", "branch.main.merge"):
+                return 0, "refs/heads/main", ""
+            return original_git_output(repo_arg, *git_args)
+
+        monkeypatch.setitem(ns[helper].__globals__, "git_output", configured_upstream)
+
+    def drifted(_name: str):
+        raise RuntimeError(f"trusted_runtime_executable_integrity_failed:{_name}")
+
+    monkeypatch.setitem(ns[helper].__globals__, "trusted_executable_path", drifted)
+
+    assert call(ns, repo) == expected
+
+
+def test_git_output_and_run_safe_keep_their_own_drift_channels(monkeypatch, tmp_path: Path):
+    # r18 gave both helpers a fail-closed drift channel, and r19 kept them distinct from each
+    # other. r20 corrects git_output's: its channel was truthfully fail-closed but semantically
+    # a lie — 124 "timed out" for bytes that were rejected, never run. run_safe's 126 was right
+    # all along and stays untouched.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo")
+
+    def drifted(_name: str):
+        raise RuntimeError(f"trusted_runtime_executable_integrity_failed:{_name}")
+
+    monkeypatch.setitem(ns["git_output"].__globals__, "trusted_executable_path", drifted)
+
+    rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
+    assert (rc, out) == (126, "")
+    assert rc != 124, "trusted-path drift must not masquerade as a timeout"
+    assert "trusted_runtime_executable_integrity_failed" in err
+
+    result = ns["run_safe"](["git", "status"], repo)
+    assert result["ok"] is False
+    assert result["returncode"] == 126
+    assert result["error"] == "trusted_executable_rejected"
+
+
+def test_git_output_reports_trusted_path_drift_as_integrity_failure_not_timeout(monkeypatch, tmp_path: Path):
+    # r20: a rejected trusted git binary is an integrity failure, not a timeout. Reporting 124
+    # tells the operator "git hung" when the truth is "git bytes were untrusted".
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo-git-output-drift")
+
+    def drifted(_name: str):
+        raise RuntimeError(f"trusted_runtime_executable_integrity_failed:{_name}")
+
+    monkeypatch.setitem(ns["git_output"].__globals__, "trusted_executable_path", drifted)
+
+    rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
+
+    assert rc == 126
+    assert rc != 124
+    assert out == ""
+    assert "trusted_runtime_executable_integrity_failed" in err
+    assert "timed out" not in err
+
+
+def test_git_output_keeps_timeout_and_launch_failure_channels_distinct(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo-git-output-channels")
+
+    def timing_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    monkeypatch.setitem(ns["git_output"].__globals__, "subprocess", type("S", (), {"run": staticmethod(timing_out), "TimeoutExpired": subprocess.TimeoutExpired})())
+    rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
+    assert (rc, out) == (124, "")
+    assert "timed out" in err
+
+    def failing_launch(*_args, **_kwargs):
+        raise OSError("exec format error")
+
+    monkeypatch.setitem(ns["git_output"].__globals__, "subprocess", type("S", (), {"run": staticmethod(failing_launch), "TimeoutExpired": subprocess.TimeoutExpired})())
+    rc, out, err = ns["git_output"](repo, "rev-parse", "HEAD")
+    assert (rc, out) == (127, "")
+    assert "exec format error" in err
+
+
+def test_git_output_decodes_non_utf8_paths_without_traceback(monkeypatch, tmp_path: Path):
+    # `git ... -z --name-only` emits raw pathname bytes. A latin-1 filename is not valid UTF-8,
+    # and text=True makes the decode explode inside the helper instead of returning a value.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / "repo-git-output-bytes")
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = b"weird-\xff-name.txt\x00"
+        stderr = b"warning: \xfe\n"
+
+    monkeypatch.setitem(
+        ns["git_output"].__globals__,
+        "subprocess",
+        type("S", (), {"run": staticmethod(lambda *_a, **_k: FakeCompleted()), "TimeoutExpired": subprocess.TimeoutExpired})(),
+    )
+
+    rc, out, err = ns["git_output"](repo, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+
+    assert rc == 0
+    assert isinstance(out, str)
+    assert isinstance(err, str)
+    assert "�" in out
+    assert "weird-" in out
+
+
+def _commit_head_verification_args(repo: Path, plugin: Path, run_id: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        operation="commit", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id=run_id,
+        pr=None, commit_message="title", pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None,
+        base="main", merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "outer_head_rc", "outer_head_value"),
+    [
+        ("outer_lookup_failed", 126, ""),
+        ("outer_head_moved_later", 0, "some-later-head"),
+    ],
+)
+def test_execute_commit_never_reports_no_mutation_when_the_commit_verifiably_landed(
+    monkeypatch, tmp_path: Path, case: str, outer_head_rc: int, outer_head_value: str
+):
+    # r20: commit_staged_index verified the commit landed. If the OUTER `rev-parse HEAD` then
+    # fails, or the HEAD moved on again afterwards, the mutation still happened. Reporting
+    # blocked/git_commit_failed here is a false no-mutation claim that would send an operator
+    # to re-run a commit that already exists.
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    repo = init_repo(tmp_path / f"repo-commit-head-verify-{case}")
+    plugin = fake_busdriver(tmp_path / f"busdriver-commit-head-verify-{case}")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "draft_changes_need_busdriver_finalization", "commit_litmus_fresh")
+    rev_parse_calls = {"count": 0}
+
+    def fake_git_output(_repo, *args):
+        if args[:2] == ("rev-parse", "HEAD"):
+            rev_parse_calls["count"] += 1
+            if rev_parse_calls["count"] == 1:
+                return 0, "before-head", ""
+            return outer_head_rc, outer_head_value, "fatal: unable to read HEAD" if outer_head_rc else ""
+        if args[:1] == ("status",):
+            return 0, "", ""
+        return 0, "origin/main", ""
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "staged_changes_status", lambda _repo: (True, None))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(
+        globals_,
+        "commit_staged_index",
+        lambda _repo, _message, _env_extra=None, **_kwargs: {"ok": True, "returncode": 0, "commit_verified": True, "after_head": "landed-head"},
+    )
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+
+    result, rc = ns["execute_mutating_operation"](args := _commit_head_verification_args(repo, plugin, f"run-commit-head-verify-{case}"), delivery_status)
+
+    assert rc != 0
+    assert result["ok"] is False
+    assert result["decision"]["status"] == result["mutating_run"]["status"] == "committed"
+    assert result["decision"]["reason"] == result["mutating_run"]["reason"] == "post_commit_head_verification_failed"
+    effect = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_commit")
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    assert effect["verified_after_head"] == "landed-head"
+    assert_run_authority_blocked(result["mutating_run"])
+    assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
+
+    # The durable artifact for this outcome must be valid: a reconciliation-required committed
+    # run is real delivery state, not something the validator may quietly reject.
+    payload = _mutating_artifact_payload(
+        ns, tmp_path, run_id=args.run_id, operation="commit", phase="commit", ok=False,
+        outer_status="committed", outer_reason="post_commit_head_verification_failed",
+        mut_status="committed", mut_reason="post_commit_head_verification_failed",
+        authority_allowed=False, authority_reason="post_commit_head_verification_failed",
+    )
+    assert ns["artifact_is_valid"](payload, args.run_id) is True
+
+
+# --- v16-r21: commit publish race truth ---
+
+def test_commit_staged_index_reports_published_commit_when_publish_race_reachability_is_unverifiable(monkeypatch, tmp_path: Path):
+    """An unverifiable ancestry check keeps its own reason, but still reports the publish.
+
+    r22: the publish CAS succeeded and the rollback CAS lost, so this invocation DID mutate the
+    branch — only the commit's present reachability is unknown. The reason must stay distinct from
+    the reachable case, but it must never be filed as a no-side-effect blocker.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-race-unverifiable")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    concurrent: dict[str, str | None] = {"oid": None}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return {"cmd": argv, "returncode": 3, "ok": False, "stdout_tail": "", "stderr_tail": "object store unavailable"}
+        effect = real_run_safe(argv, *args, **kwargs)
+        if git_argv_tail(argv)[:2] == ["update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
+            candidate = git_argv_tail(argv)[2]
+            tree = run(["git", "rev-parse", f"{candidate}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", tree, "-p", candidate, "-m", "concurrent"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
+            concurrent["oid"] = oid
+        return effect
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "post_publish_ref_advance_reachability_unverified"
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    # The published commit really is still on the branch: the rollback CAS lost.
+    assert effect["after_head"] == concurrent["oid"]
+
+
+def test_commit_staged_index_reports_published_commit_when_post_publish_head_lookup_fails(monkeypatch, tmp_path: Path):
+    """A failed post-publish `rev-parse HEAD` must never be answered with `before`.
+
+    r23: substituting `before` for a head we never observed makes the ancestry check answer
+    "not reachable" by construction — the candidate's parent IS `before`. The publish CAS
+    succeeded and the rollback CAS lost here, so the branch really did move; the only unknown is
+    where. That is a completed mutation awaiting reconciliation, never a no-side-effect blocker.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-race-head-unreadable")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    concurrent: dict[str, str | None] = {"oid": None}
+    rev_parse_head_calls = {"count": 0}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        if argv == ["git", "rev-parse", "HEAD"]:
+            rev_parse_head_calls["count"] += 1
+            if rev_parse_head_calls["count"] > 1:
+                # The post-publish head read fails: a timeout, an OSError, or a trusted-git
+                # rejection all land here. We never observed the head.
+                return {"cmd": argv, "returncode": 124, "ok": False, "stdout_tail": "", "stderr_tail": "timeout after 30s"}
+        effect = real_run_safe(argv, *args, **kwargs)
+        if git_argv_tail(argv)[:2] == ["update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
+            candidate = git_argv_tail(argv)[2]
+            tree = run(["git", "rev-parse", f"{candidate}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", tree, "-p", candidate, "-m", "concurrent"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
+            concurrent["oid"] = oid
+        return effect
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "post_publish_ref_advance_reachability_unverified"
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    # `before` must not be reported as an observed post-publish head, and the ancestry check must
+    # not have been run against one.
+    assert effect["after_head"] != effect["before_head"]
+    assert not effect["after_head"]
+    assert not [step for step in effect["substeps"] if step["name"] == "git_merge_base_is_ancestor_candidate_after"]
+    # The published commit really is still on the branch: the rollback CAS lost.
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == concurrent["oid"]
+
+
+def test_commit_staged_index_reports_published_commit_when_candidate_is_definitively_not_reachable(monkeypatch, tmp_path: Path):
+    """A definitive "not reachable" after a LOST rollback CAS is still our mutation.
+
+    r23: the publish CAS put the candidate on the branch and the rollback CAS could not take it
+    back — another actor moved the ref elsewhere. This invocation mutated the ref; where the
+    branch ended up does not turn that into a no-side-effect outcome.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-race-not-reachable")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    sibling: dict[str, str | None] = {"oid": None}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        effect = real_run_safe(argv, *args, **kwargs)
+        if git_argv_tail(argv)[:2] == ["update-ref", branch_ref] and sibling["oid"] is None and effect["ok"]:
+            # A concurrent actor replaces our published commit with a sibling built on `before`,
+            # so the candidate is provably unreachable AND our rollback CAS will lose.
+            candidate = git_argv_tail(argv)[2]
+            tree = run(["git", "rev-parse", f"{before}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", tree, "-p", before, "-m", "sibling"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
+            sibling["oid"] = oid
+        return effect
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "post_publish_ref_advance_not_reachable"
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    assert effect["after_head"] == sibling["oid"]
+    ancestor_step = next(step for step in effect["substeps"] if step["name"] == "git_merge_base_is_ancestor_candidate_after")
+    assert ancestor_step["returncode"] == 1
+
+
+def test_commit_staged_index_reports_no_side_effect_when_publish_race_rollback_wins(monkeypatch, tmp_path: Path):
+    """A rollback CAS that wins really did remove the commit from the branch."""
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-race-rolled-back")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    seen: dict[str, bool] = {"advanced": False}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        # Report HEAD as advanced once, but leave the ref at the published commit so the
+        # rollback CAS wins and the commit really is gone from the branch.
+        if argv == ["git", "rev-parse", "HEAD"] and not seen["advanced"]:
+            effect = real_run_safe(argv, *args, **kwargs)
+            if effect["ok"] and effect["stdout_tail"].strip() != before:
+                seen["advanced"] = True
+                return {**effect, "stdout_tail": "0" * 40}
+            return effect
+        return real_run_safe(argv, *args, **kwargs)
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is False
+    assert effect["error"] == "post_publish_ref_advance_rolled_back"
+    assert effect.get("commit_verified") is not True
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == before
+
+
+def test_commit_staged_index_does_not_roll_back_a_publish_it_merely_failed_to_observe(monkeypatch, tmp_path: Path):
+    """An unobserved post-publish head is not drift, and must never trigger the rollback CAS.
+
+    r23/Gemini: with `after` empty because the head read failed, `after != candidate_commit` is
+    True by construction, so the drift branch fired and the rollback CAS ran against a branch that
+    was sitting exactly where we had just published it. The CAS then WON — destroying this
+    invocation's own valid publish and reporting it as `post_publish_ref_advance_rolled_back`.
+    Nothing raced; the observation simply failed.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-publish-unobserved")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    rev_parse_head_calls = {"count": 0}
+
+    def unobservant_run_safe(argv, *args, **kwargs):
+        # No concurrent actor at all: the branch stays exactly where the publish CAS put it. Only
+        # the post-publish head READ fails.
+        if argv == ["git", "rev-parse", "HEAD"]:
+            rev_parse_head_calls["count"] += 1
+            if rev_parse_head_calls["count"] > 1:
+                return {"cmd": argv, "returncode": 124, "ok": False, "stdout_tail": "", "stderr_tail": "timeout after 30s"}
+        return real_run_safe(argv, *args, **kwargs)
+
+    monkeypatch.setitem(globals_, "run_safe", unobservant_run_safe)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    # The publish is a fact; its fate is merely unobserved. That is reconciliation, not an undo.
+    assert effect["error"] == "post_publish_ref_advance_reachability_unverified"
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    assert effect["after_head"] == ""
+    # No rollback was attempted, and none was reported.
+    assert not [step for step in effect["substeps"] if step["name"] == "git_update_ref_before_after_hook_drift"]
+    assert "rolled_back" not in str(effect["error"])
+    # Decisive: the commit this invocation published is still on the branch.
+    head = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    assert head == effect["candidate_commit"]
+    assert head != before
+
+
+def test_commit_path_update_ref_commands_pin_hooks_path(tmp_path: Path):
+    """`git update-ref` fires the `reference-transaction` hook, so the commit path must pin it.
+
+    `push_command` already hardcodes `-c core.hooksPath=/dev/null`; the publish and rollback CAS
+    did not. `git_mutation_config_safety` runs once, far upstream, leaving a window for a
+    concurrent actor to drop a hook before the ref actually moves.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-update-ref-argv")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+
+    effect = ns["commit_staged_index"](repo, "reviewed commit", disable_hooks=True)
+    assert effect["ok"] is True
+
+    update_refs = [step["cmd"] for step in effect["substeps"] if "update-ref" in step.get("cmd", [])]
+    assert update_refs, "the publish CAS must appear in the substeps"
+    for cmd in update_refs:
+        assert cmd[:3] == ["git", "-c", f"core.hooksPath={os.devnull}"], cmd
+        assert git_argv_tail(cmd)[0] == "update-ref"
+
+
+def test_commit_path_update_ref_ignores_hostile_reference_transaction_hook(tmp_path: Path):
+    """End to end: a hostile `reference-transaction` hook must not run during the publish CAS."""
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-reference-transaction-hook")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+
+    # A concurrent actor drops the hook into the repo's default hook path AFTER any upstream
+    # config safety check would have run — exactly the window the pin closes.
+    sentinel = tmp_path / "reference-transaction-hook-fired"
+    hook = repo / ".git" / "hooks" / "reference-transaction"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(sentinel))}\n")
+    hook.chmod(0o755)
+
+    effect = ns["commit_staged_index"](repo, "reviewed commit", disable_hooks=True)
+
+    assert effect["ok"] is True
+    assert not sentinel.exists(), "reference-transaction hook executed during the commit publish CAS"
+
+
+def test_publish_race_reasons_are_classified_distinctly(tmp_path: Path):
+    ns = runpy.run_path(str(DELIVER))
+    commit_outcomes = ns["ARTIFACT_OUTCOME_CONTRACT"]["commit"]["commit"]
+
+    # Every reason below reaches the wire only after the publish CAS succeeded. The split is on
+    # one question: did this invocation take the commit back off the branch? Only a rollback CAS
+    # that WON did; every reason reached after a lost rollback is a mutation, including the one
+    # where the candidate is provably unreachable from the later head — the ref moved because we
+    # published to it, and we could not take it back.
+    published = {
+        "post_publish_ref_advanced",
+        "post_publish_ref_advance_not_reachable",
+        "post_publish_ref_advance_reachability_unverified",
+        "committed_tree_or_parent_mismatch_after_hooks_rollback_failed",
+        "committed_message_mismatch_after_hooks_rollback_failed",
+        "git_commit_failed_or_hook_drift_rollback_failed",
+    }
+    no_side_effect = {
+        "post_publish_ref_advance_rolled_back",
+        "committed_tree_or_parent_mismatch_after_hooks",
+        "committed_message_mismatch_after_hooks",
+        "git_commit_failed_or_hook_drift",
+    }
+    assert published <= ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert published.isdisjoint(ns["_COMMIT_FAILURE_REASONS"])
+    assert no_side_effect <= ns["_COMMIT_FAILURE_REASONS"]
+    assert no_side_effect.isdisjoint(ns["_COMMIT_RECONCILIATION_REASONS"])
+
+    for reason in published:
+        # A signed artifact must be able to carry the truth, and must reject the lie.
+        assert (False, "committed", reason) in commit_outcomes
+        assert (False, "blocked", reason) not in commit_outcomes
+    for reason in no_side_effect:
+        assert (False, "blocked", reason) in commit_outcomes
+        assert (False, "committed", reason) not in commit_outcomes
+
+
+def test_published_commit_reasons_never_report_reconciliation_as_skipped():
+    # `postflight_reconciliation: skipped` tells an operator nothing needs fixing. For a reason
+    # that means "we published a commit and could not verify or undo it", that is the same false
+    # no-side-effect claim the status field is not allowed to make.
+    ns = runpy.run_path(str(DELIVER))
+    for reason in ns["_COMMIT_RECONCILIATION_REASONS"]:
+        steps = {step["name"]: step["status"] for step in ns["steps_for"](reason, "commit")}
+        assert steps["commit"] == "passed", reason
+        assert steps["postflight_reconciliation"] == "failed", reason
+
+
+def _repo_with_reviewed_stage(tmp_path: Path, name: str) -> tuple[Path, str, str]:
+    """Init a repo with one commit and a staged reviewed change. Returns (repo, before, ref)."""
+    repo = init_repo(tmp_path / name)
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    before = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    return repo, before, branch_ref
+
+
+def _advance_branch_over(repo: Path, branch_ref: str, oid: str) -> str:
+    """Build a real commit on top of `oid` and take the branch, so a CAS against `oid` loses."""
+    tree = run(["git", "rev-parse", f"{oid}^{{tree}}"], repo).stdout.strip()
+    advanced = run(["git", "commit-tree", tree, "-p", oid, "-m", "concurrent"], repo).stdout.strip()
+    assert run(["git", "update-ref", branch_ref, advanced, oid], repo).returncode == 0
+    return advanced
+
+
+def test_commit_staged_index_reports_published_commit_when_post_publish_rollback_cas_loses(monkeypatch, tmp_path: Path):
+    """Message verification fails, then the rollback CAS loses to a concurrent advance.
+
+    r22: the branch keeps our commit. The original reason means "verification failed AND we took
+    the commit back off the branch" — reusing it here would sign a no-side-effect claim for a
+    commit that is still published, sending an operator to re-commit work already in the repo.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo, before, branch_ref = _repo_with_reviewed_stage(tmp_path, "repo-commit-rollback-lost")
+    commit_staged_index = ns["commit_staged_index"]
+    globals_ = commit_staged_index.__globals__
+    real_run_safe = globals_["run_safe"]
+    real_git_output = globals_["git_output"]
+    advanced: dict[str, str | None] = {"oid": None}
+
+    def fake_git_output(target_repo, *args):
+        # Break ONLY the post-publish message read, after the commit is already on the branch.
+        if args[:3] == ("log", "-1", "--format=%B"):
+            return 0, "a message this invocation never reviewed", ""
+        return real_git_output(target_repo, *args)
+
+    def racing_run_safe(argv, *args, **kwargs):
+        # The rollback CAS is `update-ref <ref> <before> <verified_commit>`. Advance the branch
+        # off our commit immediately before it runs, so the CAS loses and the commit stays.
+        if git_argv_tail(argv)[:3] == ["update-ref", branch_ref, before] and advanced["oid"] is None:
+            advanced["oid"] = _advance_branch_over(repo, branch_ref, git_argv_tail(argv)[3])
+        return real_run_safe(argv, *args, **kwargs)
+
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    effect = commit_staged_index(repo, "reviewed commit", disable_hooks=True)
+
+    assert advanced["oid"], "the racing advance never happened"
+    assert effect["ok"] is False
+    assert effect["reset_to_before_ok"] is False
+    assert effect["error"] == "committed_message_mismatch_after_hooks_rollback_failed"
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    # Ground truth: the branch is NOT back at `before`, and our commit is still reachable.
+    assert run(["git", "rev-parse", "HEAD"], repo).stdout.strip() == advanced["oid"]
+    assert effect["error"] in ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert effect["error"] not in ns["_COMMIT_FAILURE_REASONS"]
+
+
+def test_signed_artifact_rejects_blocked_for_every_published_commit_reason(tmp_path: Path):
+    """The durable, HMAC-signed artifact must carry the published truth and reject the lie."""
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    for reason in (
+        "post_publish_ref_advance_reachability_unverified",
+        "committed_message_mismatch_after_hooks_rollback_failed",
+        "committed_tree_or_parent_mismatch_after_hooks_rollback_failed",
+        "git_commit_failed_or_hook_drift_rollback_failed",
+    ):
+        run_id, blocked = artifact_contract_payload(ns, tmp_path, "commit", False, "blocked", reason)
+        assert ns["artifact_is_valid"](blocked, run_id) is False, reason
+
+        payload = _mutating_artifact_payload(
+            ns, tmp_path, run_id=f"run-published-{reason}", operation="commit", phase="commit",
+            ok=False, outer_status="committed", outer_reason=reason,
+            mut_status="committed", mut_reason=reason,
+            authority_allowed=False, authority_reason=reason,
+        )
+        assert ns["artifact_is_valid"](payload, f"run-published-{reason}") is True, reason
+
+
+def test_execute_commit_reports_landed_commit_when_publish_race_advances_head(monkeypatch, tmp_path: Path):
+    """End-to-end: a concurrent advance over our published commit reports committed, never blocked."""
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-commit-race-e2e")
+    assert run(["git", "config", "user.email", "test@example.com"], repo).returncode == 0
+    assert run(["git", "config", "user.name", "Test User"], repo).returncode == 0
+    (repo / "tracked.txt").write_text("one\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    assert run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"], repo).returncode == 0
+    branch_ref = run(["git", "symbolic-ref", "HEAD"], repo).stdout.strip()
+    (repo / "tracked.txt").write_text("reviewed\n")
+    assert run(["git", "add", "tracked.txt"], repo).returncode == 0
+    plugin = fake_busdriver(tmp_path / "busdriver-commit-race-e2e")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "draft_changes_need_busdriver_finalization", "commit_litmus_fresh")
+    real_run_safe = ns["commit_staged_index"].__globals__["run_safe"]
+    concurrent: dict[str, str | None] = {"oid": None}
+
+    def racing_run_safe(argv, *args, **kwargs):
+        effect = real_run_safe(argv, *args, **kwargs)
+        if git_argv_tail(argv)[:2] == ["update-ref", branch_ref] and concurrent["oid"] is None and effect["ok"]:
+            candidate = git_argv_tail(argv)[2]
+            tree = run(["git", "rev-parse", f"{candidate}^{{tree}}"], repo).stdout.strip()
+            oid = run(["git", "commit-tree", tree, "-p", candidate, "-m", "concurrent"], repo).stdout.strip()
+            assert run(["git", "update-ref", branch_ref, oid, candidate], repo).returncode == 0
+            concurrent["oid"] = oid
+        return effect
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(ns["commit_staged_index"].__globals__, "run_safe", racing_run_safe)
+    args = argparse.Namespace(
+        operation="commit", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-commit-race-e2e",
+        pr=None, commit_message="reviewed commit", pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None,
+        base="main", merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+
+    assert concurrent["oid"], "the racing advance never happened"
+    assert rc != 0
+    assert result["ok"] is False
+    assert result["mutating_run"]["status"] == "committed"
+    assert result["mutating_run"]["reason"] == "post_publish_ref_advanced"
+    assert result["decision"]["status"] == "committed"
+    effect = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_commit")
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+
+
+def test_execute_commit_never_reports_blocked_when_post_publish_rollback_cas_loses(monkeypatch, tmp_path: Path):
+    """End-to-end: verification failed, the rollback lost, the commit is published.
+
+    The outer envelope — the thing that gets signed and handed back by `--mode status` — must
+    report a committed run needing reconciliation. `blocked` here would be an authenticated
+    no-mutation claim about a commit sitting on the branch.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo, before, branch_ref = _repo_with_reviewed_stage(tmp_path, "repo-commit-rollback-lost-e2e")
+    plugin = fake_busdriver(tmp_path / "busdriver-rollback-lost-e2e")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "draft_changes_need_busdriver_finalization", "commit_litmus_fresh")
+    real_run_safe = globals_["run_safe"]
+    real_git_output = globals_["git_output"]
+    advanced: dict[str, str | None] = {"oid": None}
+
+    def fake_git_output(target_repo, *args):
+        if args[:3] == ("log", "-1", "--format=%B"):
+            return 0, "a message this invocation never reviewed", ""
+        return real_git_output(target_repo, *args)
+
+    def racing_run_safe(argv, *args, **kwargs):
+        if git_argv_tail(argv)[:3] == ["update-ref", branch_ref, before] and advanced["oid"] is None:
+            advanced["oid"] = _advance_branch_over(repo, branch_ref, git_argv_tail(argv)[3])
+        return real_run_safe(argv, *args, **kwargs)
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda _repo, _token, _state_dir=None: {"released": True})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(globals_, "run_safe", racing_run_safe)
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    args = argparse.Namespace(
+        operation="commit", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None,
+        run_id="run-commit-rollback-lost-e2e", pr=None, commit_message="reviewed commit", pr_title="title", pr_body="body",
+        push_remote="origin", push_branch=None, head=None, base="main", merge_method="squash", delete_branch=True,
+        busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+
+    assert advanced["oid"], "the racing advance never happened"
+    assert rc != 0
+    assert result["ok"] is False
+    assert result["mutating_run"]["status"] == result["decision"]["status"] == "committed"
+    assert result["mutating_run"]["reason"] in ns["_COMMIT_RECONCILIATION_REASONS"]
+    assert result["mutating_run"]["reason"] not in ns["_COMMIT_FAILURE_REASONS"]
+    effect = next(effect for effect in result["mutating_run"]["side_effects"] if effect["name"] == "git_commit")
+    assert effect["commit_verified"] is True
+    assert effect["effect_completed"] is True
+    assert effect["reconciliation_required"] is True
+    # Reconciliation is outstanding, never "skipped".
+    assert [step["status"] for step in result["steps"]] == ["passed", "passed", "failed"]
+
+
+# --- v16-r25 B3: an exception from the release path must not erase a completed mutation ---
+
+
+def test_release_finalization_lock_never_raises_when_the_helper_run_explodes(monkeypatch, tmp_path: Path):
+    """r24 let run_lock_helper's exception escape a function called from an unguarded finally."""
+    ns = runpy.run_path(str(DELIVER))
+    globals_ = ns["release_finalization_lock"].__globals__
+    monkeypatch.setitem(globals_, "_RETAINED_LOCK_BYTES", b"# trusted\n")
+
+    def boom(*_a, **_k):
+        raise OSError("helper vanished mid-release")
+
+    monkeypatch.setitem(globals_, "run_lock_helper", boom)
+
+    payload = ns["release_finalization_lock"](tmp_path, "tok", None, "/tmp/lock")
+
+    assert payload["released"] is False
+    assert payload["reason"] == "finalization_lock_release_helper_failed"
+
+
+def _landed_commit_args(tmp_path: Path, name: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        operation="commit", mode="execute", repo=str(tmp_path / name), plugin_root=str(tmp_path / f"busdriver-{name}"),
+        state_dir=None, run_id=f"run-{name}", pr=None, commit_message="title", pr_title="title", pr_body="body",
+        push_remote="origin", push_branch=None, head=None, base="main", merge_method="squash", delete_branch=True,
+        busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+
+def _landed_commit_globals(monkeypatch, ns, tmp_path: Path, name: str) -> dict:
+    """A commit that really lands, so only the release path decides what the operator is told."""
+    repo = init_repo(tmp_path / name)
+    fake_busdriver(tmp_path / f"busdriver-{name}")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "draft_changes_need_busdriver_finalization", "commit_litmus_fresh")
+    heads = {"count": 0}
+
+    def fake_git_output(_repo, *args):
+        if args[:2] == ("rev-parse", "HEAD"):
+            heads["count"] += 1
+            return 0, "before" if heads["count"] == 1 else "after", ""
+        if args[:1] == ("status",):
+            return 0, "", ""
+        return 0, "origin/main", ""
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token", "path": "/tmp/lock"})
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "staged_changes_status", lambda _repo: (True, None))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "commit_litmus_staged_diff_blocker", lambda _status, _repo, **_kwargs: None)
+    monkeypatch.setitem(globals_, "commit_staged_index", lambda _repo, _message, _env_extra=None, **_kwargs: {"ok": True, "returncode": 0, "commit_verified": True, "effect_completed": True, "before_head": "before", "after_head": "after"})
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    return globals_, delivery_status
+
+
+@pytest.mark.parametrize("raised", [MemoryError, RecursionError, KeyboardInterrupt, SystemExit])
+def test_base_exception_during_release_never_erases_a_landed_commit(monkeypatch, tmp_path: Path, raised):
+    """`except Exception` around the release let a landed commit be replaced by a traceback.
+
+    MemoryError, RecursionError and a Ctrl-C are not Exception, so r25's guard did not see them —
+    yet the commit has already landed when they arrive, and letting them escape the `finally`
+    discards the one record that it did. The rule is not "catch less"; it is "once a side effect is
+    known, nothing may outrank reporting it".
+    """
+    ns = runpy.run_path(str(DELIVER))
+    name = f"repo-release-{raised.__name__.lower()}"
+    globals_, delivery_status = _landed_commit_globals(monkeypatch, ns, tmp_path, name)
+
+    def exploding_release(*_a, **_k):
+        raise raised("release exploded")
+
+    monkeypatch.setitem(globals_, "release_finalization_lock", exploding_release)
+
+    result, rc = ns["execute_mutating_operation"](_landed_commit_args(tmp_path, name), delivery_status)
+    release = getattr(ns["execute_mutating_operation"], "last_release")
+
+    # The commit truth survived the release explosion...
+    assert result["mutating_run"]["status"] == "committed"
+    assert release["released"] is False
+    assert release["reason"] == "finalization_lock_release_failed"
+    assert raised.__name__ in release["error"]
+    # ...and reconciles (mutating the run in place) to landed-but-lock-stuck.
+    reconciliation = ns["release_failure_reconciliation"]("commit", result["mutating_run"], release)
+    assert reconciliation is not None
+    assert reconciliation[0]["status"] == "committed_release_failed"
+
+
+@pytest.mark.parametrize("raised", [MemoryError, RecursionError, KeyboardInterrupt, SystemExit])
+def test_base_exception_during_release_redaction_emits_a_fixed_fallback(monkeypatch, tmp_path: Path, raised):
+    """Redaction runs regexes over attacker-influenced text; if it dies, truth must still ship.
+
+    The fallback is a fixed literal rather than the raw payload: a redaction that raised has by
+    definition not redacted, so emitting what it was handed would leak exactly the secret it exists
+    to remove.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    name = f"repo-redaction-{raised.__name__.lower()}"
+    globals_, delivery_status = _landed_commit_globals(monkeypatch, ns, tmp_path, name)
+    secret = "ghp_" + "s3cr3t" * 6
+
+    monkeypatch.setitem(globals_, "release_finalization_lock", lambda *_a, **_k: {"released": False, "reason": "helper_failed", "error": secret})
+    real_redact = globals_["redact_value"]
+
+    def exploding_redact(value):
+        # Only the release payload explodes: redaction before the side effect is known is a
+        # different boundary, and this test must not silently move it.
+        if isinstance(value, dict) and value.get("reason") == "helper_failed":
+            raise raised("redaction exploded")
+        return real_redact(value)
+
+    monkeypatch.setitem(globals_, "redact_value", exploding_redact)
+
+    result, _rc = ns["execute_mutating_operation"](_landed_commit_args(tmp_path, name), delivery_status)
+    release = getattr(ns["execute_mutating_operation"], "last_release")
+
+    assert result["mutating_run"]["status"] == "committed"
+    assert release == ns["RELEASE_REDACTION_FALLBACK"]
+    assert secret not in json.dumps(result)
+    # Still reconciles to the truthful landed-but-stuck status.
+    assert ns["release_failure_reconciliation"]("commit", result["mutating_run"], release)[0]["status"] == "committed_release_failed"
+
+
+def test_safe_release_error_survives_a_redacting_tail_that_raises(monkeypatch):
+    ns = runpy.run_path(str(DELIVER))
+
+    def exploding_tail(*_a, **_k):
+        raise MemoryError("tail exploded")
+
+    monkeypatch.setitem(ns["safe_release_error"].__globals__, "tail", exploding_tail)
+
+    assert ns["safe_release_error"](RecursionError("boom")) == "RecursionError"
+
+
+def test_a_landed_commit_survives_an_exception_thrown_by_the_release_path(monkeypatch, tmp_path: Path):
+    """The r24 HIGH-2 scenario end to end: the commit happened, then release raised.
+
+    The outer `finally` called release_finalization_lock() unguarded, so the exception replaced
+    the already-computed successful commit result before `last_release` and
+    `release_failure_reconciliation()` were ever consulted. The operator would see a traceback and
+    no record of a commit that is really in the repository.
+    """
+    ns = runpy.run_path(str(DELIVER))
+    repo = init_repo(tmp_path / "repo-release-raises")
+    plugin = fake_busdriver(tmp_path / "busdriver-release-raises")
+    globals_ = ns["execute_mutating_operation"].__globals__
+    delivery_status = delivery_status_for_mutation(repo, "pr_review_fresh", "pr_review_fresh")
+
+    def exploding_release(*_a, **_k):
+        raise OSError("release helper vanished")
+
+    def fake_git_output(_repo, *args):
+        if args[:2] == ("rev-parse", "HEAD"):
+            return 0, "reviewed-local-head", ""
+        return 0, "", ""
+
+    monkeypatch.setitem(globals_, "acquire_finalization_lock", lambda _repo, _state_dir=None: {"acquired": True, "token": "lock-token"})
+    monkeypatch.setitem(globals_, "release_finalization_lock", exploding_release)
+    monkeypatch.setitem(globals_, "run_delivery_status", lambda _args, include_lock_status=False: (delivery_status, 0))
+    monkeypatch.setitem(globals_, "commit_blocking_dirty_entries", lambda _status, _args: [])
+    monkeypatch.setitem(globals_, "current_branch", lambda _repo: "feature")
+    monkeypatch.setitem(globals_, "valid_local_branch_name", lambda _repo, _branch: True)
+    monkeypatch.setitem(globals_, "push_remote_safety", lambda _repo, _remote: (True, None))
+    monkeypatch.setitem(globals_, "github_remote_url", lambda _repo, _remote: "https://github.com/owner/repo.git")
+    monkeypatch.setitem(globals_, "pr_review_base_matches", lambda *_args, **_kwargs: True)
+    monkeypatch.setitem(globals_, "live_remote_branch_head", lambda _repo, _branch, _remote: ("reviewed-local-head", None))
+    monkeypatch.setitem(globals_, "git_output", fake_git_output)
+    args = argparse.Namespace(
+        operation="push", mode="execute", repo=str(repo), plugin_root=str(plugin), state_dir=None, run_id="run-release-raises",
+        pr=None, commit_message="title", pr_title="title", pr_body="body", push_remote="origin", push_branch=None, head=None,
+        base="main", merge_method="squash", delete_branch=True, busdriver_state_dir_name=None, verifier_timeout=180,
+    )
+
+    result, rc = ns["execute_mutating_operation"](args, delivery_status)
+
+    release = getattr(ns["execute_mutating_operation"], "last_release")
+    assert release["released"] is False
+    assert release["reason"] == "finalization_lock_release_failed"
+    assert result["mutating_run"]["lock_release"]["released"] is False
+
+    reconciliation = ns["release_failure_reconciliation"]("push", result["mutating_run"], release)
+    assert reconciliation is not None
+    result["decision"], result["steps"], rc = reconciliation
+    assert result["decision"]["status"] == "already_up_to_date_release_failed"
+    assert result["decision"]["reason"] == "finalization_lock_release_failed"
+    assert rc == 2
+
+
+# --- v16-r27 item 7: a literal-quote filename is not the marker path it is dressed as ---
+
+
+def test_literal_quote_filename_does_not_impersonate_an_allowed_marker_path():
+    """r26 Low: `ast.literal_eval` stopped decoding git quoting and started decoding filenames.
+
+    A repo holding a directory literally named `".claude` with a file `freeze.local"` in it yields
+    the `-z` record `` M ".claude/freeze.local"``. Un-quoting that turns a hostile, arbitrary path
+    into the allow-listed marker path, and blocking_dirty_entries then declines to block it. The
+    commit still failed closed one layer down, so this defeated a defense-in-depth layer and
+    produced a misleading error rather than a mutation — but the layer is supposed to hold.
+    """
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+    impostor = '".claude/freeze.local"'
+
+    blocking = ns["blocking_dirty_entries"]([f" M {impostor}"], ns["allowed_marker_paths"]([".claude"]))
+
+    assert blocking == [f" M {impostor}"], "a literal-quote filename was read as an allowed marker"
+
+
+def test_genuine_marker_path_is_still_allowed():
+    """The fix must not start blocking the real marker it exists to allow."""
+    ns = runpy.run_path(str(PRODUCTION_DELIVER))
+
+    assert ns["blocking_dirty_entries"]([" M .claude/freeze.local"], ns["allowed_marker_paths"]([".claude"])) == []
