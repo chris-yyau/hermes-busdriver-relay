@@ -95,8 +95,8 @@ def test_relay_brief_reports_requested_roadmap_tasks_read_only_and_authority_fal
     assert task_by_id["adr0005-unlock-contract"]["status"] == "gated_executor_slice_implemented_remaining_authority_policy_blocked"
     assert task_by_id["mutating-pr-grind-fix-loop"]["status"] == "read_only_design_complete_mutating_loop_policy_blocked"
     assert task_by_id["marker-interop-contract"]["status"] == "design_contract_complete_marker_write_policy_blocked"
-    assert task_by_id["pi-adapter-proof"]["status"] == "pi_primary_opencode_fallback_verified_non_finalizing"
-    assert task_by_id["pi-adapter-proof"]["safe_next"] == "use_pi_primary_or_opencode_fallback_through_gated_draft_launcher"
+    assert task_by_id["pi-adapter-proof"]["status"] == "historical_pi_adapter_proof_retained_codex_primary_metadata_only"
+    assert task_by_id["pi-adapter-proof"]["safe_next"] == "use_codex_primary_metadata_only_keep_agent_dispatch_blocked"
     assert task_by_id["status-ux-layer"]["status"] == "implemented_by_hermes_busdriver_relay_brief"
 
 

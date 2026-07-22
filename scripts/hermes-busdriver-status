@@ -358,23 +358,20 @@ DEFAULT_ROLE_ROUTES = {
     "council.researcher": ["grok", "droid"],
 }
 
-DEFAULT_RELAY_CODING_AGENT = "pi"
-# Current relay policy uses Pi as the constrained implementation primary,
-# OpenCode as the explicit fallback/comparison candidate, Codex for PR lead /
-# review, Claude Code for backstop/Busdriver-authority review, Grok/Gemini as
-# read-only reviewer lanes, Zed as the manual IDE sidecar, and UltraOracle as an
-# optional expert witness. Review/decision/backstop roles are protected from
-# silently selecting the coding agent when avoid_coding_agent_for_review=true;
-# implementation/manual roles may intentionally match the coding agent.
+DEFAULT_RELAY_CODING_AGENT = "codex"
+# Codex is implementation-primary metadata and PR lead, OpenCode is the
+# fallback/comparison draft-only candidate, Cursor is the manual IDE sidecar,
+# and Pi is deferred adapter history. No relay role has a production
+# dispatcher; route resolution is metadata only.
 DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = True
 DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     "relay.impl.primary": {
         "native_busdriver_role": "implementation primary draft worker",
-        "route": ["pi"],
+        "route": ["codex"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
-        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.impl.secondary": {
         "native_busdriver_role": "implementation secondary draft worker",
@@ -395,100 +392,115 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     "relay.review.fast": {
         "native_busdriver_role": "fast read-only reviewer",
         "route": ["grok"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.review.long_context": {
         "native_busdriver_role": "long-context read-only reviewer",
         "route": ["gemini"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.ide.manual": {
         "native_busdriver_role": "manual IDE sidecar",
-        "route": ["zed"],
+        "route": ["cursor"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
-        "adapter_verified": True,
+        "adapter_verified": False,
         "dispatch_blocker": "manual_ide_sidecar_not_programmatic",
     },
     "relay.expert_witness.ultraoracle": {
         "native_busdriver_role": "expert witness escalation",
         "route": ["ultraoracle"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.litmus.reviewer": {
         "native_busdriver_role": "litmus reviewer",
         "route": ["codex"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.blueprint.reviewer_1": {
         "native_busdriver_role": "blueprint reviewer 1",
         "route": ["agy"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.blueprint.reviewer_2": {
         "native_busdriver_role": "blueprint reviewer 2",
         "route": ["claude-code"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.blueprint.reviewer_3": {
         "native_busdriver_role": "blueprint reviewer 3",
         "route": ["grok"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.blueprint.arbiter": {
         "native_busdriver_role": "blueprint arbiter",
         "route": ["codex"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.pr.lead": {
         "native_busdriver_role": "PR lead reviewer",
         "route": ["codex"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.pr.backstop": {
         "native_busdriver_role": "PR security/bugs backstop",
         "route": ["claude-code"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.council.architect": {
         "native_busdriver_role": "council architect",
         "route": ["inline"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.council.pragmatist": {
         "native_busdriver_role": "council pragmatist",
         "route": ["agy"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.council.critic": {
         "native_busdriver_role": "council critic",
         "route": ["codex"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.council.researcher": {
         "native_busdriver_role": "council researcher",
         "route": ["grok"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.council.skeptic": {
         "native_busdriver_role": "council skeptic",
         "route": ["claude-code"],
-        "programmatic_dispatch_allowed": True,
-        "adapter_verified": True,
+        "programmatic_dispatch_allowed": False,
+        "adapter_verified": False,
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
 }
 
@@ -1120,7 +1132,9 @@ def relay_equivalent_roles(
     avoid_config_error = None
     if "avoid_coding_agent_for_review" in relay_cfg and not isinstance(configured_avoid, bool):
         avoid_config_error = "avoid_coding_agent_for_review_must_be_boolean"
-    avoid = configured_avoid if avoid_config_error is None and isinstance(configured_avoid, bool) else DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW
+    elif configured_avoid is False:
+        avoid_config_error = "avoid_coding_agent_for_review_must_be_true"
+    avoid = DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW
     roles: dict[str, Any] = {}
     for role, defaults in DEFAULT_RELAY_EQUIVALENT_ROUTES.items():
         default_route = defaults["route"]
@@ -1167,6 +1181,9 @@ def relay_equivalent_roles(
             config_error = "empty_route"
         selected = next((agent for agent in route if not (avoid and review_sensitive) or agent != coding_agent), route[0] if route else None)
         same_as_coding_agent = selected == coding_agent
+        independence_degraded = config_error is None and avoid and review_sensitive and same_as_coding_agent
+        if independence_degraded:
+            dispatch_blocker = "independent_review_session_contract_unavailable"
         roles[role] = {
             "native_busdriver_role": defaults["native_busdriver_role"],
             "configured_route": route,
@@ -1179,7 +1196,7 @@ def relay_equivalent_roles(
             "adapter_verified": adapter_verified,
             "adapter_proof": defaults.get("adapter_proof"),
             "dispatch_blocker": dispatch_blocker,
-            "degraded": bool(config_error) or (avoid and review_sensitive and same_as_coding_agent),
+            "degraded": bool(config_error) or independence_degraded,
             "config_error": config_error,
             "configurable": True,
             "not_busdriver_native_claude_runtime": True,
@@ -1190,7 +1207,7 @@ def relay_equivalent_roles(
         "coding_agent": coding_agent,
         "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
         "coding_agent_config_error": coding_agent_config_error,
-        "role_policy": "pi_primary_opencode_fallback_codex_review",
+        "role_policy": "codex_primary_opencode_fallback_pi_deferred",
         "review_independence_policy": "avoid_coding_agent_for_review_roles",
         "avoid_coding_agent_for_review": avoid,
         "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",

@@ -1,10 +1,10 @@
 FULL_RELAY_ROLE_MAP = {
-    "relay.impl.primary": "pi",
+    "relay.impl.primary": "codex",
     "relay.impl.secondary": "opencode",
     "relay.impl.fallback": "opencode",
     "relay.review.fast": "grok",
     "relay.review.long_context": "gemini",
-    "relay.ide.manual": "zed",
+    "relay.ide.manual": "cursor",
     "relay.expert_witness.ultraoracle": "ultraoracle",
     "relay.litmus.reviewer": "codex",
     "relay.blueprint.reviewer_1": "agy",
@@ -20,18 +20,9 @@ FULL_RELAY_ROLE_MAP = {
     "relay.council.skeptic": "claude-code",
 }
 
-NON_PROGRAMMATIC_RELAY_ROLES = {
-    "relay.impl.primary",
-    "relay.impl.secondary",
-    "relay.impl.fallback",
-    "relay.ide.manual",
-}
+NON_PROGRAMMATIC_RELAY_ROLES = set(FULL_RELAY_ROLE_MAP)
 
-UNVERIFIED_ADAPTER_RELAY_ROLES = {
-    "relay.impl.primary",
-    "relay.impl.secondary",
-    "relay.impl.fallback",
-}
+UNVERIFIED_ADAPTER_RELAY_ROLES = set(FULL_RELAY_ROLE_MAP)
 
 REVIEW_SENSITIVE_RELAY_ROLES = {
     role

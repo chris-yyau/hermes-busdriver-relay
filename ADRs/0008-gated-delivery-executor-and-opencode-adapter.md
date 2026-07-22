@@ -8,7 +8,7 @@ Accepted implementation slice.
 
 ADR 0005 identified five policy-blocked finalization surfaces: mutating delivery execution, mutating result envelopes, programmatic dual review, PR-grind fix/push/re-poll, and marker interop. The safe unlock is not to make Hermes a standing Busdriver authority. The safe unlock is to give Hermes a narrow executor that re-checks Busdriver-equivalent evidence immediately before each side effect and fails closed when evidence is stale, missing, malformed, or outside scope.
 
-The user also wants OpenCode to be a usable Pi fallback / China-model comparison lane, but only after adapter proof with authority flags false.
+The user also wants OpenCode + Go to be a secondary/fallback draft-only metadata lane, but only with adapter proof and authority flags false.
 
 ## Decision
 

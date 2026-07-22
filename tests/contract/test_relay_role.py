@@ -133,7 +133,7 @@ def test_relay_role_resolves_configured_non_coding_reviewer(tmp_path):
     assert code == 0
     assert data["status"] == "resolved"
     assert data["ok"] is True
-    assert data["dispatch_allowed"] is True
+    assert data["dispatch_allowed"] is False
     assert data["mutation_allowed"] is False
     assert data["finalization_allowed"] is False
     assert data["not_busdriver_native_claude_runtime"] is True
@@ -143,18 +143,18 @@ def test_relay_role_resolves_configured_non_coding_reviewer(tmp_path):
     assert data["selected"]["same_as_coding_agent"] is False
     assert data["selected"]["degraded"] is False
     assert data["decision"] == {
-        "dispatch_allowed": True,
+        "dispatch_allowed": False,
         "mutation_allowed": False,
         "finalization_allowed": False,
         "not_busdriver_native_claude_runtime": True,
-        "reason": "selected_agent_available",
+        "reason": "relay_role_dispatcher_unavailable",
     }
 
 
 def test_relay_role_resolves_complete_live_role_map(tmp_path):
     relay_config = tmp_path / "relay-config.json"
     relay_config.write_text(json.dumps({
-        "coding_agent": "pi",
+        "coding_agent": "external-builder",
         "avoid_coding_agent_for_review": True,
         "routes": {role: [agent] for role, agent in FULL_RELAY_ROLE_MAP.items()},
     }))
@@ -165,25 +165,31 @@ def test_relay_role_resolves_complete_live_role_map(tmp_path):
         assert code == 0
         assert data["status"] == "resolved"
         assert data["ok"] is True
-        assert data["dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
+        assert data["dispatch_allowed"] is False
         assert data["mutation_allowed"] is False
         assert data["finalization_allowed"] is False
         assert selected["selected_agent"] == expected_agent
         assert selected["configured_route"] == [expected_agent]
         assert selected["degraded"] is False
-        assert selected["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
-        if role in NON_PROGRAMMATIC_RELAY_ROLES:
-            expected_reason = (
-                "manual_ide_sidecar_not_programmatic"
-                if role == "relay.ide.manual"
-                else "agent_containment_and_credential_broker_unavailable"
-            )
-            assert data["reason"] == expected_reason
+        assert selected["programmatic_dispatch_allowed"] is False
+        if role in {"relay.impl.secondary", "relay.impl.fallback"}:
+            assert data["reason"] == "agent_containment_and_credential_broker_unavailable"
+        elif role == "relay.ide.manual":
+            assert data["reason"] == "manual_ide_sidecar_not_programmatic"
         else:
-            assert data["reason"] == "selected_agent_available"
-        if role in {"relay.impl.primary", "relay.impl.secondary", "relay.impl.fallback"}:
-            assert selected["adapter_verified"] is False
-            assert selected["dispatch_blocker"] == "agent_containment_and_credential_broker_unavailable"
+            assert data["reason"] == "relay_role_dispatcher_unavailable"
+        assert selected["adapter_verified"] is False
+
+
+def test_relay_role_keeps_default_codex_pr_lead_non_dispatchable_without_independent_session(tmp_path):
+    code, data = run_role("--role", "relay.pr.lead", "--relay-config", str(tmp_path / "missing.json"), check=False)
+
+    assert code == 2
+    assert data["coding_agent"] == "codex"
+    assert data["selected"]["selected_agent"] == "codex"
+    assert data["avoid_coding_agent_for_review"] is True
+    assert data["dispatch_allowed"] is False
+    assert data["reason"] == "independent_review_session_contract_unavailable"
 
 
 def test_relay_role_fails_closed_for_malformed_status_role_entry(tmp_path):
@@ -216,19 +222,19 @@ def test_relay_role_fails_closed_for_malformed_status_role_entry(tmp_path):
         ),
         (
             {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True},
-            "status_probe_missing_adapter_verified",
+            "status_probe_dispatch_authority_forbidden",
         ),
         (
             {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": "yes"},
-            "status_probe_invalid_adapter_verified_shape",
+            "status_probe_dispatch_authority_forbidden",
         ),
         (
             {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": False},
-            "status_probe_adapter_not_verified",
+            "status_probe_dispatch_authority_forbidden",
         ),
         (
             {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": True, "adapter_verified": True, "dispatch_blocker": "contradiction"},
-            "status_probe_dispatch_allowed_with_blocker",
+            "status_probe_dispatch_authority_forbidden",
         ),
         (
             {"degraded": False, "selected_agent": "opencode", "programmatic_dispatch_allowed": False, "adapter_verified": True},
@@ -257,6 +263,30 @@ def test_relay_role_metadata_contradictions_fail_closed(tmp_path: Path, entry: d
     assert data["dispatch_allowed"] is False
     assert data["decision"]["dispatch_allowed"] is False
     assert data["reason"] == reason
+
+
+def test_relay_role_rejects_clean_positive_programmatic_dispatch_claim(tmp_path: Path):
+    entry = {
+        "degraded": False,
+        "selected_agent": "opencode",
+        "programmatic_dispatch_allowed": True,
+        "adapter_verified": True,
+        "dispatch_blocker": None,
+    }
+
+    code, data = run_role_with_fake_status(
+        tmp_path,
+        status_payload_for_role(entry),
+        "--role",
+        "relay.pr.backstop",
+    )
+
+    assert code == 2
+    assert data["status"] == "degraded"
+    assert data["ok"] is False
+    assert data["reason"] == "status_probe_dispatch_authority_forbidden"
+    assert data["dispatch_allowed"] is False
+    assert data["decision"]["dispatch_allowed"] is False
 
 
 def test_relay_role_fails_closed_for_malformed_status_roles_container(tmp_path):
@@ -332,7 +362,7 @@ def test_relay_role_fails_closed_for_invalid_top_level_config_values(tmp_path):
     assert data["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert data["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"
     assert data["selected"]["selected_agent"] == "codex"
-    assert data["selected"]["degraded"] is False
+    assert data["selected"]["degraded"] is True
     assert data["decision"]["dispatch_allowed"] is False
     assert data["decision"]["mutation_allowed"] is False
     assert data["decision"]["finalization_allowed"] is False

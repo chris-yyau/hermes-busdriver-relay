@@ -52,10 +52,40 @@ def test_current_status_names_security_closure_artifacts_explicitly():
     assert required <= named
 
 
-def test_current_status_distinguishes_unsealed_candidate_from_historical_evidence():
+def test_current_status_records_candidate_authority_chronology():
     text = CURRENT_STATUS.read_text()
-    assert "Current candidate status: **BLOCKED / UNSEALED**" in text
+    historical_seal = (
+        "Historical sealed main immediately before PR #157: commit "
+        "`1dc6bbf4eaa91341ecda31d4e8e2a05f80c5de96`, tree "
+        "`2b4de738d04283ebf1d945db63bbbf64d2dfdc1f`, with 32-stack "
+        "authority result `4090 passed, 14 skipped, 1 deselected`. It is not "
+        "current main/top."
+    )
+    current_base_seal = (
+        "Current base main after merged PR #157: commit "
+        "`7d7213a6b83f7e68b118c902e0e5381dffbe592c`, tree "
+        "`e82d6329651f717443a8b8a9ff0bbe5e80ace133`, separately sealed by "
+        "exact-tree full result `4090 passed, 14 skipped, 1 deselected`, "
+        "independent security/closure review `PASS`, and postmerge Tests "
+        "`29913461631` and Security `29913461640`: `success`. It does not "
+        "borrow the 32-stack seal; it has its own runtime reseal authority."
+    )
+    candidate = (
+        "Current candidate status at candidate-verification time: "
+        "the policy PR represented by this document is **UNMERGED / UNSEALED** "
+        "until its own exact-tree full suite, independent reviews, and delivery "
+        "authority pass; it cannot borrow either earlier seal. "
+        "External candidate authority binds the exact candidate commit and tree; "
+        "the candidate commit SHA is intentionally not embedded because editing "
+        "this document changes it."
+    )
+    assert (
+        f"## Current candidate verification\n\n{historical_seal}\n\n"
+        f"{current_base_seal}\n\n{candidate}"
+    ) in text
     assert "## Historical superseded evidence" in text
-    assert text.index("Current candidate status: **BLOCKED / UNSEALED**") < text.index(
+    assert text.index(historical_seal) < text.index(current_base_seal) < text.index(
+        candidate
+    ) < text.index(
         "Latest completed historical exact source validation"
     )

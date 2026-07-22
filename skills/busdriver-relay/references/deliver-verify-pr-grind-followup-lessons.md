@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Deliver Verify PR-Grind Follow-up Lessons
 
 Session context: while grinding `hermes-busdriver-deliver` verify-only delivery envelope feedback on PR #7, multiple reviewer rounds surfaced small but durable envelope-hardening lessons. Apply these to future changes in delivery/verification helpers, not just this PR.

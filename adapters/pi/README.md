@@ -4,7 +4,7 @@ This directory contains the relay-owned Pi adapter. It is not Pi upstream source
 
 ## Role
 
-Pi is the default target Busdriver-shaped adapter contract. It produces scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
+Pi is a deferred Busdriver-shaped adapter contract retained as explicit harness/schema history, not the current, default, or preferred route. It produces scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
 
 ```text
 Pi result status = needs_busdriver_review | blocked

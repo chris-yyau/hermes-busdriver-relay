@@ -19,9 +19,10 @@ or Busdriver skill bodies.
 ## Boundary (read this first)
 
 ```text
-Hermes            = intake, Phase 0 discovery, JIT source reads, read-only status, notification
-Busdriver / Claude Code = workflow authority, gates, reviews, MCP/plugin routing, execution,
-                          commits, PRs, merges
+Hermes            = intake, Phase 0 discovery, JIT source reads, relay/router/verifier,
+                    notification, and explicit Delivery Mode operation under gates
+Busdriver / Claude Code = sole canonical finalization authority, workflow gates, reviews,
+                          MCP/plugin routing, and canonical pipeline semantics
 ```
 
 - **Busdriver is a read-only reference, never a dependency to copy.** Source is read

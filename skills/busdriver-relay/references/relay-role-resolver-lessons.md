@@ -15,7 +15,7 @@ Date: 2026-06-28
 - Degraded roles, malformed selected role entries, invalid selected_agent/degraded shapes, malformed status output, status subprocess failure, status timeout, and invalid CLI invocations all fail closed.
 - Every stdout payload, including invalid invocations and `--list-roles`, carries root authority flags:
   - `read_only=true`
-  - `dispatch_allowed=<true only for safe resolved role>`
+  - `dispatch_allowed=false` for every role, including valid resolved metadata
   - `mutation_allowed=false`
   - `finalization_allowed=false`
   - `not_busdriver_native_claude_runtime=true`
@@ -26,9 +26,9 @@ Date: 2026-06-28
 1. **Top-level config errors must block dispatch.** A selected role can look healthy while global relay config is malformed (for example empty `coding_agent`). Treat top-level parse/shape/routes/coding_agent/avoid_coding_agent errors as fail-closed.
 2. **Root authority flags matter.** Some consumers read only the root envelope, not nested `decision`; root must include `dispatch_allowed`, `mutation_allowed`, `finalization_allowed`, and runtime identity flags.
 3. **Invalid CLI invocations must return JSON.** Avoid argparse plain-text stderr/empty stdout paths. Use `exit_on_error=False`, catch parse errors, disable abbreviated long options with `allow_abbrev=False`, and emit JSON fail-closed payloads on stdout.
-4. **Subprocess output must be revalidated.** Validate top-level status JSON shape, `relay_config`, `relay_equivalent_roles`, `roles`, selected role entry, `selected_agent`, and `degraded` before considering dispatch.
+4. **Subprocess output must be revalidated.** Validate top-level status JSON shape, `relay_config`, `relay_equivalent_roles`, `roles`, selected role entry, `selected_agent`, and `degraded` before accepting resolved metadata. Any positive programmatic-dispatch claim is forbidden.
 5. **Wrapper timeout should exceed child timeout.** The resolver wrapper timeout must be longer than the status probe's own timeout so the child can produce structured timeout/error JSON first when possible.
-6. **Downstream status consumers must re-check authority flags.** If delivery/finalization status accepts a resolver output, it should require the resolver schema plus root/nested authority invariants (`mutation_allowed=false`, `finalization_allowed=false`, `not_busdriver_native_claude_runtime=true`) before marking the optional role evidence OK.
+6. **Downstream status consumers must re-check authority flags.** If delivery/finalization status accepts a resolver output, it should require the resolver schema plus root/nested authority invariants (`dispatch_allowed=false`, `mutation_allowed=false`, `finalization_allowed=false`, `not_busdriver_native_claude_runtime=true`) before retaining the optional role evidence as non-dispatchable.
 
 ## Delivery-status integration
 

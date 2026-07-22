@@ -1,10 +1,10 @@
 # OpenCode Busdriver Draft Adapter
 
-This directory contains the relay-owned OpenCode fallback adapter proof. It is not an OpenCode plugin install and it does not make OpenCode a Busdriver authority.
+This directory contains the relay-owned OpenCode + Go secondary/fallback adapter proof. It is not an OpenCode plugin install and it does not make OpenCode a Busdriver authority.
 
 ## Role
 
-OpenCode is the Pi fallback / China-model comparison **adapter contract**. That contract may produce scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
+OpenCode + Go is the secondary/fallback draft-only **adapter contract**. That contract may produce scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
 
 ```text
 OpenCode result status = needs_busdriver_review | blocked

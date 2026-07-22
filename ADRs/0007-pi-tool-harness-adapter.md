@@ -2,11 +2,11 @@
 
 ## Status
 
-**Accepted as target-state adapter and fixture proof; not enabled for production dispatch.**
+**Accepted as deferred adapter history and fixture proof; not a current route and not enabled for production dispatch.**
 
 ## Current production truth
 
-Pi remains the preferred implementation route in the authority map, but route preference is metadata rather than executable authority. Production `hermes-busdriver-agent-draft`, the Pi wrapper, and role/status surfaces fail closed before worker, repository, HOME, or credential handling with:
+Pi is deferred adapter history, not the current, default, or preferred implementation route. Production `hermes-busdriver-agent-draft`, the Pi wrapper, and role/status surfaces fail closed before worker, repository, HOME, or credential handling with:
 
 ```text
 agent_containment_and_credential_broker_unavailable
@@ -26,10 +26,10 @@ Historical fake-worker or real-model smoke proves adapter shape only. It does no
 
 ```text
 ClaudeCode / Busdriver = canonical authority
-Hermes                 = router / operator / verifier
-Pi                     = preferred constrained draft route; production non-programmatic
-OpenCode               = fallback/comparison route; production non-programmatic
-Codex                  = PR lead / review / backstop-focused by default
+Hermes                 = relay / router / verifier / explicit Delivery Mode operator
+Codex                  = implementation-primary metadata and PR lead; no production relay-role dispatcher
+OpenCode + Go          = secondary/fallback draft-only metadata; production non-programmatic
+Pi                     = deferred adapter history; production non-programmatic
 ```
 
 ## Target-state adapter design

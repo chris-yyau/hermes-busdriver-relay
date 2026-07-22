@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # PR #30 finalization guardrails + smoke-summary lessons
 
 Session lessons from continuing `hermes-busdriver-relay` after PR #29 and merging PR #30.

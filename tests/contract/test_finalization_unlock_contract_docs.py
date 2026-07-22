@@ -540,6 +540,10 @@ def test_authoritative_doc_inventory_covers_project_guide_and_linked_current_ref
     classifications, discovered = authoritative_doc_inventory()
     assert (ROOT / ".claude" / "CLAUDE.md").resolve() in discovered
     assert classifications[(SKILL.parent / "references" / "relay-v1-session-lessons.md").resolve()] == "historical"
+    assert classifications[PI_IMPLEMENTATION_LESSONS.resolve()] == "historical"
+    assert classifications[RELAY_ROLE_SPLIT.resolve()] == "historical"
+    assert classifications[SKILL_AUTHORITY_MAP.resolve()] == "current_agent_policy"
+    assert classifications[FULL_ROLE_LESSONS.resolve()] == "current_agent_policy"
     assert all(classifications[path] != "historical" for path in map(Path.resolve, ROOT.glob("ADRs/*.md")))
 
 

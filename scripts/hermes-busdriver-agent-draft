@@ -1421,7 +1421,7 @@ def main() -> int:
     )
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["pi", "opencode", "noop"], default="pi", help="Pi is primary; OpenCode is a guarded non-authority fallback; noop is a smoke probe.")
+    ap.add_argument("--agent", choices=["pi", "opencode", "noop"], default="noop", help="Safe default is noop; Pi/OpenCode are explicit compatibility probes only.")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")
     ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")

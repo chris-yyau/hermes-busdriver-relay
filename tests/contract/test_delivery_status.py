@@ -1052,16 +1052,18 @@ def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Pa
         assert data["relay_capabilities"][helper]["available"] is True
     role = data["relay_role_resolution"]
     assert role["available"] is True
-    assert role["ok"] is True
+    assert role["ok"] is False
     assert role["returncode"] == 0
+    assert role["reason"] == "relay_role_not_dispatchable"
     assert role["result"]["role"] == "relay.pr.backstop"
+    assert role["result"]["ok"] is True
     assert role["result"]["selected"]["selected_agent"] == "codex"
-    assert role["result"]["dispatch_allowed"] is True
+    assert role["result"]["dispatch_allowed"] is False
     assert role["result"]["mutation_allowed"] is False
     assert role["result"]["finalization_allowed"] is False
     assert data["decision"]["finalization_allowed"] is False
     assert data["decision"]["merge_allowed"] is False
-    assert "relay_role_not_dispatchable" not in data["decision"]["warnings"]
+    assert "relay_role_not_dispatchable" in data["decision"]["warnings"]
 
 
 def test_delivery_status_reports_unresolved_relay_role_as_warning(tmp_path: Path):
@@ -1095,10 +1097,10 @@ def test_delivery_status_rejects_authority_positive_relay_role_output(tmp_path: 
         "  'read_only': True,\n"
         "  'ok': True,\n"
         "  'dispatch_allowed': True,\n"
-        "  'mutation_allowed': True,\n"
-        "  'finalization_allowed': True,\n"
+        "  'mutation_allowed': False,\n"
+        "  'finalization_allowed': False,\n"
         "  'not_busdriver_native_claude_runtime': True,\n"
-        "  'decision': {'dispatch_allowed': True, 'mutation_allowed': True, 'finalization_allowed': True, 'not_busdriver_native_claude_runtime': True}\n"
+        "  'decision': {'dispatch_allowed': True, 'mutation_allowed': False, 'finalization_allowed': False, 'not_busdriver_native_claude_runtime': True}\n"
         "}))\n"
     )
 
@@ -1178,12 +1180,18 @@ def test_lock_status_executes_retained_bytes_not_swappable_private_path(monkeypa
 
 def test_relay_role_executes_retained_bytes_not_swappable_private_path(monkeypatch, tmp_path: Path):
     mod = __import__("runpy").run_path(str(STATUS))
+    trusted_source = "import json\nprint(json.dumps({'schema':'hermes-busdriver-relay-role/v0','role':'relay.pr.backstop','read_only':True,'ok':True,'dispatch_allowed':False,'mutation_allowed':False,'finalization_allowed':False,'not_busdriver_native_claude_runtime':True,'decision':{'dispatch_allowed':False,'mutation_allowed':False,'finalization_allowed':False,'not_busdriver_native_claude_runtime':True}}))\n"
     private_root = _private_runtime_root(
         tmp_path,
         "hermes-busdriver-relay-role",
-        "import json\nprint(json.dumps({'schema':'hermes-busdriver-relay-role/v0','role':'relay.pr.backstop','read_only':True,'ok':False,'dispatch_allowed':False,'mutation_allowed':False,'finalization_allowed':False,'not_busdriver_native_claude_runtime':True,'decision':{'dispatch_allowed':False,'mutation_allowed':False,'finalization_allowed':False,'not_busdriver_native_claude_runtime':True}}))\n",
+        trusted_source,
     )
     monkeypatch.setitem(mod["run_relay_role_resolution"].__globals__, "ROOT", private_root)
+    monkeypatch.setitem(
+        mod["TRUSTED_RELAY_HELPER_DIGESTS"],
+        "scripts/hermes-busdriver-relay-role",
+        hashlib.sha256(trusted_source.encode()).hexdigest(),
+    )
 
     def swap_role_then_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         script = next(Path(arg) for arg in cmd if Path(str(arg)).name == "hermes-busdriver-relay-role")
@@ -1196,7 +1204,9 @@ def test_relay_role_executes_retained_bytes_not_swappable_private_path(monkeypat
     args = argparse.Namespace(relay_role="relay.pr.backstop", relay_role_script=None, relay_config=None, state_dir=None, relay_role_timeout=10)
     result = mod["run_relay_role_resolution"](args)
 
-    assert result.get("ok") is not True, "attacker-replaced relay-role helper forged dispatchability"
+    assert result["ok"] is False
+    assert result["reason"] == "relay_role_not_dispatchable"
+    assert result["result"]["dispatch_allowed"] is False
 
 
 def test_relay_role_status_probe_executes_retained_bytes_not_swappable_path(monkeypatch, tmp_path: Path):
@@ -1209,9 +1219,9 @@ def test_relay_role_status_probe_executes_retained_bytes_not_swappable_path(monk
                 "relay.pr.backstop": {
                     "degraded": False,
                     "selected_agent": "codex",
-                    "programmatic_dispatch_allowed": True,
-                    "adapter_verified": True,
-                    "dispatch_blocker": None,
+                    "programmatic_dispatch_allowed": False,
+                    "adapter_verified": False,
+                    "dispatch_blocker": "relay_role_dispatcher_unavailable",
                 }
             }
         },
@@ -1248,6 +1258,7 @@ def test_relay_role_status_probe_executes_retained_bytes_not_swappable_path(monk
     assert code == 0
     assert payload["status"] == "resolved"
     assert payload["selected"]["selected_agent"] == "codex"
+    assert payload["dispatch_allowed"] is False
 
 
 def test_phase0_status_executes_retained_bytes_not_swappable_private_path(monkeypatch, tmp_path: Path):
@@ -3162,7 +3173,7 @@ def test_litmus_status_never_carries_nested_capabilities_into_stdout(tmp_path: P
 
 
 def test_relay_role_result_never_carries_nested_capabilities_into_stdout(tmp_path: Path):
-    """`redact_value(result)` retained the WHOLE caller-authored object; only shapes were caught."""
+    """A hostile positive dispatch claim is rejected and its nested capabilities stay redacted."""
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     payload = relay_role_payload(**hostile_capabilities(OPAQUE_CAPABILITY))
@@ -3175,9 +3186,11 @@ def test_relay_role_result_never_carries_nested_capabilities_into_stdout(tmp_pat
 
     assert OPAQUE_CAPABILITY not in json.dumps(data)
     resolution = data["relay_role_resolution"]
-    assert resolution["ok"] is True
+    assert resolution["ok"] is False
+    assert resolution["reason"] == "relay_role_authority_flags_unsafe"
     assert resolution["result"]["dispatch_allowed"] is True
     assert resolution["result"]["finalization_allowed"] is False
+    assert "relay_role_not_dispatchable" in data["decision"]["warnings"]
     assert_no_delivery_authority(data["decision"])
 
 

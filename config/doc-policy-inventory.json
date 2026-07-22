@@ -46,9 +46,7 @@
     "skills/busdriver-relay/references/coding-workflow-authority-map-v0.1.md",
     "skills/busdriver-relay/references/full-role-map-dispatchability-lessons.md",
     "skills/busdriver-relay/references/opencode-fallback-proof-audit-lessons.md",
-    "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md",
-    "skills/busdriver-relay/references/pi-adapter-implementation-lessons.md",
-    "skills/busdriver-relay/references/relay-router-agent-role-split.md"
+    "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md"
   ],
   "current_reference": [
     "ADRs/0001-repo-boundary.md",
@@ -58,7 +56,8 @@
     "ADRs/0008-gated-delivery-executor-and-opencode-adapter.md",
     "docs/hermes-busdriver-integration-contract-v2.md",
     "docs/settling-checks-v2.md",
-    "skills/busdriver-relay/references/git-observation-sandbox-lessons.md"
+    "skills/busdriver-relay/references/git-observation-sandbox-lessons.md",
+    "skills/busdriver-relay/references/relay-role-status-integration-lessons.md"
   ],
   "historical": [
     "docs/settling-checks-v1.md",
@@ -74,6 +73,8 @@
     "skills/busdriver-relay/references/deliver-pr-grind-dispatcher-lessons.md",
     "skills/busdriver-relay/references/deliver-pr-grind-reviewer-fix-loop-lessons.md",
     "skills/busdriver-relay/references/deliver-run-envelope-lessons.md",
+    "skills/busdriver-relay/references/deliver-verify-envelope-lessons.md",
+    "skills/busdriver-relay/references/deliver-verify-pr-grind-followup-lessons.md",
     "skills/busdriver-relay/references/delivery-litmus-pr-mode-lessons.md",
     "skills/busdriver-relay/references/delivery-litmus-status-integration-lessons.md",
     "skills/busdriver-relay/references/drift-baseline-delivery-guard-lessons.md",
@@ -95,6 +96,7 @@
     "skills/busdriver-relay/references/orchestration-topology-lessons.md",
     "skills/busdriver-relay/references/periodic-disk-cleanup-cron-lessons.md",
     "skills/busdriver-relay/references/pi-adapter-async-review-fix-lessons.md",
+    "skills/busdriver-relay/references/pi-adapter-implementation-lessons.md",
     "skills/busdriver-relay/references/post-merge-skill-drift-before-status-refresh.md",
     "skills/busdriver-relay/references/post-pr100-tasklist-and-pr101-convergence-lessons.md",
     "skills/busdriver-relay/references/pr-grind-delivery-discipline.md",
@@ -110,6 +112,7 @@
     "skills/busdriver-relay/references/pr112-pi-default-dogfood-lessons.md",
     "skills/busdriver-relay/references/pr118-skill-sync-delivery-lessons.md",
     "skills/busdriver-relay/references/pr25-pr26-delivery-lessons.md",
+    "skills/busdriver-relay/references/pr30-finalization-guardrails-lessons.md",
     "skills/busdriver-relay/references/pr30-pr31-dual-review-readiness-lessons.md",
     "skills/busdriver-relay/references/pr30-pr32-completion-loop-lessons.md",
     "skills/busdriver-relay/references/pr33-completion-status-lessons.md",
@@ -143,6 +146,7 @@
     "skills/busdriver-relay/references/relay-live-config-restoration-lessons.md",
     "skills/busdriver-relay/references/relay-resource-cleanup-lessons.md",
     "skills/busdriver-relay/references/relay-role-resolver-lessons.md",
+    "skills/busdriver-relay/references/relay-router-agent-role-split.md",
     "skills/busdriver-relay/references/relay-router-role-policy-2026-07.md",
     "skills/busdriver-relay/references/relay-v1-session-lessons.md",
     "skills/busdriver-relay/references/reviewer-report-and-pr-grind-lessons.md",

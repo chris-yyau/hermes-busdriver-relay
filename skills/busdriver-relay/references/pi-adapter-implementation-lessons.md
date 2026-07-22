@@ -1,6 +1,8 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Pi Adapter Implementation Lessons
 
-**Superseded for production execution.** This reference preserves target-state adapter-hardening and historical non-installed fixture lessons. Production Pi/OpenCode dispatch is blocked before repository, HOME/state, credential, lock, prompt, or worker handling by `agent_containment_and_credential_broker_unavailable`.
+This reference preserves target-state adapter-hardening and historical non-installed fixture lessons. Production Pi/OpenCode dispatch is blocked before repository, HOME/state, credential, lock, prompt, or worker handling by `agent_containment_and_credential_broker_unavailable`.
 
 Use this reference only when reviewing fixture provenance or designing a separately reviewed future containment and parent-held credential-broker slice in `hermes-busdriver-relay`; it is not a current production procedure.
 
@@ -26,9 +28,9 @@ Do not patch Pi itself unless a later task explicitly scopes an upstream Pi SDK/
 Avoid wording that makes `--agent pi` look production-trusted. Current wording must be:
 
 ```text
-Pi lane    = preferred route metadata; contract proven only in non-installed fixtures; production dispatch blocked.
-OpenCode   = fallback/comparison route metadata; contract proven only in non-installed fixtures; production dispatch blocked.
-Codex lane = PR lead/review/backstop by default; implementation only by explicit exception.
+Codex lane = implementation-primary metadata and PR lead; production dispatch blocked.
+OpenCode+Go lane = secondary/fallback draft-only metadata; production dispatch blocked.
+Pi lane = deferred historical adapter metadata; not current, default, or preferred; production dispatch blocked.
 ```
 
 Only a future independently reviewed OS-containment and parent-held credential-broker implementation could change those dispatchability fields. A future successful Pi draft result would still be `needs_busdriver_review`, never `done`, `complete`, `merged`, or `ready_to_merge`.

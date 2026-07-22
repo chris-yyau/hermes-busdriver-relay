@@ -424,7 +424,7 @@ def trusted_executable_path(name: str) -> Path:
 
 
 STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
-TRUSTED_STATUS_SHA256 = 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'
+TRUSTED_STATUS_SHA256 = '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'
 MAX_AUTHENTICATED_STATUS_BYTES = 1 << 20
 STATUS_STDIN_LOADER = (
     "import sys\n"
@@ -588,24 +588,25 @@ def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, bool
         return "degraded", False, False, selected, "status_probe_invalid_selected_agent_shape"
     if degraded or not selected_agent:
         config_error = selected.get("config_error")
-        reason = config_error if isinstance(config_error, str) and config_error else "selected_agent_unavailable"
+        blocker = selected.get("dispatch_blocker")
+        reason = (
+            config_error if isinstance(config_error, str) and config_error
+            else blocker if isinstance(blocker, str) and blocker
+            else "selected_agent_unavailable"
+        )
         return "degraded", False, False, selected, reason
     if "programmatic_dispatch_allowed" not in selected:
         return "degraded", False, False, selected, "status_probe_missing_dispatch_allowed"
     programmatic_dispatch_allowed = selected["programmatic_dispatch_allowed"]
     if not isinstance(programmatic_dispatch_allowed, bool):
         return "degraded", False, False, selected, "status_probe_invalid_dispatch_allowed_shape"
+    if programmatic_dispatch_allowed:
+        return "degraded", False, False, selected, "status_probe_dispatch_authority_forbidden"
     if "adapter_verified" not in selected:
         return "degraded", False, False, selected, "status_probe_missing_adapter_verified"
     adapter_verified = selected["adapter_verified"]
     if not isinstance(adapter_verified, bool):
         return "degraded", False, False, selected, "status_probe_invalid_adapter_verified_shape"
-    if programmatic_dispatch_allowed:
-        if not adapter_verified:
-            return "degraded", False, False, selected, "status_probe_adapter_not_verified"
-        if selected.get("dispatch_blocker") is not None:
-            return "degraded", False, False, selected, "status_probe_dispatch_allowed_with_blocker"
-        return "resolved", True, True, selected, "selected_agent_available"
     if "dispatch_blocker" not in selected:
         return "degraded", False, False, selected, "status_probe_missing_dispatch_blocker"
     dispatch_blocker = selected["dispatch_blocker"]
