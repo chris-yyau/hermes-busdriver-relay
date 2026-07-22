@@ -18,7 +18,7 @@ Authority comes only from:
 2. explicitly implemented Hermes-equivalent gates; or
 3. explicit Hermes Delivery Mode with required evidence.
 
-Workers produce draft evidence; Hermes verifies evidence; ClaudeCode/Busdriver owns canonical authority; Delivery Mode runs only when the user explicitly asks.
+Workers produce draft evidence; Hermes routes and verifies evidence and may operate explicit Delivery Mode only when the user asks; ClaudeCode/Busdriver remains the sole canonical finalization authority.
 
 ## Role map
 
@@ -26,13 +26,14 @@ Workers produce draft evidence; Hermes verifies evidence; ClaudeCode/Busdriver o
 authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
-implementation.primary.current            = Pi adapter contract verified in non-installed harnesses; production dispatch blocked by agent_containment_and_credential_broker_unavailable
-implementation.fallback.current            = OpenCode adapter contract verified in non-installed harnesses; production dispatch blocked by agent_containment_and_credential_broker_unavailable
-implementation.exception.explicit           = Codex only by explicit exception when Pi/OpenCode are blocked or unsuited
-review.pr_lead_and_backstop                 = Codex / Claude Code per relay role config
+implementation.primary.current            = Codex metadata only; no production dispatcher; relay_role_dispatcher_unavailable
+implementation.secondary.current          = OpenCode + Go fallback draft-only metadata; production dispatch blocked by agent_containment_and_credential_broker_unavailable
+implementation.deferred.history           = Pi adapter harness/schema history retained; not current or preferred
+review.pr_lead                            = Codex metadata; same-provider review requires a fresh independent-session contract
+review.backstop                           = Claude Code / Busdriver authority path
 read_only.fast_review                     = Grok
 read_only.long_context_review             = Gemini
-manual.sidecar                            = Zed
+manual.sidecar                            = Cursor
 finalization.operator_path                = Hermes Delivery Mode, only on explicit user request
 finalization.authority_path               = ClaudeCode / Busdriver
 ```
@@ -40,11 +41,12 @@ finalization.authority_path               = ClaudeCode / Busdriver
 Short form:
 
 ```text
-Pi is the default target adapter; its draft contract is verified only in non-installed harnesses and production launch is blocked.
-OpenCode is the fallback/comparison target adapter; its contract is likewise verified only in non-installed harnesses and production launch is blocked.
-Codex is PR lead / review / backstop-focused by default, with implementation only by explicit exception.
+Codex is implementation-primary metadata and PR lead by user policy; no relay-role entry dispatches it.
+OpenCode + Go is secondary/fallback draft-only metadata; its contract is verified only in non-installed harnesses and production launch is blocked.
+Pi is deferred. Its explicit harness/adapter history remains useful evidence, but it is not the current, default, or preferred route.
+Codex PR-lead metadata does not prove review independence; with `avoid_coding_agent_for_review=true`, same-provider review remains non-dispatchable without a fresh independent-session contract.
 Grok/Gemini critique.
-Zed is human/manual editing surface.
+Cursor is the human/manual editing surface.
 Hermes routes/verifies/delivers.
 ClaudeCode/Busdriver authorizes.
 ```
@@ -54,9 +56,9 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Pi lane      = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
-OpenCode lane = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
-Codex lane    = PR lead / review / backstop-focused by default; implementation only by explicit exception.
+Codex lane    = implementation-primary and PR-lead metadata only; production relay-role dispatch is unavailable.
+OpenCode + Go lane = secondary/fallback draft-only metadata; adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
+Pi lane       = deferred adapter history, not a current route.
 ```
 
 A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, wrapper, contract tests, and fake-adapter smoke prove the non-installed adapter contract; they do not prove production dispatch.
@@ -115,7 +117,7 @@ All non-authority workers should normalize to a minimum envelope like:
 
 Hard rule: every non-authority worker result must keep all authority flags false.
 
-## Pi adapter hardening rules
+## Retained Pi adapter hardening history
 
 Pi's value is not that it can write code; Pi's value is that it can only write through the tool boundary we define.
 
@@ -183,7 +185,7 @@ Hermes must not commit a dirty tree unless every dirty path is classified as:
 2. explicitly included in the delivery scope; or
 3. explicitly accepted by the user as preexisting work to include.
 
-This prevents Codex changing `A`, Zed/manual edits changing `B`, and Hermes accidentally committing `A+B` just because tests are green.
+This prevents Codex changing `A`, Cursor/manual edits changing `B`, and Hermes accidentally committing `A+B` just because tests are green.
 
 ## Reviewer data-egress gate
 
@@ -201,7 +203,7 @@ Long-context review is powerful but should not become a reason to dump whole rep
 
 ## OpenCode lane
 
-OpenCode is the fallback/comparison adapter contract proven in non-installed harnesses. Production dispatch is blocked by `agent_containment_and_credential_broker_unavailable`; no current route launches OpenCode or copies credentials. Commit/push/PR/merge/marker/deploy/release/publish flags remain false.
+OpenCode + Go is the secondary/fallback draft-only adapter contract proven in non-installed harnesses. Production dispatch is blocked by `agent_containment_and_credential_broker_unavailable`; no current route launches OpenCode or copies credentials. Commit/push/PR/merge/marker/deploy/release/publish flags remain false.
 
 ## Clockwork wording
 

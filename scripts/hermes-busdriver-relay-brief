@@ -391,13 +391,13 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     {
         "id": "pi-adapter-proof",
         "label": "Pi adapter proof",
-        "status": "pi_primary_opencode_fallback_verified_non_finalizing",
+        "status": "historical_pi_adapter_proof_retained_codex_primary_metadata_only",
         "evidence": [
             "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md",
             "skills/busdriver-relay/references/coding-workflow-authority-map-v0.1.md",
             "tests/contract/test_relay_brief.py",
         ],
-        "safe_next": "use_pi_primary_or_opencode_fallback_through_gated_draft_launcher",
+        "safe_next": "use_codex_primary_metadata_only_keep_agent_dispatch_blocked",
     },
     {
         "id": "status-ux-layer",

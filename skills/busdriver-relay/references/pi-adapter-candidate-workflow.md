@@ -6,7 +6,7 @@ Use this note when discussing whether Pi should be added to, replace, or compete
 
 ## Current production status
 
-This document preserves **historical, non-installed harness evidence**, not an executable procedure. Pi is preferred route metadata but production dispatch remains non-programmatic with `agent_containment_and_credential_broker_unavailable`. The adapter fixture proves tool/schema behavior only; it does not prove process containment or credential brokering. Commands and successful-smoke transcripts below are provenance from throwaway fixtures and must not be run as production launch instructions.
+This document preserves **historical, non-installed harness evidence**, not an executable procedure. Pi is deferred route history, not current or preferred route metadata. Production dispatch remains non-programmatic with `agent_containment_and_credential_broker_unavailable`. The adapter fixture proves tool/schema behavior only; it does not prove process containment or credential brokering. Commands and successful-smoke transcripts below are provenance from throwaway fixtures and must not be run as production launch instructions.
 
 ## User correction captured
 
@@ -58,7 +58,7 @@ Do not frame Pi as an immediate Busdriver authority or direct replacement for Co
 Pi = Busdriver-compatible tool-harness / adapter candidate
 ```
 
-Treat Pi as the preferred draft **route metadata**, while keeping production dispatch disabled. The proven `bd_*` adapter exists only as a non-installed harness. OpenCode is fallback/comparison route metadata; its historical generic wrapper proof likewise does not provide production containment or finalization authority. Codex is PR lead / review / backstop-focused by default and implements only by explicit exception through an independently authorized path.
+Retain Pi only as deferred adapter history. The proven `bd_*` adapter exists only as a non-installed harness. Current policy uses Codex as implementation-primary metadata and PR lead, OpenCode + Go as secondary/fallback draft-only metadata, and Cursor as the manual IDE sidecar. None is programmatically dispatched by relay-role resolution.
 
 Recommended authority map:
 
@@ -66,13 +66,14 @@ Recommended authority map:
 authority.canonical                    = ClaudeCode / Busdriver
 operator.router                        = Hermes
 operator.verifier                      = Hermes
-implementation.primary.current         = Pi
-implementation.fallback.candidate       = OpenCode route metadata; non-programmatic until adapter/smoke/tests pass
-implementation.exception.explicit       = Codex only by explicit exception when Pi/OpenCode are blocked or unsuited
-review.pr_lead_and_backstop             = Codex / Claude Code per relay role config
+implementation.primary.current         = Codex metadata only; non-dispatchable
+implementation.secondary.current       = OpenCode + Go fallback draft-only metadata; non-dispatchable
+implementation.deferred.history        = Pi adapter harness/schema history
+review.pr_lead                         = Codex metadata; fresh independent session required
+review.backstop                        = Claude Code / Busdriver authority path
 read_only.fast_review                  = Grok
 read_only.long_context_review          = Gemini
-manual.sidecar                         = Zed
+manual.sidecar                         = Cursor
 finalization.operator_path             = Hermes Delivery Mode, only on explicit user request
 finalization.authority_path            = ClaudeCode / Busdriver
 ```
@@ -281,9 +282,9 @@ The adapter-shape proof is complete in the non-installed harness. The only produ
 
 If that future work begins in `hermes-busdriver-relay`, create/select a separate git worktree and branch when the relay repo has existing WIP. Record the worktree path in Hermes-owned evidence; do not start in a dirty primary relay worktree without explicit scope acceptance.
 
-OpenCode comparison remains optional historical evidence, not a prerequisite for Pi route preference and not a production unlock. True parity would require the intended OpenCode Busdriver plugin lane to be present again, but even parity would not remove `agent_containment_and_credential_broker_unavailable` without the separate safety architecture.
+OpenCode comparison remains optional historical evidence, not a production unlock. True parity would require the intended OpenCode Busdriver plugin lane to be present again, but even parity would not remove `agent_containment_and_credential_broker_unavailable` without the separate safety architecture.
 
-Pi is the confirmed tool-harness direction and OpenCode is fallback/comparison route metadata; both remain configured-but-non-programmatic for production dispatch.
+Pi is retained tool-harness history. Codex is current primary metadata and OpenCode + Go is fallback draft-only metadata; every relay role remains configured-but-non-programmatic for production dispatch.
 
 ## Continuation discipline during architecture work
 

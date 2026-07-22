@@ -48,7 +48,7 @@ def test_production_agent_smoke_blocks_before_ambient_git(tmp_path: Path):
     git.chmod(0o700)
 
     cp = subprocess.run(
-        [sys.executable, str(SMOKE), "--plugin-root", str(tmp_path / "missing-plugin")],
+        [sys.executable, str(SMOKE), "--plugin-root", str(tmp_path / "missing-plugin"), "--agent", "pi"],
         env={**os.environ, "PATH": str(ambient_bin)},
         text=True,
         capture_output=True,
@@ -58,6 +58,19 @@ def test_production_agent_smoke_blocks_before_ambient_git(tmp_path: Path):
     assert cp.returncode == 2
     assert json.loads(cp.stdout)["reason"] == "agent_containment_and_credential_broker_unavailable"
     assert not sentinel.exists()
+
+
+def test_production_agent_smoke_requires_explicit_supported_agent(tmp_path: Path):
+    cp = subprocess.run(
+        [sys.executable, str(SMOKE), "--plugin-root", str(tmp_path / "missing-plugin")],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 2
+    assert cp.stdout == ""
+    assert "the following arguments are required: --agent" in cp.stderr
 
 
 def test_agent_smoke_help_renders_fixed_production_policy_blocker():

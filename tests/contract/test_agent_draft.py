@@ -1376,6 +1376,23 @@ def test_production_agent_draft_blocks_before_opencode_executable_dispatch(tmp_p
     assert sh(["git", "status", "--short"], cwd=repo).stdout == ""
 
 
+def test_production_agent_draft_defaults_to_non_dispatch_noop(tmp_path: Path):
+    cp = subprocess.run(
+        [
+            sys.executable,
+            str(PRODUCTION_DRAFT),
+            "--plugin-root", str(tmp_path / "plugin"),
+            "--repo", str(tmp_path / "repo"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 2
+    assert json.loads(cp.stdout)["agent"] == "noop"
+
+
 @pytest.mark.parametrize("agent", ["pi", "opencode"])
 def test_production_agent_draft_policy_blocker_precedes_repo_home_and_state_access(tmp_path: Path, agent: str):
     repo = tmp_path / "repo-must-not-be-read"

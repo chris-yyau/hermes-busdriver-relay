@@ -885,14 +885,14 @@ CREDENTIAL_CHILD_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 # Kept in sync with config/trusted-runtime-manifest.json by test_trusted_runtime_manifest.
 # This is intentionally narrower than delivery_status_runtime, which also contains metadata-only
 # public entrypoints. Including metadata-only smoke here creates a smoke<->readiness hash cycle.
-TRUSTED_READINESS_HELPER_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '5d10873d3606b96e27ef5a33cb0c9f130f9e96f08e5dd71b753a3fd1fa64c719',
-                                    'scripts/hermes-busdriver-delivery-status': '576716169dd6236275e4924c8cfa16fe792b30818d1d15c452993bc75894ad4d',
+TRUSTED_READINESS_HELPER_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '213adeb661452a45c004abb688cfec328013fc0715f468cbcd0094a9ac5ead9c',
+                                    'scripts/hermes-busdriver-delivery-status': 'd4f09045eac6285508c5f9648d4e2c5006f569d80e96c07313fe8dca072c79c4',
                                     'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
                                     'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
                                     'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
                                     'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
-                                    'scripts/hermes-busdriver-relay-role': '1a3fa071a9f7b4c990120d8a9dfa6e9c32fc44ec70714a29ab29c90151f0992f',
-                                    'scripts/hermes-busdriver-status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'}
+                                    'scripts/hermes-busdriver-relay-role': '3eb0871f87effd7fa8339fa67f18380b389949e1f5b8bc5fe5d05ef1d945e338',
+                                    'scripts/hermes-busdriver-status': '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'}
 
 
 def child_env(*, credentials: bool = False) -> dict[str, str]:

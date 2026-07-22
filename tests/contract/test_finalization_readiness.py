@@ -634,6 +634,11 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
     assert dual["programmatic_execution_supported"] is False
     assert dual["programmatic_execution_allowed"] is False
     assert dual["not_busdriver_native_claude_runtime"] is True
+    assert dual["relay_config_errors"] == ["avoid_coding_agent_for_review_config_error"]
+    phase0_roles = data["phase0_status"]["relay_equivalent_roles"]
+    assert phase0_roles["avoid_coding_agent_for_review"] is True
+    assert phase0_roles["avoid_coding_agent_for_review_source"] == "default"
+    assert phase0_roles["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_true"
     assert dual["required_roles"] == [
         "relay.litmus.reviewer",
         "relay.pr.lead",
@@ -649,6 +654,10 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
         assert entry["configured"] is True
         assert entry["selected_agent"] == "codex"
         assert entry["source"] == "relay_config"
+        assert entry["status"] == "degraded"
+        assert entry["degraded"] is True
+        assert phase0_roles["roles"][role]["dispatch_blocker"] == "independent_review_session_contract_unavailable"
+        assert phase0_roles["roles"][role]["programmatic_dispatch_allowed"] is False
         assert entry["dispatch_allowed"] is False
         assert entry["mutation_allowed"] is False
         assert entry["finalization_allowed"] is False
@@ -1278,13 +1287,19 @@ def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Pat
 
     assert cp.returncode == 0, cp.stderr
     role = data["delivery_status"]["relay_role_resolution"]
-    assert role["ok"] is True
+    assert role["ok"] is False
+    assert role["returncode"] == 0
+    assert role["reason"] == "relay_role_not_dispatchable"
+    assert role["result"]["ok"] is True
     assert role["result"]["selected"]["selected_agent"] == "codex"
-    assert role["result"]["dispatch_allowed"] is True
+    assert role["result"]["dispatch_allowed"] is False
     handoff_role = data["handoff_envelope"]["evidence"]["relay_role_resolution"]
-    assert handoff_role["ok"] is True
+    assert handoff_role["ok"] is False
+    assert handoff_role["reason"] == "relay_role_not_dispatchable"
+    assert handoff_role["result"]["dispatch_allowed"] is False
     assert handoff_role["result"]["mutation_allowed"] is False
     assert handoff_role["result"]["finalization_allowed"] is False
+    assert "relay_role_not_dispatchable" in data["handoff_envelope"]["evidence"]["delivery_decision"]["warnings"]
     assert_no_finalization_authority(data["readiness"])
     assert_no_finalization_authority(data["decision"])
 

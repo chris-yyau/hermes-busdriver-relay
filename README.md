@@ -16,12 +16,12 @@ It is **not** a Busdriver clone and must not vendor Claude plugins, MCP configs,
 
 ```text
 Hermes = intake, Phase 0 discovery, JIT source reads, read-only status, non-finalizing draft/gate/handoff envelopes, notification, explicit gated Delivery Mode execution
-Busdriver/Claude Code = workflow authority, gates, reviews, MCP/plugin routing, trusted marker semantics, canonical finalization policy
+Busdriver/Claude Code = sole canonical workflow/finalization authority, gates, reviews, MCP/plugin routing, trusted marker semantics
 ```
 
 Important: Busdriver gates are largely Claude Code hook-runtime behavior. A Hermes bare shell running a Busdriver script does not automatically fire Claude Code hooks.
 
-Current status: the read-only/status relay surface is complete, draft launchers remain non-finalizing, and explicit Hermes Delivery Mode has narrow parser/result-envelope surfaces for `pre-pr-review`, `commit`, `push`, `pr-create`, and `merge`. Parser exposure is not dispatchability. Production Pi/OpenCode draft dispatch is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; functional adapter execution remains available only through non-installed test harnesses. Caller-supplied verifier execution is `policy_blocked` by `verifier_containment_unavailable`. `pre-pr-review` is `policy_blocked` by `isolated_review_runtime_unavailable` before delivery-status, repository/state/lock, artifact, credential, or trusted-writer handling. `push` is `policy_blocked` by `atomic_push_base_binding_unavailable`, `pr-create` by `atomic_pr_create_binding_unavailable`, and `merge` by `atomic_merge_base_binding_unavailable`. Delivery-status still emits a top-level `read_only: true` contract marker; finalization-readiness remains a read-only handoff helper with advisory evidence only. Hermes still must not raw-write `.claude/*` trusted markers, bypass any blocker with direct Git/GitHub commands, or treat a draft/test harness as finalization authority.
+Current status: Hermes remains a relay/router/verifier and explicit Delivery Mode operator only. Relay route resolution is metadata, never dispatch authority: Codex is implementation-primary metadata and PR lead, OpenCode + Go is secondary/fallback draft-only metadata, Pi is deferred adapter history, and Cursor is the manual IDE sidecar. Every relay role reports programmatic dispatch and adapter verification false because no production relay-role dispatcher exists. `avoid_coding_agent_for_review=true` remains active, so Codex same-provider review is non-dispatchable without a fresh independent-session contract. Production Pi/OpenCode draft dispatch is separately `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; functional adapter execution remains available only through non-installed test harnesses. Caller-supplied verifier execution is `policy_blocked` by `verifier_containment_unavailable`. `pre-pr-review` is `policy_blocked` by `isolated_review_runtime_unavailable`; `push` by `atomic_push_base_binding_unavailable`, `pr-create` by `atomic_pr_create_binding_unavailable`, and `merge` by `atomic_merge_base_binding_unavailable`. Busdriver/Claude Code remains the sole canonical finalization authority.
 
 ## Contents
 
@@ -33,7 +33,7 @@ ADRs/0005-finalization-authority-integration-contract.md
                                            Future authority/marker interop prerequisite contract
 ADRs/0006-programmatic-dual-review-marker-interop.md
                                            Non-mutating programmatic dual-review / marker-interop design spike
-ADRs/0007-pi-tool-harness-adapter.md       Pi target-state draft-only tool-harness adapter boundary
+ADRs/0007-pi-tool-harness-adapter.md       Deferred Pi draft-only tool-harness history and boundary
 ADRs/0008-gated-delivery-executor-and-opencode-adapter.md
                                            Gated Delivery Mode executor and OpenCode adapter proof
 docs/coding-workflow-authority-map.md      Cross-agent authority boundary map v0.1
@@ -94,7 +94,7 @@ scripts/hermes-busdriver-relay-role \
   --pretty
 ```
 
-This helper is read-only and selects one configured logical Hermes/model agent for a relay role. It is the dispatcher-facing version of the status probe's `relay_equivalent_roles` block: a valid role exits `0` with `status=resolved`, while unknown/degraded/malformed config exits nonzero and keeps `dispatch_allowed=false`, `mutation_allowed=false`, and `finalization_allowed=false`. Use `--list-roles` to inspect supported role names.
+This helper is read-only and selects one configured logical Hermes/model agent as routing metadata. No relay role currently has a production dispatcher, so every valid role keeps `dispatch_allowed=false`, `mutation_allowed=false`, and `finalization_allowed=false`; unknown/degraded/malformed config also exits nonzero. Use `--list-roles` to inspect supported role names.
 
 ### Hermes-owned single-flight lock
 
@@ -146,7 +146,7 @@ scripts/hermes-busdriver-agent-draft \
   --pretty
 ```
 
-The Pi and OpenCode adapter contracts are implemented and exercised only through non-installed test harnesses. Production `--agent pi`, `--agent opencode`, and `noop` probes stop immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`. Schema, scope, authority-negative, executable-pin, and reconciliation tests therefore prove adapter behavior, not production containment or dispatch capability. Codex/custom mutation routes are absent.
+The Pi and OpenCode adapter contracts are implemented and exercised only through non-installed test harnesses. Production defaults safely to `--agent noop`; `--agent pi` and `--agent opencode` remain explicit compatibility probes. All stop immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`. Schema, scope, authority-negative, executable-pin, and reconciliation tests therefore prove adapter behavior, not production containment or dispatch capability. Codex/custom mutation routes are absent.
 
 If production containment and credential brokering are implemented in a future slice, a successful draft would still have to end at `status=needs_busdriver_review` with all finalization authority false. That is target-state wording, not a current production capability.
 
@@ -158,11 +158,11 @@ If production containment and credential brokering are implemented in a future s
 scripts/hermes-busdriver-agent-balance-plan --pretty
 ```
 
-This read-only helper emits `hermes-busdriver-agent-balance-plan/v0`: a deterministic planning-only envelope for one gated mutating draft implementation lane and parallel read-only review/status lanes. It does not dispatch agents, call Codex or GitHub, mutate repos, write markers, or grant commit/push/PR/merge/deploy/release/publish authority.
+This read-only helper emits `hermes-busdriver-agent-balance-plan/v0`: a deterministic planning-only envelope selecting Codex as implementation-primary metadata plus parallel read-only review/status lanes. It reports no agent calls and does not dispatch, mutate repos, write markers, or grant commit/push/PR/merge/deploy/release/publish authority.
 
 ### Agent smoke status
 
-`hermes-busdriver-agent-smoke` is currently a parser/authority-negative surface. Production Pi/OpenCode dispatch is policy-blocked, so historical real-agent smoke is superseded provenance only and does not prove current containment, credential brokering, or production launch capability.
+`hermes-busdriver-agent-smoke` is currently a parser/authority-negative surface and requires an explicit supported `--agent pi|opencode`. Production dispatch is policy-blocked, so historical real-agent smoke is superseded provenance only and does not prove current containment, credential brokering, or production launch capability.
 
 ### Delivery status
 
@@ -272,7 +272,7 @@ scripts/hermes-busdriver-relay-brief --pretty
 scripts/hermes-busdriver-relay-brief --brief
 ```
 
-This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, and the current roadmap posture: gated executor slice implemented, autonomous PR-grind fix-loop still blocked, marker interop contract still blocked, Pi/OpenCode draft adapter proofs, and Status/UX. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false, and its `next_safe_slice` either points to gated Delivery Mode usage or the next blocked-surface contract work.
+This read-only helper emits `hermes-busdriver-relay-brief/v0`: a compact local status/roadmap envelope suitable for Telegram summaries. It reports repo dirty/sync state, installed-skill drift, finalization contract status, Codex-primary metadata, retained Pi/OpenCode adapter-proof history, and the blocked dispatch posture. The helper is intentionally non-authoritative: every commit/push/PR/merge/finalization/marker-write/programmatic-execution/non-Codex-adapter authority flag remains false.
 
 ### PR-grind readiness check
 

@@ -1,3 +1,5 @@
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
 # Deliver Verify Envelope Lessons
 
 Session: continuing `hermes-busdriver-relay` after PR #6 to add the next conservative delivery slice (`hermes-busdriver-deliver --mode execute --operation verify`).

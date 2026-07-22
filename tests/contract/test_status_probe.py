@@ -96,36 +96,6 @@ def assert_no_finalization_flags(drift: dict) -> None:
     }
 
 
-FULL_RELAY_ROLE_MAP = {
-    "relay.impl.primary": "pi",
-    "relay.impl.secondary": "opencode",
-    "relay.impl.fallback": "opencode",
-    "relay.review.fast": "grok",
-    "relay.review.long_context": "gemini",
-    "relay.ide.manual": "zed",
-    "relay.expert_witness.ultraoracle": "ultraoracle",
-    "relay.litmus.reviewer": "codex",
-    "relay.blueprint.reviewer_1": "agy",
-    "relay.blueprint.reviewer_2": "claude-code",
-    "relay.blueprint.reviewer_3": "grok",
-    "relay.blueprint.arbiter": "codex",
-    "relay.pr.lead": "codex",
-    "relay.pr.backstop": "claude-code",
-    "relay.council.architect": "inline",
-    "relay.council.pragmatist": "agy",
-    "relay.council.critic": "codex",
-    "relay.council.researcher": "grok",
-    "relay.council.skeptic": "claude-code",
-}
-
-
-REVIEW_SENSITIVE_RELAY_ROLES = {
-    role
-    for role in FULL_RELAY_ROLE_MAP
-    if not role.startswith("relay.impl.") and role != "relay.ide.manual"
-}
-
-
 def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
@@ -151,8 +121,8 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
     assert data["relay_config"]["exists"] is False
     assert data["relay_config"]["route_keys"] == []
     relay = data["relay_equivalent_roles"]
-    assert relay["coding_agent"] == "pi"
-    assert relay["role_policy"] == "pi_primary_opencode_fallback_codex_review"
+    assert relay["coding_agent"] == "codex"
+    assert relay["role_policy"] == "codex_primary_opencode_fallback_pi_deferred"
     assert relay["review_independence_policy"] == "avoid_coding_agent_for_review_roles"
     assert relay["avoid_coding_agent_for_review"] is True
     assert set(relay["roles"]) == set(FULL_RELAY_ROLE_MAP)
@@ -163,13 +133,19 @@ def test_status_probe_is_read_only_and_reports_hooks(tmp_path):
         assert entry["default_route"] == [FULL_RELAY_ROLE_MAP[role]]
         assert entry["source"] == "default"
         assert entry["selected_agent"] == FULL_RELAY_ROLE_MAP[role]
-        assert entry["same_as_coding_agent"] is (FULL_RELAY_ROLE_MAP[role] == "pi")
-        assert entry["degraded"] is False
+        assert entry["same_as_coding_agent"] is (FULL_RELAY_ROLE_MAP[role] == "codex")
+        assert entry["degraded"] is (role in REVIEW_SENSITIVE_RELAY_ROLES and FULL_RELAY_ROLE_MAP[role] == "codex")
         assert entry["review_independence_sensitive"] is (role in REVIEW_SENSITIVE_RELAY_ROLES)
-        assert entry["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
-        assert entry["adapter_verified"] is (role not in UNVERIFIED_ADAPTER_RELAY_ROLES)
-        if role in UNVERIFIED_ADAPTER_RELAY_ROLES:
+        assert entry["programmatic_dispatch_allowed"] is False
+        assert entry["adapter_verified"] is False
+        if role in REVIEW_SENSITIVE_RELAY_ROLES and FULL_RELAY_ROLE_MAP[role] == "codex":
+            assert entry["dispatch_blocker"] == "independent_review_session_contract_unavailable"
+        elif role in {"relay.impl.secondary", "relay.impl.fallback"}:
             assert entry["dispatch_blocker"] == "agent_containment_and_credential_broker_unavailable"
+        elif role == "relay.ide.manual":
+            assert entry["dispatch_blocker"] == "manual_ide_sidecar_not_programmatic"
+        else:
+            assert entry["dispatch_blocker"] == "relay_role_dispatcher_unavailable"
         assert entry["configurable"] is True
         assert entry["not_busdriver_native_claude_runtime"] is True
         assert entry["finalization_allowed"] is False
@@ -262,37 +238,68 @@ def test_status_probe_relay_equivalents_avoid_configured_coding_agent(tmp_path):
         assert entry["mutation_allowed"] is False
 
 
-def test_status_probe_review_independence_does_not_block_implementation_primary(tmp_path):
+def test_status_probe_keeps_codex_primary_metadata_separate_from_review_independence(tmp_path):
     fake = tmp_path / "busdriver"
     make_fake_busdriver(fake)
     relay_config = tmp_path / "relay-config.json"
     relay_config.write_text(json.dumps({
-        "coding_agent": "pi",
+        "coding_agent": "codex",
         "avoid_coding_agent_for_review": True,
         "routes": {
-            "relay.impl.primary": ["pi"],
-            "relay.pr.backstop": ["pi"],
+            "relay.impl.primary": ["codex"],
+            "relay.pr.lead": ["codex"],
         },
     }))
 
     data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
 
     relay = data["relay_equivalent_roles"]
-    assert relay["role_policy"] == "pi_primary_opencode_fallback_codex_review"
+    assert relay["role_policy"] == "codex_primary_opencode_fallback_pi_deferred"
     assert relay["review_independence_policy"] == "avoid_coding_agent_for_review_roles"
     assert relay["avoid_coding_agent_for_review"] is True
     primary = relay["roles"]["relay.impl.primary"]
-    assert primary["selected_agent"] == "pi"
+    assert primary["selected_agent"] == "codex"
     assert primary["same_as_coding_agent"] is True
     assert primary["review_independence_sensitive"] is False
     assert primary["degraded"] is False
-    backstop = relay["roles"]["relay.pr.backstop"]
-    assert backstop["selected_agent"] == "pi"
-    assert backstop["same_as_coding_agent"] is True
-    assert backstop["review_independence_sensitive"] is True
-    assert backstop["degraded"] is True
-    assert backstop["finalization_allowed"] is False
-    assert backstop["mutation_allowed"] is False
+    lead = relay["roles"]["relay.pr.lead"]
+    assert lead["selected_agent"] == "codex"
+    assert lead["same_as_coding_agent"] is True
+    assert lead["review_independence_sensitive"] is True
+    assert lead["degraded"] is True
+    assert lead["dispatch_blocker"] == "independent_review_session_contract_unavailable"
+    assert lead["finalization_allowed"] is False
+    assert lead["mutation_allowed"] is False
+
+
+def test_status_probe_rejects_false_review_avoidance_and_degrades_same_provider_roles(tmp_path):
+    fake = tmp_path / "busdriver"
+    make_fake_busdriver(fake)
+    relay_config = tmp_path / "relay-config.json"
+    relay_config.write_text(json.dumps({
+        "coding_agent": "codex",
+        "avoid_coding_agent_for_review": False,
+        "routes": {
+            "relay.pr.lead": ["codex"],
+            "relay.pr.backstop": ["codex"],
+        },
+    }))
+
+    data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
+
+    relay = data["relay_equivalent_roles"]
+    assert relay["avoid_coding_agent_for_review"] is True
+    assert relay["avoid_coding_agent_for_review_source"] == "default"
+    assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_true"
+    for role in ("relay.pr.lead", "relay.pr.backstop"):
+        entry = relay["roles"][role]
+        assert entry["selected_agent"] == "codex"
+        assert entry["same_as_coding_agent"] is True
+        assert entry["degraded"] is True
+        assert entry["dispatch_blocker"] == "independent_review_session_contract_unavailable"
+        assert entry["programmatic_dispatch_allowed"] is False
+        assert entry["finalization_allowed"] is False
+        assert entry["mutation_allowed"] is False
 
 
 def test_status_probe_resolves_full_live_relay_role_map_without_degradation(tmp_path):
@@ -300,7 +307,7 @@ def test_status_probe_resolves_full_live_relay_role_map_without_degradation(tmp_
     make_fake_busdriver(fake)
     relay_config = tmp_path / "relay-config.json"
     relay_config.write_text(json.dumps({
-        "coding_agent": "pi",
+        "coding_agent": "external-builder",
         "avoid_coding_agent_for_review": True,
         "routes": {role: [agent] for role, agent in FULL_RELAY_ROLE_MAP.items()},
     }))
@@ -316,8 +323,8 @@ def test_status_probe_resolves_full_live_relay_role_map_without_degradation(tmp_
         assert entry["selected_agent"] == expected_agent
         assert entry["source"] == "relay_config"
         assert entry["degraded"] is False
-        assert entry["programmatic_dispatch_allowed"] is (role not in NON_PROGRAMMATIC_RELAY_ROLES)
-        assert entry["adapter_verified"] is (role not in UNVERIFIED_ADAPTER_RELAY_ROLES)
+        assert entry["programmatic_dispatch_allowed"] is False
+        assert entry["adapter_verified"] is False
         assert entry["finalization_allowed"] is False
         assert entry["mutation_allowed"] is False
 
@@ -355,7 +362,7 @@ def test_status_probe_marks_invalid_relay_equivalent_route_entries_degraded(tmp_
     data = run_status("--plugin-root", str(fake), "--relay-config", str(relay_config))
 
     relay = data["relay_equivalent_roles"]
-    assert relay["coding_agent"] == "pi"
+    assert relay["coding_agent"] == "codex"
     assert relay["avoid_coding_agent_for_review"] is True
     assert relay["coding_agent_config_error"] == "coding_agent_must_be_non_empty_string"
     assert relay["avoid_coding_agent_for_review_config_error"] == "avoid_coding_agent_for_review_must_be_boolean"

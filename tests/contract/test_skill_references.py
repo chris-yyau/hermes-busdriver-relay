@@ -156,7 +156,7 @@ def test_relay_router_role_policy_references_are_durable_skill_references():
             '"relay.litmus.reviewer": ["codex"]',
             '"relay.pr.backstop": ["claude-code"]',
             "Authority constraints remain false for all router/status roles",
-            "Pi remains the preferred future implementation route, but production dispatch is currently blocked",
+            "Codex is implementation-primary metadata and PR lead by user policy",
             "agent_containment_and_credential_broker_unavailable",
             "primary-controller agent",
         ],
@@ -336,7 +336,7 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "not through the ResourceLoader itself" in reference_text
     assert "Launch Pi with built-in mutating tools disabled" in reference_text
     assert "Only after the in-repo schema/wrapper/smoke/contract tests pass" in reference_text
-    assert "Pi is preferred route metadata but production dispatch remains non-programmatic" in reference_text
+    assert "Pi is deferred route history, not current or preferred route metadata" in reference_text
     assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "bd_bash` must be argv-only and allowlist-only" in reference_text
     assert "Any allowed `git status` form must inject `-c core.fsmonitor=false`" in reference_text
@@ -368,7 +368,13 @@ def test_pi_adapter_implementation_lessons_are_durable_skill_reference():
     assert "Pi adapter implementation-specific workflow lessons" in skill_text
     assert "separate git worktree for the Pi adapter slice" in reference_text
     assert "Implementation belongs in the Hermes relay repo, not Pi upstream/source" in reference_text
-    assert "Superseded for production execution" in reference_text
+    assert "HISTORICAL / SUPERSEDED" in "\n".join(reference_text.splitlines()[:5])
+    assert "NON-PRODUCTION" in "\n".join(reference_text.splitlines()[:5])
+    assert "docs/coding-workflow-authority-map.md" in "\n".join(reference_text.splitlines()[:5])
+    assert "Codex lane = implementation-primary metadata and PR lead; production dispatch blocked." in reference_text
+    assert "OpenCode+Go lane = secondary/fallback draft-only metadata; production dispatch blocked." in reference_text
+    assert "Pi lane = deferred historical adapter metadata; not current, default, or preferred; production dispatch blocked." in reference_text
+    assert "Pi lane    = preferred route metadata" not in reference_text
     assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "A future successful Pi draft result would still be `needs_busdriver_review`" in reference_text
     assert "`bd_bash` should be argv-only and allowlist-only" in reference_text
@@ -386,8 +392,8 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     reference_text = CODING_WORKFLOW_AUTHORITY_MAP_REFERENCE.read_text()
 
     assert "references/coding-workflow-authority-map-v0.1.md" in skill_text
-    assert "implementation.primary.current            = Pi" in reference_text
-    assert "OpenCode lane = adapter contract verified in non-installed harnesses; production dispatch is policy-blocked." in reference_text
+    assert "implementation.primary.current            = Codex metadata only" in reference_text
+    assert "OpenCode + Go lane = secondary/fallback draft-only metadata; adapter contract verified in non-installed harnesses; production dispatch is policy-blocked." in reference_text
     assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
@@ -399,6 +405,77 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     assert "A stronger model does not get more authority" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
+
+
+def test_every_busdriver_relay_reference_is_indexed_by_the_skill():
+    skill_text = SKILL.read_text()
+
+    missing = sorted(
+        reference.name
+        for reference in REFERENCE_DIR.glob("*.md")
+        if f"references/{reference.name}" not in skill_text
+    )
+
+    assert missing == []
+
+
+def test_active_skill_uses_authority_negative_role_resolution_semantics():
+    skill_text = SKILL.read_text()
+    resolver_text = (REFERENCE_DIR / "relay-role-resolver-lessons.md").read_text()
+    role_status_text = (REFERENCE_DIR / "relay-role-status-integration-lessons.md").read_text()
+
+    assert role_status_text.splitlines()[2] == (
+        "> **CURRENT AUTHORITY-NEGATIVE — NON-PRODUCTION-DISPATCH.** Current policy authority: "
+        "repository-root `docs/coding-workflow-authority-map.md`; all relay roles are metadata-only "
+        "and production dispatch is blocked by `agent_containment_and_credential_broker_unavailable`."
+    )
+    assert "dispatch_allowed=false except the one safe resolved role" not in skill_text
+    assert "resolved role is metadata-only" in skill_text
+    assert "Root and nested `decision` `dispatch_allowed=false`" in role_status_text
+    assert "exit `0` and `ok=true` validate resolved metadata" in role_status_text
+    assert "Any `dispatch_allowed=true` claim must be rejected and production dispatch must remain blocked" in role_status_text
+    assert "root `dispatch_allowed is true`" not in role_status_text
+    assert "nested `decision.dispatch_allowed is true`" not in role_status_text
+    assert "dispatch_allowed=<true only for safe resolved role>" not in resolver_text
+    assert "`dispatch_allowed=false` for every role" in resolver_text
+
+
+def test_skill_catalog_marks_superseded_role_policy_evidence_historical():
+    catalog = next(
+        line
+        for line in SKILL.read_text().splitlines()
+        if "Historical/superseded role-policy evidence" in line
+    )
+    qualifier = (
+        "Historical/superseded role-policy evidence (not current routing; current authority: "
+        "`references/coding-workflow-authority-map-v0.1.md`): "
+    )
+    historical = {
+        "pi-adapter-implementation-lessons.md": "keep Pi target-state wording until proof passes",
+        "relay-router-agent-role-split.md": "Codex primary fallback draft worker",
+        "relay-router-role-policy-2026-07.md": "Codex→OpenCode implementation priority",
+        "pr108-pi-authority-sync-delivery-lessons.md": "target-state Pi wording",
+        "pr109-pi-adapter-final-pr-grind-lessons.md": "structured missing-Pi blocked outputs",
+        "pr109-pi-adapter-review-rebase-lessons.md": "Pi adapter review/rebase delivery",
+        "pr112-pi-default-dogfood-lessons.md": "Pi-default migration/dogfood",
+        "relay-live-config-restoration-lessons.md": "Pi-first/Codex-review routes",
+        "full-role-map-resolver-slice-lessons.md": "Zed manual IDE correction",
+    }
+    qualified_clauses = catalog.split(qualifier)[1:]
+
+    for filename, stale_phrase in historical.items():
+        assert catalog.count(f"references/{filename}") == 1
+        assert any(
+            f"references/{filename}" in clause and stale_phrase in clause
+            for clause in qualified_clauses
+        )
+
+
+def test_skill_catalog_counts_active_and_historical_roadmap_rows_separately():
+    skill_text = SKILL.read_text()
+
+    assert "four active tasks plus one retained historical Pi-evidence row" in skill_text
+    assert "five active roadmap tasks" not in skill_text
 
 
 def test_pr106_expanded_skill_sync_pr_grind_lessons_are_durable_skill_reference():

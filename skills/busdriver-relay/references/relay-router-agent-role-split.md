@@ -1,21 +1,23 @@
 # Relay router agent role split — July 2026
 
-**Current production status:** the role map below is resolver/routing metadata, not a production launcher. Pi and OpenCode remain non-programmatic with `programmatic_dispatch_allowed=false`, `adapter_verified=false`, and `dispatch_allowed=false` under `agent_containment_and_credential_broker_unavailable`. Adapter behavior exists only in non-installed fixture provenance.
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`.
+
+**Current production status:** the role map below is resolver/routing metadata, not a production launcher. Every role keeps `programmatic_dispatch_allowed=false`, `adapter_verified=false`, and `dispatch_allowed=false`; no executable relay-role dispatcher exists. Pi/OpenCode adapter behavior exists only in non-installed fixture provenance.
 
 ## Durable decision
 
-For Busdriver/Hermes relay work, do **not** add Pi, OpenCode, Grok, Gemini, Zed, or UltraOracle as competing workflow authorities. The stable split is:
+For Busdriver/Hermes relay work, do **not** add Codex, Pi, OpenCode, Grok, Gemini, Cursor, or UltraOracle as competing workflow authorities. The stable split is:
 
 ```text
 Busdriver + Claude Code = canonical authority, hooks, gates, litmus, PR-grind, finalization
-Hermes = relay/router/status/Phase 0/locks/handoff/Delivery Mode support
-Pi = default constrained implementation draft worker
-OpenCode + Go = Pi fallback / China-model comparison candidate; repo-changing fallback requires adapter/plugin proof
-Codex = PR lead / review analysis; not the normal implementation fallback
+Hermes = relay/router/verifier/status/Phase 0/locks/handoff/explicit Delivery Mode operator
+Codex = implementation-primary metadata and PR lead; no production relay-role dispatcher
+OpenCode + Go = secondary/fallback draft-only metadata; production dispatch blocked by `agent_containment_and_credential_broker_unavailable`
+Pi = deferred adapter history; not current, default, or preferred
 Claude Code = authority / backstop path
 Grok = Hermes-side relay.review.fast read-only reviewer / PR-comment triage
 Gemini = Hermes-side relay.review.long_context read-only architecture/spec reviewer
-Zed = manual IDE sidecar; edits are treated as human/manual dirty tree
+Cursor = manual IDE sidecar; edits are treated as human/manual dirty tree
 UltraOracle = optional expert-witness escalation
 ```
 
@@ -35,12 +37,12 @@ Hermes-side roles such as `relay.review.fast=grok` and `relay.review.long_contex
 The relay-owned config lives under `~/.hermes/busdriver-relay/config.json` (never `~/.claude/busdriver.json`). The current `hermes-busdriver-status` / `hermes-busdriver-relay-role` inventory recognizes the full 19-role map:
 
 ```text
-relay.impl.primary              = pi
+relay.impl.primary              = codex
 relay.impl.secondary            = opencode
 relay.impl.fallback             = opencode
 relay.review.fast               = grok
 relay.review.long_context       = gemini
-relay.ide.manual                = zed
+relay.ide.manual                = cursor
 relay.expert_witness.ultraoracle = ultraoracle
 relay.litmus.reviewer           = codex
 relay.blueprint.reviewer_1      = agy
@@ -60,15 +62,15 @@ Copyable config example:
 
 ```json
 {
-  "coding_agent": "pi",
+  "coding_agent": "codex",
   "avoid_coding_agent_for_review": true,
   "routes": {
-    "relay.impl.primary": ["pi"],
+    "relay.impl.primary": ["codex"],
     "relay.impl.secondary": ["opencode"],
     "relay.impl.fallback": ["opencode"],
     "relay.review.fast": ["grok"],
     "relay.review.long_context": ["gemini"],
-    "relay.ide.manual": ["zed"],
+    "relay.ide.manual": ["cursor"],
     "relay.expert_witness.ultraoracle": ["ultraoracle"],
     "relay.litmus.reviewer": ["codex"],
     "relay.blueprint.reviewer_1": ["agy"],
@@ -86,8 +88,8 @@ Copyable config example:
 }
 ```
 
-Authority constraints remain false for all router/status roles. Pi is preferred implementation route metadata and OpenCode is fallback/comparison route metadata, but neither may mutate a production draft tree while the containment/credential-broker blocker is active. Historical non-installed harnesses may exercise fixture-only mutation contracts; Codex remains a review/backstop lane by default. All paths return only routing or fixture evidence and require Busdriver/Claude finalization.
+Authority constraints remain false for all router/status roles. Codex is implementation-primary metadata and PR lead by user policy; OpenCode + Go is secondary/fallback draft-only metadata; Pi is deferred history. `avoid_coding_agent_for_review=true` remains active, so Codex same-provider review requires a fresh independent-session contract and otherwise remains degraded/non-dispatchable. All paths return only routing or fixture evidence and require Busdriver/Claude canonical finalization.
 
 ## Purchasing / tool-selection implication
 
-Do not solve Claude quota pressure by adding another primary-controller agent. Pi remains the preferred future implementation route, but production dispatch is currently blocked; implementation must route through Busdriver/Claude or an explicitly approved bootstrap path. If Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Zed as a pipeline dependency. Zed can remain a manual IDE sidecar.
+Do not solve Claude quota pressure by adding another primary-controller agent. Codex remains implementation-primary metadata only; implementation must use an independently authorized path. If Claude-side gate/review/finalization quota remains the bottleneck, consider Claude quota/plan before adding Cursor as a pipeline dependency. Cursor remains a manual IDE sidecar.

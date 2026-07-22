@@ -1346,8 +1346,8 @@ def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
 TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
                                 'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
                                 'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
-                                'scripts/hermes-busdriver-relay-role': '1a3fa071a9f7b4c990120d8a9dfa6e9c32fc44ec70714a29ab29c90151f0992f',
-                                'scripts/hermes-busdriver-status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'}
+                                'scripts/hermes-busdriver-relay-role': '3eb0871f87effd7fa8339fa67f18380b389949e1f5b8bc5fe5d05ef1d945e338',
+                                'scripts/hermes-busdriver-status': '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'}
 
 
 def _read_authenticated_helper(path: Path, expected_digest: str) -> bytes:
@@ -2226,13 +2226,13 @@ def relay_role_authority_is_safe(result: dict[str, Any], requested_role: str) ->
         result.get("schema") == "hermes-busdriver-relay-role/v0"
         and result.get("role") == requested_role
         and result.get("read_only") is True
-        and result.get("ok") is True
-        and result.get("dispatch_allowed") is True
+        and isinstance(result.get("ok"), bool)
+        and result.get("dispatch_allowed") is False
         and result.get("mutation_allowed") is False
         and result.get("finalization_allowed") is False
         and result.get("not_busdriver_native_claude_runtime") is True
         and isinstance(decision, dict)
-        and decision.get("dispatch_allowed") is True
+        and decision.get("dispatch_allowed") is False
         and decision.get("mutation_allowed") is False
         and decision.get("finalization_allowed") is False
         and decision.get("not_busdriver_native_claude_runtime") is True
@@ -2274,9 +2274,8 @@ def run_relay_role_resolution(args: argparse.Namespace) -> dict[str, Any] | None
     # Safe on the RAW result, emitted through the funnel: relay_role_authority_is_safe() reads ten
     # named flags, so everything the resolver nests beside them is unknown data.
     authority_safe = relay_role_authority_is_safe(result, args.relay_role)
-    ok = cp.returncode == 0 and authority_safe
-    reason = None if ok else ("relay_role_authority_flags_unsafe" if cp.returncode == 0 else "relay_role_not_dispatchable")
-    return {**base, "ok": ok, "reason": reason, "result": sanitized_payload(result), "stderr": sanitized_tail(cp.stderr)}
+    reason = "relay_role_not_dispatchable" if authority_safe else "relay_role_authority_flags_unsafe"
+    return {**base, "ok": False, "reason": reason, "result": sanitized_payload(result), "stderr": sanitized_tail(cp.stderr)}
 
 
 def run_phase0_status(args: argparse.Namespace, repo: dict[str, Any], busdriver: dict[str, Any]) -> dict[str, Any] | None:
