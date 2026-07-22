@@ -328,7 +328,7 @@ def run_bounded(
 
 
 TRUSTED_EXECUTABLE_DIGESTS = {
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
 SF_RESTRICTED = 0x00080000
@@ -424,7 +424,7 @@ def trusted_executable_path(name: str) -> Path:
 
 
 STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
-TRUSTED_STATUS_SHA256 = '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'
+TRUSTED_STATUS_SHA256 = 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'
 MAX_AUTHENTICATED_STATUS_BYTES = 1 << 20
 STATUS_STDIN_LOADER = (
     "import sys\n"

@@ -33,16 +33,16 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
-TRUSTED_GATE_SHA256 = '48ec2229d1889e2236f790751ebd7d6b0007b4195e0b8e8f12ff4608d2173c8e'
+TRUSTED_GATE_SHA256 = '4348bab75ffbec9f83d750b266def37647ce7c36a926b7ab8c0f42df50c6b4c8'
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
-    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
     "pi": "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca",
     "opencode": "43f7083d450567706a80b6441331a25b5ed6d6c9f742826790545b068229cbb2",
-    "bash": "21f1b686feca123f2c575296d6f8b8277a2695f7a06e3b1c1b154a0f21f68141",
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "bash": "7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
 # symlinked name is what this contract refuses. See _validated_root_owned_source().
@@ -60,7 +60,7 @@ TRUSTED_OPENCODE = Path("/Users/vfrvndtt/.opencode/bin/opencode").resolve()
 _TRUSTED_EXECUTABLE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
 _TRUSTED_EXECUTABLE_PATHS: dict[str, Path] = {}
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_LOCK_SHA256 = '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52'
+TRUSTED_LOCK_SHA256 = '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1'
 # The child wrappers. Both were launched straight off their repo paths — `python -I <repo>/run-pi-…`
 # — so the one process that holds the entire draft containment was the one nobody authenticated,
 # while git, gh, pi, opencode, the gate and the lock all were. A same-UID writer rewriting either
@@ -69,9 +69,9 @@ TRUSTED_LOCK_SHA256 = '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a345121
 # No cycle: neither wrapper pins agent-draft, so the graph stays a DAG. The refresh order is
 # broker/tools -> wrappers -> agent-draft -> deliver, which is the order the manifest records.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = 'af502cb7071a6d8938276ec84b4088ef8f3e748c1fece740b9cdeed889b239ed'
+TRUSTED_PI_WRAPPER_SHA256 = '0d0e3b1e3d1259e5df7bc5576f3fef694dc88d08201c7e5f04e1a822c774e267'
 OPENCODE_WRAPPER = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
-TRUSTED_OPENCODE_WRAPPER_SHA256 = '87db013d9c20b972941ee5146e9f37990ed08687191efe31776cc952a823acf6'
+TRUSTED_OPENCODE_WRAPPER_SHA256 = 'ccd3147fc5aa94d30045d11b8b64472cef9118070a6219d503bed63cc5212b62'
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {

@@ -486,7 +486,7 @@ def test_shell_entrypoint_is_a_root_owned_execution_consumer():
     source = shell.read_text()
     assert "trusted_tool()" in source
     assert "/usr/bin/python3 -I -c" in source
-    assert "trusted_tool /usr/bin/jq 49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a jq" in source
+    assert "trusted_tool /usr/bin/jq 93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880 jq" in source
     assert "trusted_tool /usr/local/bin/gh 02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1 gh" in source
     assert " repo view" not in source, "remote target must not be inferred from mutable local Git metadata"
     identity_guard = source.index('config error: remote validation requires both --owner and --repo')

@@ -332,7 +332,7 @@ SCHEMA = "opencode-busdriver-result/v0"
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
-    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
 # symlinked name is what this contract refuses. See _validated_root_owned_source().

@@ -339,7 +339,7 @@ def run_bounded(
 
 
 TRUSTED_EXECUTABLE_DIGESTS = {
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
 SF_RESTRICTED = 0x00080000
@@ -446,7 +446,7 @@ RETAINED_PYTHON_STDIN_LOADER = (
     "exec(compile(program, virtual, 'exec'), namespace)\n"
 )
 
-TRUSTED_CHECK_SHA256 = '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e'
+TRUSTED_CHECK_SHA256 = 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212'
 # No TRUSTED_EXECUTABLE_DIGESTS here any more. This loop never dispatched git/gh/jq itself — it only
 # digest-checked a `trusted-bin/` bundle its parent had copied them into, and that bundle is gone.
 # The checker it spawns pins them in its own frozen table. A pin kept here would be a pin nothing

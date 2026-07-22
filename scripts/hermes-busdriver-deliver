@@ -380,25 +380,25 @@ FINALIZATION_AUTHORITY_SCHEMA = "hermes-busdriver-finalization-authority/v0"
 PR_GRIND_LOOP_SCHEMA = "hermes-busdriver-pr-grind-loop/v0"
 TRUSTED_BUSDRIVER_PLUGIN_COMMIT = "835dc1784a7ae5c34a5f8f58d6731a482f64df0a"
 TRUSTED_BUSDRIVER_PLUGIN_VERSION = "1.90.0"
-TRUSTED_PR_GRIND_LOOP_SHA256 = '33ca1e4b6ee540373e45e7fe3e9a0ae217ffc3be6f1cad44501034bfb7505ec8'
-TRUSTED_PR_GRIND_CHECK_SHA256 = '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e'
-TRUSTED_LOCK_SHA256 = '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52'
+TRUSTED_PR_GRIND_LOOP_SHA256 = '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653'
+TRUSTED_PR_GRIND_CHECK_SHA256 = 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212'
+TRUSTED_LOCK_SHA256 = '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1'
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '5d10873d3606b96e27ef5a33cb0c9f130f9e96f08e5dd71b753a3fd1fa64c719',
-                                           'scripts/hermes-busdriver-agent-draft': 'e0b505058251cd779eb7a05760214a64e6f97e5fea943e3a3bc5842e9df0003b',
+                                           'scripts/hermes-busdriver-agent-draft': 'e203cab051078154ca0ea435b6061e0ff05dd56ff04eec98de0e96eec64b5a0e',
                                            'scripts/hermes-busdriver-agent-smoke': 'ac55f1a9996413524e298d5a38301e3939bb5fee161f2b860c6439658497b961',
-                                           'scripts/hermes-busdriver-delivery-status': '1d3ce65f0fe13b095bd296e6f1d92b639e2753ba84a3d36cdf3acd7d840a3811',
+                                           'scripts/hermes-busdriver-delivery-status': '576716169dd6236275e4924c8cfa16fe792b30818d1d15c452993bc75894ad4d',
                                            'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
-                                           'scripts/hermes-busdriver-finalization-readiness': '0e02bb4ac29093254560adec60ad4af7ce272761e16f73a1cab6372cb791ef33',
-                                           'scripts/hermes-busdriver-gate': '48ec2229d1889e2236f790751ebd7d6b0007b4195e0b8e8f12ff4608d2173c8e',
-                                           'scripts/hermes-busdriver-litmus-status': 'ba95be8b96e7fc215e5fa96288b093a90e0265f1fe6dd428715b8c462034c561',
-                                           'scripts/hermes-busdriver-lock': '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52',
-                                           'scripts/hermes-busdriver-pr-grind-check': '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e',
-                                           'scripts/hermes-busdriver-pr-grind-loop': '33ca1e4b6ee540373e45e7fe3e9a0ae217ffc3be6f1cad44501034bfb7505ec8',
-                                           'scripts/hermes-busdriver-relay-role': 'c272f01b1a88e470c8b574a5326ec41a4df871d14ade64cd24966311b98a21dc',
+                                           'scripts/hermes-busdriver-finalization-readiness': '2adb45beaf18b2979108b887aa7cd9741103398ee8dce02b90ee072135e7a65f',
+                                           'scripts/hermes-busdriver-gate': '4348bab75ffbec9f83d750b266def37647ce7c36a926b7ab8c0f42df50c6b4c8',
+                                           'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
+                                           'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
+                                           'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
+                                           'scripts/hermes-busdriver-pr-grind-loop': '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653',
+                                           'scripts/hermes-busdriver-relay-role': '1a3fa071a9f7b4c990120d8a9dfa6e9c32fc44ec70714a29ab29c90151f0992f',
                                            'scripts/hermes-busdriver-runtime-check': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
-                                           'scripts/hermes-busdriver-smoke': '403fbf5f66ba0c42e1308350c64aa432dfcbdf76fac6aed1b8d49cd4395165ac',
-                                           'scripts/hermes-busdriver-status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'}
+                                           'scripts/hermes-busdriver-smoke': '4aee5de4ff0966f95d19820fbc5582367bd9f5ebb6604332acecb25bbfb19d4e',
+                                           'scripts/hermes-busdriver-status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'}
 # Enumerated independently of TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS above, so that
 # `materialize_delivery_status_runtime`'s set comparison is an actual cross-check: adding a script
 # to one inventory and forgetting the other must fail closed rather than silently agree. Deriving
@@ -426,7 +426,7 @@ DELIVERY_STATUS_RUNTIME_SOURCES = {
     "scripts/hermes-busdriver-status": ROOT / "scripts" / "hermes-busdriver-status",
     "scripts/hermes-busdriver-lock": ROOT / "scripts" / "hermes-busdriver-lock",
 }
-TRUSTED_EXECUTABLE_DIGESTS = {'git': '31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5', 'git-real': '7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701', 'sandbox-exec': '2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a', 'gh': '02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1', 'jq': '49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a', 'bash': '21f1b686feca123f2c575296d6f8b8277a2695f7a06e3b1c1b154a0f21f68141', 'python3': '31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5'}
+TRUSTED_EXECUTABLE_DIGESTS = {'git': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef', 'git-real': '7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701', 'sandbox-exec': '4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866', 'gh': '02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1', 'jq': '93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880', 'bash': '7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea', 'python3': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef'}
 # Fixed root-owned system sources, executed in place. No `.resolve()` anywhere in this table:
 # resolving *follows* symlinks, and a symlinked name is exactly what this contract refuses. The walk
 # in _validated_root_owned_source() proves the literal path, component by component.
