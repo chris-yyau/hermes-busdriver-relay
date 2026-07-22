@@ -76,9 +76,13 @@ def test_current_status_records_merged_authority_chronology():
         "branch was opened reported zero open PRs, a clean `220`-file "
         "installed/repo skill comparison, no skill reference missing terminal LF"
     )
-    current_section = text.split("## Current verification\n\n", 1)[1].split(
-        "\n## Locations", 1
-    )[0]
+    section_start = "## Current verification\n\n"
+    section_end = "\n## Locations"
+    assert section_start in text
+    current_section, separator, _ = text.split(section_start, 1)[1].partition(
+        section_end
+    )
+    assert separator
 
     for required in (historical_seal, current_main, late_follow_up, live_evidence):
         assert required in current_section
