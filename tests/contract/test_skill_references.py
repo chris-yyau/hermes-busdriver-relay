@@ -81,6 +81,16 @@ PRIVATE_PATH_LEAKS = (
 )
 
 
+def test_all_skill_references_end_with_terminal_newline():
+    missing_terminal_newline = [
+        reference.name
+        for reference in sorted(REFERENCE_DIR.glob("*.md"))
+        if not reference.read_bytes().endswith(b"\n")
+    ]
+
+    assert missing_terminal_newline == []
+
+
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():
     assert REFERENCE.exists()
     reference_text = REFERENCE.read_text()
