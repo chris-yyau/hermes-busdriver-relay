@@ -1,4 +1,5 @@
 # Immutable review rounds, runtime closure, and provenance hardening
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when a Busdriver relay delivery has a large dirty WIP, authenticated runtime pins, multiple formal reviewers, or repeated pre-freeze rounds.
 

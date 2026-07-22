@@ -1,4 +1,5 @@
 # Frozen production trust-boundary review: ownership and blocker-ordering probes
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for an independent, fail-closed review of a frozen candidate that claims production dispatch blockers, trusted-runtime ownership, and documentation truth.
 

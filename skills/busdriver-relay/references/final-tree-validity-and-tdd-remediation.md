@@ -1,4 +1,5 @@
 # Final-tree validity triage and TDD remediation
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when reviewing security or delivery findings produced from a stacked series of commits. The unit of truth is the immutable final candidate, while intermediate commits remain relevant for attribution and packaging quality.
 

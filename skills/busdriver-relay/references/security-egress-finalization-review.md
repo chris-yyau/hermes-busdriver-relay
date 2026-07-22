@@ -1,4 +1,5 @@
 # Security and Data-Egress Review of Draft/Finalization Surfaces
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this checklist for read-only reviews of Busdriver relay launchers, Delivery Mode executors, and GitHub finalizers.
 

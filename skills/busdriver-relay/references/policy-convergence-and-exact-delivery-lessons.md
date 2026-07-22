@@ -1,4 +1,5 @@
 # Policy Convergence and Exact Delivery Lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a role-policy, authority-map, runtime/config, or workflow-hygiene change must move through exact candidate review, squash delivery, post-merge verification, and installed-skill convergence.
 

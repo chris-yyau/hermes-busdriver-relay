@@ -1,4 +1,5 @@
 # Manifest-driven bounded slice review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this procedure when a stacked change set is decomposed into manifest-owned slices and the reviewer must judge each slice independently from only its declared `stack_base_commit..commit` diff.
 

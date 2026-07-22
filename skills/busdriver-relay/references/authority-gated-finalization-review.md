@@ -1,4 +1,5 @@
 # Authority-Gated Finalization Review Checklist
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when reviewing a Busdriver-equivalent executor that turns review/litmus evidence into commit, push, PR creation, or merge. The core invariant is: **the exact reviewed object must be the exact object mutated, and the exact resulting side effect must be reconciled afterward.**
 

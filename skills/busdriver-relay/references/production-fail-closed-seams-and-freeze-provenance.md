@@ -1,4 +1,5 @@
 # Production fail-closed seams and frozen provenance
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when a relay candidate blocks unsafe production dispatch but still needs executable adapter contracts in tests, or when freezing a candidate from an isolated worker clone.
 

@@ -1,4 +1,5 @@
 # Restored-session lineage reconciliation and safe retry
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a long Busdriver relay resumes after context compaction, process-notification delay, provider interruption, or another session may have advanced the repo.
 

@@ -1,4 +1,5 @@
 # Frozen relay defensive trust-boundary review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for authorized, read-only reviews of frozen Busdriver Relay authority artifacts. It supplements the general frozen-review and security-review guidance with process, transitive-runtime, credential-file, and final recheck lessons.
 

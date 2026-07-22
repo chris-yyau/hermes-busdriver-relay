@@ -1,4 +1,5 @@
 # Docs/skill policy consistency review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this for an independent, read-only review of a dirty policy-convergence worktree where README/docs/ADRs, a repository skill, historical references, runtime metadata, and contract tests must tell one story.
 

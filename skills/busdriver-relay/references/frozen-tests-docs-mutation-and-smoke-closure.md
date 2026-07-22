@@ -1,4 +1,5 @@
 # Frozen tests/docs mutation and smoke closure
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for independent frozen-review lanes that must verify documentation policy inventories, executable help truth, hermetic tests, exact-version smoke, and mutation resistance without editing the candidate.
 

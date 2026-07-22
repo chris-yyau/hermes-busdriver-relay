@@ -1,4 +1,5 @@
 # Operation dispatchability and active-document consistency
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a gated delivery dispatcher exposes an operation in its parser or aggregate capability matrix, but runtime policy still blocks that operation.
 

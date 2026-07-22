@@ -1,4 +1,5 @@
 # Authority-chronology-only exact reviews
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this playbook when a previously reviewed policy candidate is restacked onto a newly merged, separately sealed base and the final delta is limited to status chronology plus its contract test.
 

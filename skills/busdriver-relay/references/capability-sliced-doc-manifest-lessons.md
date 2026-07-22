@@ -1,4 +1,5 @@
 # Capability-sliced ADR/docs/skill/config manifest lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when rescuing or stacking a large dirty Busdriver-relay worktree whose ADRs, docs, skill source, and config must follow production behavior rather than lead it.
 

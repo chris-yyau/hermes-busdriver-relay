@@ -1,4 +1,5 @@
 # Delivery Mode dogfood litmus lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when Hermes is asked to complete relay work end-to-end (commit/PR/merge) and the first Delivery Mode attempt is blocked by missing or stale evidence.
 

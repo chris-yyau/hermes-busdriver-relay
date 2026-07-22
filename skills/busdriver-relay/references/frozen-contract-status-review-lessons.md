@@ -1,4 +1,5 @@
 # Frozen tests/contracts/docs/status review lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for an independent, read-only review of a dirty frozen snapshot, especially when adapter promotion, trusted runtimes, role metadata, and documentation claims changed together.
 

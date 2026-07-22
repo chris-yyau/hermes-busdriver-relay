@@ -1,4 +1,5 @@
 # Exact-tree delivery and CI truth review lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for read-only final-delivery reviews where the authority is an exact Git tree rather than the current branch or worktree.
 

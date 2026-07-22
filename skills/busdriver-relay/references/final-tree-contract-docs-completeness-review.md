@@ -1,4 +1,5 @@
 # Final-tree contract and documentation completeness review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when independently triaging security/completeness findings against a sealed or candidate Busdriver relay tree. The objective is to distinguish an exploitable reachable defect from a proof gap, misleading test claim, historical slice issue, or closure artifact that necessarily lives outside the reviewed tree.
 

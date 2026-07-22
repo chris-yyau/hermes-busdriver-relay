@@ -1,4 +1,5 @@
 # Frozen state-integrity and policy-ordering review patterns
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Related frozen-review detail remains in:
 

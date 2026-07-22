@@ -1,4 +1,5 @@
 # Final-verdict admissibility and CI evidence ledger
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for final independent delivery/CI trust reviews. It exists to prevent a plausible narrative from outrunning the evidence actually completed.
 

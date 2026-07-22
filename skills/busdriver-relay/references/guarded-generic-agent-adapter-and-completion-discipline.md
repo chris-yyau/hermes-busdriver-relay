@@ -1,4 +1,5 @@
 # Guarded generic-agent adapters and completion discipline
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when promoting a generic coding-agent lane (especially OpenCode without a Busdriver-native plugin) or when a long delivery spans tool-call windows.
 

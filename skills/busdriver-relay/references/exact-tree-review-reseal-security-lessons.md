@@ -1,4 +1,5 @@
 # Exact-tree review-reseal security lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when an independently reviewed Busdriver-relay remediation candidate must be resealed after reviewer findings.
 

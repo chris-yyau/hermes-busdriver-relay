@@ -1,4 +1,5 @@
 # Finalization Review Pitfalls
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when hardening or operating Hermes/Busdriver Delivery Mode, especially after Busdriver/Codex review finds trust-boundary issues.
 

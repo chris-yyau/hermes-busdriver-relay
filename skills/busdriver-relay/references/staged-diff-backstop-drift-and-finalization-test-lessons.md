@@ -1,4 +1,5 @@
 # Staged-diff backstop drift and finalization-test lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use these lessons when performing an independent read-only backstop review of a staged `hermes-busdriver-relay` diff, especially for finalization surfaces where another worker may restage or narrow the candidate while the review is in progress.
 

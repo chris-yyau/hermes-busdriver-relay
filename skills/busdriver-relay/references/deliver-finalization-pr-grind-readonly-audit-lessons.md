@@ -1,4 +1,5 @@
 # Deliver / Finalization / PR-grind Read-only Audit Lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Context: read-only audit of `hermes-busdriver-relay` current deliver, finalization-contract-status, PR-grind checker/loop code and focused contract tests. No repo mutations were made. Target repo was clean on `main`; focused tests for deliver/finalization-contract/pr-grind passed (`134 passed`).
 

@@ -1,4 +1,5 @@
 # Postmerge SUCCESS-only live closeout
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this for an independent, strictly read-only audit where a sealed postmerge authority must be reconciled against current GitHub and local-repository state. Return binary `PASS` or an exact blocker; an authority boolean is only a claim until its evidence and live postconditions are independently checked.
 

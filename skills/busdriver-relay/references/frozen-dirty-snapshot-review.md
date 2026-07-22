@@ -1,4 +1,5 @@
 # Frozen dirty-snapshot review protocol
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a review is scoped to an exact `HEAD + dirty tree` digest.
 

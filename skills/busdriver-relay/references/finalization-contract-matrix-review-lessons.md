@@ -1,4 +1,5 @@
 # Finalization contract matrix review lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when updating `hermes-busdriver-finalization-contract-status`, `hermes-busdriver-finalization-readiness`, ADR 0005, or relay brief/status surfaces after Delivery Mode executor work.
 

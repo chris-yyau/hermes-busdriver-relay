@@ -1,4 +1,5 @@
 # Delivery executor finalization review lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Context: during a Hermes Delivery Mode dogfood run for `hermes-busdriver-relay`, a large delivery-executor slice added gated mutating operations (`pre-pr-review`, `commit`, `push`, `pr-create`, `merge`). Busdriver litmus repeatedly stalled in cross-file context collection, so read-only staged-diff backstops (`codex review --uncommitted` plus a leaf staged-diff reviewer) were used to identify finalization blockers before commit.
 

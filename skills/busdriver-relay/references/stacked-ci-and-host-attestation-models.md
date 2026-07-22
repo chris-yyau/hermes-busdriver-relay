@@ -1,4 +1,5 @@
 # Stacked CI and host-attestation models
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference before publishing or merging a bounded PR stack whose production trust model is tied to a specific OS, host, executable path, ownership mode, SIP/immutable flag, or reviewed byte digest.
 

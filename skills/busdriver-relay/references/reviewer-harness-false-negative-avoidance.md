@@ -1,4 +1,5 @@
 # Reviewer harness false-negative avoidance
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this note for exact-boundary closing reviews that run several focused pytest groups, deterministic boolean probes, and a postflight inventory before END.
 

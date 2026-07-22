@@ -1,4 +1,5 @@
 # Delivery finalization script-group litmus lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when dogfooding `hermes-busdriver-deliver`, `hermes-busdriver-delivery-status`, or `hermes-busdriver-litmus-status` and Busdriver litmus repeatedly finds finalization hardening issues in the staged scripts group.
 

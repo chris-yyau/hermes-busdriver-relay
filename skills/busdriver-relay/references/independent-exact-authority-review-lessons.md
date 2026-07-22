@@ -1,4 +1,5 @@
 # Independent exact-authority review lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 For a sealed postmerge `SUCCESS` authority that must be reconciled with live GitHub PR/CI/branch state and a clean local `main`, use `postmerge-success-only-live-closeout.md`.
 

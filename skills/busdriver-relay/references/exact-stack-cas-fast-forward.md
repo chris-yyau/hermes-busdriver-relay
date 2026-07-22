@@ -1,4 +1,5 @@
 # Exact stacked PR delivery with one CAS fast-forward
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a reviewed stack is already a linear descendant of the live base and every immutable PR head has exact-tree CI/review authority. Prefer one native fast-forward over synthesizing per-PR merge commits or repeatedly restacking.
 

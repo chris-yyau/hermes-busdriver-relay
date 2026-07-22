@@ -1,4 +1,5 @@
 # Durable artifact truth and closed review lanes
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when a relay change validates, authenticates, stores, or retrieves run artifacts, signed envelopes, delivery-state files, or other durable state-machine records.
 

@@ -1,4 +1,5 @@
 # Delivery executor slice litmus timeout lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Context: during a Hermes Delivery Mode dogfood run for `hermes-busdriver-relay`, an OpenCode adapter slice passed litmus and was committed, then a much larger delivery-executor slice (`scripts/hermes-busdriver-deliver` + `tests/contract/test_deliver.py` + ADR) passed targeted tests but Busdriver litmus repeatedly stalled while collecting cross-file context.
 

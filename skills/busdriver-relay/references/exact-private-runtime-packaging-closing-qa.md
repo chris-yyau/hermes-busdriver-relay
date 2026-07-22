@@ -1,4 +1,5 @@
 # Exact private-runtime packaging closing QA
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for a bounded, local-only review of a frozen runtime bundle when the required output is a formal START/END-closed report and SHA-256 sidecar.
 

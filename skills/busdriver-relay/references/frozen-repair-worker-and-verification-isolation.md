@@ -1,4 +1,5 @@
 # Frozen repair workers and verification isolation
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a blocked frozen review must be repaired in a new generation, especially when the repair worker is reconstructed from a verifier-created candidate.
 

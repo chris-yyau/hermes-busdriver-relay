@@ -1,4 +1,5 @@
 # Delivery finalization group-splitting and litmus lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when Hermes is dogfooding `hermes-busdriver-deliver` / Delivery Mode and the staged candidate keeps failing Busdriver litmus because of size, stale staged-diff hashes, or commit/pre-PR evidence mismatches.
 

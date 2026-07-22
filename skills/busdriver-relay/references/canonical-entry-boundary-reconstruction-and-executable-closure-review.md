@@ -1,4 +1,5 @@
 # Canonical-entry exact-boundary reconstruction and closure probes
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for independent correctness/state-integrity pre-freeze reviews where the authority is a JSON inventory of canonical entry records rather than a ready-made tar/diff artifact.
 

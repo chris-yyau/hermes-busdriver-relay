@@ -1,4 +1,5 @@
 # Delivery finalization dogfood edge lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Session context: while continuing a relay finalization slice, Hermes staged a Delivery Mode group and ran targeted tests plus Busdriver litmus. The litmus loop found concrete correctness blockers in the delivery/finalization surface before commit.
 

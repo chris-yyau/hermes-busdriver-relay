@@ -1,4 +1,5 @@
 # Frozen Tests, Docs, and Integrity Review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this as a fail-closed independent lane for a reconstructed/frozen Busdriver relay candidate. It complements the production-seam and operation-dispatchability references by tying suite strength, active documentation claims, and hash-cascade evidence into one verdict.
 

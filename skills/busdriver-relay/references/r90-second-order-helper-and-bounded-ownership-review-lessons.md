@@ -1,4 +1,5 @@
 # r90 blocked-review lessons: second-order helpers and bounded ownership
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this as a session-specific companion to `review-finding-red-green-toctou-and-quiet-descendants.md` when a Busdriver iteration has already fixed the obvious retained-bytes/runtime races but fresh review still returns material findings.
 

@@ -1,4 +1,5 @@
 # Dual-Review / Marker-Interop Read-Only Audit Lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Session context: read-only audit of programmatic dual-review and marker-interop surfaces across `hermes-busdriver-relay` and the live Busdriver plugin. No files were modified during the audit.
 

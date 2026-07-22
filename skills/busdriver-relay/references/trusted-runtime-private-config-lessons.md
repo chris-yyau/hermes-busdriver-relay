@@ -1,4 +1,5 @@
 # Trusted runtime and private agent configuration lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this note when a relay-owned adapter launches a provider CLI whose executable or runtime dependency must be authenticated and whose user configuration may contain plugins/packages.
 

@@ -1,4 +1,5 @@
 # Deterministic restack replay review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for strict read-only reviews of a bounded stacked commit chain built from historical transition units plus a latest-delta inventory.
 

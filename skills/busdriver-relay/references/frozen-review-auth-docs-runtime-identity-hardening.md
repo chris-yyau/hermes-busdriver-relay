@@ -1,4 +1,5 @@
 # Frozen review hardening: auth isolation, semantic docs, and runtime identity
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when an exact frozen candidate passes its current suite but an independent review challenges hermeticity, capability wording, or trusted-runtime coverage.
 

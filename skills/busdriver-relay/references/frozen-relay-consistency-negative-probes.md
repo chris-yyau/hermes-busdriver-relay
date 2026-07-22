@@ -1,4 +1,5 @@
 # Frozen Relay Candidate Consistency and Negative-Probe Lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when a frozen relay candidate includes an immutable manifest plus a byte-exact binary Git diff and the review spans production, tests, schemas, docs, status, ADRs, skills, and authority.
 

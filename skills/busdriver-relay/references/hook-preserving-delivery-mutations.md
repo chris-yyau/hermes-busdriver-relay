@@ -1,4 +1,5 @@
 # Hook-preserving Delivery Mode mutation hardening
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when implementing or reviewing Busdriver Delivery Mode helpers that perform `commit`, `push`, PR creation, or merge operations. These are class-level pitfalls learned from hardening `hermes-busdriver-deliver` after review flagged hook bypasses and cleanup data-loss risks.
 

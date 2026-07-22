@@ -1,4 +1,5 @@
 # Reviewer finding adjudication and process-lifecycle containment
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when immutable reviewers disagree, when a report's premise may be wrong, or when relay code launches bounded child processes.
 

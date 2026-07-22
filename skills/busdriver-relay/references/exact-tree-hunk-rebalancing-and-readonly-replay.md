@@ -1,4 +1,5 @@
 # Exact-tree hunk rebalancing and read-only replay
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when an existing manifest-driven stack must be rebuilt for a newer dirty virtual tree, especially when the slice count must remain fixed while line/file caps tighten. Use it with `capability-sliced-doc-manifest-lessons.md` for classification and `bounded-slice-review-method.md` for immediate-base review discipline.
 

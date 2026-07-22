@@ -1,4 +1,5 @@
 # Real-agent smoke diagnostics and retained temporary repositories
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when an optional real Pi/OpenCode/Codex smoke fails before producing a draft, especially when the top-level envelope only reports `blocked` and a return code.
 

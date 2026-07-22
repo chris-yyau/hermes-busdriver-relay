@@ -1,4 +1,5 @@
 # Pre-freeze mode/operation and executable-closure probes
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this during correctness/state-integrity review of a dispatcher whose policy depends on both a mode and an operation, especially when some combinations are permanently blocked and another combination can mutate Git state.
 

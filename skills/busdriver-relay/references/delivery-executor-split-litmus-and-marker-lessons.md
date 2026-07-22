@@ -1,4 +1,5 @@
 # Delivery executor split-litmus and marker semantics lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use when a gated delivery-executor / finalization slice grows large enough that Busdriver litmus rejects the full staged diff or when litmus PASS marker semantics look inconsistent with Hermes-side hash checks.
 

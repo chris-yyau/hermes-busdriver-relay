@@ -1,4 +1,5 @@
 # Finalization: GitHub Reconciliation and Environment Hardening
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when Delivery Mode can create a PR, merge a PR, push a branch, or invoke a read-only PR-grind checker. The core rule is: **bind every observation and mutation to one explicit repository identity and reconcile irreversible effects from remote state.**
 

@@ -1,4 +1,5 @@
 # Frozen production trust-boundary review: transitive ownership and outer-launcher lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference after an independent frozen review finds that the declared blockers and manifest hashes are locally correct but the production call graph is still not closed.
 

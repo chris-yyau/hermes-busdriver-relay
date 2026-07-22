@@ -1,4 +1,5 @@
 # Immutable review finding follow-up lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this note when a Busdriver iteration has already passed focused/affected/full tests and an immutable review is being closed.
 

@@ -1,4 +1,5 @@
 # Immutable review repair and complete-suite closure
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a large dirty relay candidate must survive repeated security reviews, long test runs, and cross-cutting runtime hardening without losing evidence.
 

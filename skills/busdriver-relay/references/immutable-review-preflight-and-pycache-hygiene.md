@@ -1,4 +1,5 @@
 # Immutable review preflight and source-tree hygiene
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for freeze/review loops that invoke external model CLIs against an authenticated immutable boundary.
 

@@ -1,4 +1,5 @@
 # Ephemeral self-hosted required-check rescue
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a PR workflow has a required self-hosted job but the repository currently has no matching online runner, while a separate GitHub-hosted portable lane must remain independently meaningful. This is an operational rescue for a **trusted, exact candidate**, not a general way to execute untrusted pull-request code on a privileged machine.
 

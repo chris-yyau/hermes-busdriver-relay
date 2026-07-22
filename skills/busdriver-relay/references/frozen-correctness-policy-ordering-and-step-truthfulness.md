@@ -1,4 +1,5 @@
 # Frozen correctness review: policy ordering and truthful step evidence
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when independently reviewing a frozen delivery/runtime candidate for correctness and state integrity.
 

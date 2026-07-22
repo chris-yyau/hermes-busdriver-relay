@@ -1,4 +1,5 @@
 # Shell-dispatch scanner composition and immutable review-lane closure
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a delivery gate statically inventories executable dispatch in production shell, especially after a reviewer finds a parser bypass.
 

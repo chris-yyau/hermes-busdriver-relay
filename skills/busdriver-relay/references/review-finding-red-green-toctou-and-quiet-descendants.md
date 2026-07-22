@@ -1,4 +1,5 @@
 # Reviewer finding RED→GREEN: retained runtime bytes and quiet descendants
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a frozen Busdriver review returns substantive findings after gates appeared green. The goal is to adjudicate findings with concrete regressions in the next mutable iteration, without editing the frozen review view or claiming the blocked iteration is clean.
 

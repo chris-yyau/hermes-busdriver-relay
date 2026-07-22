@@ -1,4 +1,5 @@
 # Staged-diff backstop audit lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use these lessons when the user asks for an independent, read-only backstop review of a staged relay diff, especially when the worktree is dirty or finalization authority is in scope.
 

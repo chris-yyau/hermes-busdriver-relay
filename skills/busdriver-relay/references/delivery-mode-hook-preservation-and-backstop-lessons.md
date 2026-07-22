@@ -1,4 +1,5 @@
 # Delivery Mode hook preservation and backstop lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Context: while dogfooding Hermes Delivery Mode finalization for `hermes-busdriver-relay`, pre-PR independent backstop review caught two classes of authority regressions after contract tests had passed.
 

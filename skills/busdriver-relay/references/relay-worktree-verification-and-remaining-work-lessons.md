@@ -1,4 +1,5 @@
 # Relay worktree verification and remaining-work lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a relay continuation/verification request references target tests or files that are not present in the current checkout.
 

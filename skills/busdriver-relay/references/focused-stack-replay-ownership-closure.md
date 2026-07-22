@@ -1,4 +1,5 @@
 # Focused stacked replay and ownership closure
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a prior review already established the historical transition inventory and the remaining task is an independent final check of the rebuilt stack, latest delta, early CI surfaces, and closing attestation.
 

@@ -1,4 +1,5 @@
 # Private-runtime closure, writer authentication, and positive controls
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when reviewing or repairing a relay runtime that copies authenticated executables/helpers into a private bundle, or when a durable run artifact claims writer-authenticated status.
 

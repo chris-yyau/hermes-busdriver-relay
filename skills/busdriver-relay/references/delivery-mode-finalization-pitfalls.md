@@ -1,4 +1,5 @@
 # Delivery Mode finalization pitfalls
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when finalizing `hermes-busdriver-relay` or similar Busdriver-gated delivery work.
 

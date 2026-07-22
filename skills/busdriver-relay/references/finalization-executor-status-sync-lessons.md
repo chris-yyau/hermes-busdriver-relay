@@ -1,4 +1,5 @@
 # Finalization executor status-sync lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Session context: implementing a gated `hermes-busdriver-deliver` executor plus OpenCode fallback proof exposed a class-level relay maintenance pitfall: code can unlock a previously policy-blocked surface while status/readiness/docs/skill text still describes the old all-blocked world.
 

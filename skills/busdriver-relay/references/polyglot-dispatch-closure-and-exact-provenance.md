@@ -1,4 +1,5 @@
 # Polyglot production-dispatch closure and exact provenance
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this when a Busdriver gate statically proves that production code cannot launch ambient or unauthenticated executables across shell, Python, and JavaScript/TypeScript.
 

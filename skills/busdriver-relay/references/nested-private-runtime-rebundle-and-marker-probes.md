@@ -1,4 +1,5 @@
 # Nested private-runtime re-bundles and marker-closure probes
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Related hardening references: `private-runtime-closure-and-policy-inventory-hardening.md`, `independent-pre-freeze-state-integrity-probes.md`, `nested-private-runtime-and-doc-closure.md`, and `pre-freeze-mode-operation-and-executable-closure-probes.md`.
 

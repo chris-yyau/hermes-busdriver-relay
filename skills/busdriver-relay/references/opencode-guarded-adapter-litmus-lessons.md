@@ -1,4 +1,5 @@
 # OpenCode guarded adapter litmus lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use these lessons when finishing or reviewing OpenCode fallback / comparison-lane work in `hermes-busdriver-relay`.
 

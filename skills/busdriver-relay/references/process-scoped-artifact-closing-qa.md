@@ -1,4 +1,5 @@
 # Closing QA probes for process-scoped artifacts and state-envelope consistency
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference for frozen correctness lanes that review a process-scoped HMAC artifact/status design and must finish with a strict START/END ceremony.
 

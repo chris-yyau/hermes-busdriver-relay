@@ -1,4 +1,5 @@
 # Exact-tree contract, docs, manifest, and ownership replay review
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this for final read-only reviews whose authority is a Git **tree object**, while the live worktree may be dirty or changing concurrently.
 

@@ -1,4 +1,5 @@
 # Finalization large-diff split and review retry lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 When hardening Busdriver/Hermes Delivery Mode or other finalization paths, the review gate may reject an otherwise coherent staged diff because the raw changed-line ceiling is separate from the weighted-line override.
 

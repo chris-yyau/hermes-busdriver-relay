@@ -1,4 +1,5 @@
 # Runtime closure reseal and exact-proof hygiene
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this after security remediation changes any repo-local runtime byte that is named by a manifest, embedded digest, retained-helper bundle, production-entrypoint table, or exact AST/source fingerprint.
 

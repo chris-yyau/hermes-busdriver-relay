@@ -1,4 +1,5 @@
 # Exact-tree roll-forward and stacked-restack lessons
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this reference when an independently reviewed candidate rolls forward more than once, or when an evidence-only PR shares a branch with the final stacked delivery.
 

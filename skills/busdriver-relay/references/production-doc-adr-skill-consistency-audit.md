@@ -1,4 +1,5 @@
 # Production documentation / ADR / skill consistency audit
+> **HISTORICAL / SUPERSEDED — NON-PRODUCTION.** Current policy authority: repository-root `docs/coding-workflow-authority-map.md`; any later current-tense or positive-authority wording is retained evidence only and MUST NOT be treated as executable/current policy.
 
 Use this for read-only audits that compare relay documentation, ADRs, status pages, and the repo skill against current production adapter behavior.
 
