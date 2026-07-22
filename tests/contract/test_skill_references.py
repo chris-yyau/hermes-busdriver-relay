@@ -83,8 +83,8 @@ PRIVATE_PATH_LEAKS = (
 
 def test_all_skill_references_end_with_terminal_newline():
     missing_terminal_newline = [
-        reference.name
-        for reference in sorted(REFERENCE_DIR.glob("*.md"))
+        reference.relative_to(REFERENCE_DIR).as_posix()
+        for reference in sorted(REFERENCE_DIR.rglob("*.md"))
         if not reference.read_bytes().endswith(b"\n")
     ]
 
