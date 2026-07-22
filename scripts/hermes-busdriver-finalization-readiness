@@ -340,7 +340,7 @@ def run_bounded(
 
 
 TRUSTED_EXECUTABLE_DIGESTS = {
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
 SF_RESTRICTED = 0x00080000
@@ -886,13 +886,13 @@ CREDENTIAL_CHILD_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 # This is intentionally narrower than delivery_status_runtime, which also contains metadata-only
 # public entrypoints. Including metadata-only smoke here creates a smoke<->readiness hash cycle.
 TRUSTED_READINESS_HELPER_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '5d10873d3606b96e27ef5a33cb0c9f130f9e96f08e5dd71b753a3fd1fa64c719',
-                                    'scripts/hermes-busdriver-delivery-status': '1d3ce65f0fe13b095bd296e6f1d92b639e2753ba84a3d36cdf3acd7d840a3811',
+                                    'scripts/hermes-busdriver-delivery-status': '576716169dd6236275e4924c8cfa16fe792b30818d1d15c452993bc75894ad4d',
                                     'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
-                                    'scripts/hermes-busdriver-litmus-status': 'ba95be8b96e7fc215e5fa96288b093a90e0265f1fe6dd428715b8c462034c561',
-                                    'scripts/hermes-busdriver-lock': '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52',
-                                    'scripts/hermes-busdriver-pr-grind-check': '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e',
-                                    'scripts/hermes-busdriver-relay-role': 'c272f01b1a88e470c8b574a5326ec41a4df871d14ade64cd24966311b98a21dc',
-                                    'scripts/hermes-busdriver-status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'}
+                                    'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
+                                    'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
+                                    'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
+                                    'scripts/hermes-busdriver-relay-role': '1a3fa071a9f7b4c990120d8a9dfa6e9c32fc44ec70714a29ab29c90151f0992f',
+                                    'scripts/hermes-busdriver-status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'}
 
 
 def child_env(*, credentials: bool = False) -> dict[str, str]:

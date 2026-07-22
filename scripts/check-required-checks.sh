@@ -135,7 +135,7 @@ print(path)
 ' "$1" "$2" "$3"
 }
 
-JQ=$(trusted_tool /usr/bin/jq 49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a jq) || exit 2
+JQ=$(trusted_tool /usr/bin/jq 93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880 jq) || exit 2
 
 LOCK=".github/required-checks.lock"
 LOCAL_ONLY=0

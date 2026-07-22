@@ -361,7 +361,7 @@ TRUSTED_NODE_SHA256 = "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
-    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
 # symlinked name is what this contract refuses. See _validated_root_owned_source().
@@ -375,11 +375,11 @@ TRUSTED_EXECUTABLE_SOURCES = {
 # being the candidate's to choose.
 MAX_PACKAGE_ENTRY_BYTES = 256 * 1024 * 1024
 FS_BROKER = ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"
-TRUSTED_FS_BROKER_SHA256 = 'b9ce969f2c409add8995099fe7ae136542d20108b04cefcc54477b1cd231e7ec'
+TRUSTED_FS_BROKER_SHA256 = 'f503ab5cbca867b777539a5dca04a1d0f1e54f98087b756a3b4771b9d59d660b'
 # The adapter's filesystem broker needs openat(2), which Node does not expose, so it runs under a
 # Python the adapter never chooses: this path is pinned here, not resolved from PATH or argv.
 TRUSTED_BROKER_PYTHON = Path("/usr/bin/python3")
-TRUSTED_BROKER_PYTHON_SHA256 = "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5"
+TRUSTED_BROKER_PYTHON_SHA256 = "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef"
 MAX_PRIVATE_AUTH_BYTES = 1024 * 1024
 _PRIVATE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
 

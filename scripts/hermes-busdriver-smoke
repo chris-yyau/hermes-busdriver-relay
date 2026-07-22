@@ -327,7 +327,7 @@ def run_bounded(
 
 
 TRUSTED_EXECUTABLE_DIGESTS = {
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 TRUSTED_EXECUTABLE_SOURCES = {"python3": Path("/usr/bin/python3")}
 SF_RESTRICTED = 0x00080000
@@ -446,10 +446,10 @@ TRUSTED_HELPER_PATHS = {
     "finalization_readiness": FINALIZATION_READINESS,
     "gate": GATE,
 }
-TRUSTED_HELPER_DIGESTS = {'status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd',
+TRUSTED_HELPER_DIGESTS = {'status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643',
                           'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
-                          'finalization_readiness': '0e02bb4ac29093254560adec60ad4af7ce272761e16f73a1cab6372cb791ef33',
-                          'gate': '48ec2229d1889e2236f790751ebd7d6b0007b4195e0b8e8f12ff4608d2173c8e'}
+                          'finalization_readiness': '2adb45beaf18b2979108b887aa7cd9741103398ee8dce02b90ee072135e7a65f',
+                          'gate': '4348bab75ffbec9f83d750b266def37647ce7c36a926b7ab8c0f42df50c6b4c8'}
 MAX_TRUSTED_HELPER_BYTES = 1024 * 1024
 TRUSTED_HELPER_STDIN_LOADER = (
     "import sys\n"

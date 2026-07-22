@@ -44,7 +44,7 @@ PTY_SPAWN_CALLS = {"spawn"}
 ASYNCIO_EXEC_CALLS = {"create_subprocess_exec"}
 ASYNCIO_SHELL_CALLS = {"create_subprocess_shell"}
 RUN_SAFE_AST_SHA256 = "7e0b29b9401bea190a32efc086df31a7d5e32c1053073139dcc8790fede8403f"
-POSITIONAL_WRAPPER_SHA256 = "03ec53f71b64286ffe1fd6c3725122492a149418376851846fac01c3086b851d"
+POSITIONAL_WRAPPER_SHA256 = "faeb1ffeebf99634c6e36f6d2e2fdf91180beb95c097e45ad0d0a0ef347040b3"
 REQUIRED_CHECKS_SHELL_DISPATCHES = {
     "$JQ", "/bin/rm", "/usr/bin/awk", "/usr/bin/grep", "/usr/bin/head",
     "/usr/bin/mktemp", "/usr/bin/printf", "/usr/bin/tr",

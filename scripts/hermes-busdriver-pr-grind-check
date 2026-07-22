@@ -345,10 +345,10 @@ TRUSTED_EXECUTABLE_DIGESTS = {
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
-    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
-    "jq": "49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a",
-    "bash": "21f1b686feca123f2c575296d6f8b8277a2695f7a06e3b1c1b154a0f21f68141",
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
+    "jq": "93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880",
+    "bash": "7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
 # symlinked name is what this contract refuses. See _validated_root_owned_source().

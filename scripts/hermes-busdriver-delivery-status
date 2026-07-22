@@ -346,12 +346,12 @@ SCHEMA = "hermes-busdriver-delivery-status/v0"
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
-    "git": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
     "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
-    "sandbox-exec": "2d0d4cb4c8eab07c7261195798388d93c640c7f8db1bece63372946e4b00e91a",
+    "sandbox-exec": "4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
-    "jq": "49356fcef7adb7afdb76c9e258eef0e78df3673ba0fb4d479905432c117f579a",
-    "python3": "31ec19f3253cc0044133c892bf65183a9fdb0cca36dfe04074a46d7201417da5",
+    "jq": "93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880",
+    "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a
 # symlinked name is what this contract refuses. See _validated_root_owned_source().
@@ -1343,11 +1343,11 @@ def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
     return {"present": present, "blocking": blocking}
 
 
-TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': 'ba95be8b96e7fc215e5fa96288b093a90e0265f1fe6dd428715b8c462034c561',
-                                'scripts/hermes-busdriver-lock': '995afb339f9b9d70c8a579679ffbe05b0f336d1747e7c8caf2a3451210efbe52',
-                                'scripts/hermes-busdriver-pr-grind-check': '0862d6ee7e5b64279e1ff5dfa9cfb87b8e834c3ce2ca6445c1d21823ca793f0e',
-                                'scripts/hermes-busdriver-relay-role': 'c272f01b1a88e470c8b574a5326ec41a4df871d14ade64cd24966311b98a21dc',
-                                'scripts/hermes-busdriver-status': '120c70546eefac26abd3ef505ad1a73050f68c2b6c54c2083caab21d5f1995bd'}
+TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
+                                'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
+                                'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
+                                'scripts/hermes-busdriver-relay-role': '1a3fa071a9f7b4c990120d8a9dfa6e9c32fc44ec70714a29ab29c90151f0992f',
+                                'scripts/hermes-busdriver-status': 'da1b826bc7c61ad425e9aef771069ed89ddfde69917b8dfd3890cebb7d278643'}
 
 
 def _read_authenticated_helper(path: Path, expected_digest: str) -> bytes:
