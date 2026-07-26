@@ -361,6 +361,7 @@ Default relay draft mode still cannot finalize. Production Pi/OpenCode dispatch 
    - treat reviewer-bot rate-limit / quota / “couldn't start review” comments as incomplete reviewer state even if the GitHub status context says `SUCCESS`; do not merge until a real completed review exists or the bounded-wait policy explicitly bails to the user;
    - fix and push additional commits if feedback is actionable;
    - after **every** push, treat the previous clean/check/review state as invalidated and start the next wait/collect/fix round against the new PR HEAD;
+   - for a behind Dependabot branch, preserve the bot-signed provenance: request `@dependabot rebase` before any human/GitHub rewrite; if the branch is already marked edited, use Dependabot's `@dependabot recreate` recovery, discover any replacement PR, and restart exact-head review/checks there rather than force-pushing, reopening, or admin-merging the old PR; see `references/end-to-end-pr-grind-and-redaction-lessons.md`;
    - repeat until the **latest PR HEAD** is clean, not merely until one review batch was fixed;
    - bail to the user on policy gaps, design/scope questions, failing required checks, max-wait exhaustion, or unclear reviewer state.
 5. Merge only after the latest PR HEAD is clean by current Busdriver/pr-grind semantics. Never enable GitHub auto-merge as a substitute for pr-grind, and never merge immediately after a fix push without waiting for the next round of checks/reviewer bots.
