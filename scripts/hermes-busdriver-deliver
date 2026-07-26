@@ -382,23 +382,23 @@ TRUSTED_BUSDRIVER_PLUGIN_COMMIT = "835dc1784a7ae5c34a5f8f58d6731a482f64df0a"
 TRUSTED_BUSDRIVER_PLUGIN_VERSION = "1.90.0"
 TRUSTED_PR_GRIND_LOOP_SHA256 = '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653'
 TRUSTED_PR_GRIND_CHECK_SHA256 = 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212'
-TRUSTED_LOCK_SHA256 = '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1'
+TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '213adeb661452a45c004abb688cfec328013fc0715f468cbcd0094a9ac5ead9c',
-                                           'scripts/hermes-busdriver-agent-draft': 'daff2db85b80d62069e90d5eaae87aff0921fbada76efca648901c4b14a6ada8',
+                                           'scripts/hermes-busdriver-agent-draft': 'feb966b3ea6b41e8b78200fe1b682cb48fdfbdff6ace229e45710f80e750e0a8',
                                            'scripts/hermes-busdriver-agent-smoke': 'eb5ea5742db1658fdb964f1dda1125e32a37227ed41554682b3980f9d53ab1b3',
-                                           'scripts/hermes-busdriver-delivery-status': 'd4f09045eac6285508c5f9648d4e2c5006f569d80e96c07313fe8dca072c79c4',
+                                           'scripts/hermes-busdriver-delivery-status': '30cabab19bc2eaff1ced0bdcf14cc407ad72071c2c2214bb97007a22f347be8e',
                                            'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
-                                           'scripts/hermes-busdriver-finalization-readiness': '937205b91be2c28262117dc22895b9b25d383b9b8a730eb2e8a5a09e22d757af',
-                                           'scripts/hermes-busdriver-gate': '4348bab75ffbec9f83d750b266def37647ce7c36a926b7ab8c0f42df50c6b4c8',
-                                           'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
-                                           'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
+                                           'scripts/hermes-busdriver-finalization-readiness': 'f81409838c2c09a0636530964d9d6fc85a7788311fb8e0a10d1b071e8ea6c72f',
+                                           'scripts/hermes-busdriver-gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
+                                           'scripts/hermes-busdriver-litmus-status': '35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76',
+                                           'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
                                            'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
                                            'scripts/hermes-busdriver-pr-grind-loop': '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653',
-                                           'scripts/hermes-busdriver-relay-role': '3eb0871f87effd7fa8339fa67f18380b389949e1f5b8bc5fe5d05ef1d945e338',
+                                           'scripts/hermes-busdriver-relay-role': '0430f7271d6c070bdb5826979ed09ed89373ef4438634a7f9ca6725fe6bf394d',
                                            'scripts/hermes-busdriver-runtime-check': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
-                                           'scripts/hermes-busdriver-smoke': '762177f57194b4b75e5672a5616dfde590a0d2dc00d95f04e4874a0bcfd8cc62',
-                                           'scripts/hermes-busdriver-status': '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'}
+                                           'scripts/hermes-busdriver-smoke': 'ab790e808225bf11dcc56dded2a3d79f324df972aed323c23c70a89515587e13',
+                                           'scripts/hermes-busdriver-status': 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'}
 # Enumerated independently of TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS above, so that
 # `materialize_delivery_status_runtime`'s set comparison is an actual cross-check: adding a script
 # to one inventory and forgetting the other must fail closed rather than silently agree. Deriving
@@ -426,7 +426,7 @@ DELIVERY_STATUS_RUNTIME_SOURCES = {
     "scripts/hermes-busdriver-status": ROOT / "scripts" / "hermes-busdriver-status",
     "scripts/hermes-busdriver-lock": ROOT / "scripts" / "hermes-busdriver-lock",
 }
-TRUSTED_EXECUTABLE_DIGESTS = {'git': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef', 'git-real': '7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701', 'sandbox-exec': '4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866', 'gh': '02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1', 'jq': '93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880', 'bash': '7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea', 'python3': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef'}
+TRUSTED_EXECUTABLE_DIGESTS = {'git': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef', 'git-real': '914d6c8fd0611085dd9cf24239ea2d7fc168b769e5956ebe2cc383752b0f5c8e', 'sandbox-exec': '4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866', 'gh': '02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1', 'jq': '93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880', 'bash': '7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea', 'python3': 'ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef'}
 # Fixed root-owned system sources, executed in place. No `.resolve()` anywhere in this table:
 # resolving *follows* symlinks, and a symlinked name is exactly what this contract refuses. The walk
 # in _validated_root_owned_source() proves the literal path, component by component.

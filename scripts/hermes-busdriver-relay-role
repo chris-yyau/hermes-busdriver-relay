@@ -424,7 +424,7 @@ def trusted_executable_path(name: str) -> Path:
 
 
 STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
-TRUSTED_STATUS_SHA256 = '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'
+TRUSTED_STATUS_SHA256 = 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'
 MAX_AUTHENTICATED_STATUS_BYTES = 1 << 20
 STATUS_STDIN_LOADER = (
     "import sys\n"
