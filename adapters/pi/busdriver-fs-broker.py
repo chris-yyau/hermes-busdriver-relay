@@ -53,7 +53,7 @@ TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
     "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
-    "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
+    "git-real": "914d6c8fd0611085dd9cf24239ea2d7fc168b769e5956ebe2cc383752b0f5c8e",
     "sandbox-exec": "4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866",
 }
 # Fixed root-owned system sources, executed in place. No `.resolve()`: it follows symlinks, and a

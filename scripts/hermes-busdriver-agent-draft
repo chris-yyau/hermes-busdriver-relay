@@ -33,7 +33,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
-TRUSTED_GATE_SHA256 = '4348bab75ffbec9f83d750b266def37647ce7c36a926b7ab8c0f42df50c6b4c8'
+TRUSTED_GATE_SHA256 = 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31'
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
@@ -60,7 +60,7 @@ TRUSTED_OPENCODE = Path("/Users/vfrvndtt/.opencode/bin/opencode").resolve()
 _TRUSTED_EXECUTABLE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
 _TRUSTED_EXECUTABLE_PATHS: dict[str, Path] = {}
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_LOCK_SHA256 = '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1'
+TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
 # The child wrappers. Both were launched straight off their repo paths — `python -I <repo>/run-pi-…`
 # — so the one process that holds the entire draft containment was the one nobody authenticated,
 # while git, gh, pi, opencode, the gate and the lock all were. A same-UID writer rewriting either
@@ -69,7 +69,7 @@ TRUSTED_LOCK_SHA256 = '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c93
 # No cycle: neither wrapper pins agent-draft, so the graph stays a DAG. The refresh order is
 # broker/tools -> wrappers -> agent-draft -> deliver, which is the order the manifest records.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = '0d0e3b1e3d1259e5df7bc5576f3fef694dc88d08201c7e5f04e1a822c774e267'
+TRUSTED_PI_WRAPPER_SHA256 = 'd6943576a792a82aa781dfa2be0ecae0c0d0786337ee9c6cf88fb165fd6d73c3'
 OPENCODE_WRAPPER = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
 TRUSTED_OPENCODE_WRAPPER_SHA256 = 'ccd3147fc5aa94d30045d11b8b64472cef9118070a6219d503bed63cc5212b62'
 

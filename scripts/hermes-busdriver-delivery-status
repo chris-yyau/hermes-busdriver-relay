@@ -347,7 +347,7 @@ TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
     "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
-    "git-real": "7018952d11ea59620a34ea929ffdcb3252cb0ad4bdfabd61e531a141d6bc1701",
+    "git-real": "914d6c8fd0611085dd9cf24239ea2d7fc168b769e5956ebe2cc383752b0f5c8e",
     "sandbox-exec": "4b65c7cbdfb11fd6199b8587d6f0334fe9277958be55d0168e29836d867b4866",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
     "jq": "93a7bcfddac8e6cb2efba9f4b9565dad18726f67834c3df3ee15df98e5dee880",
@@ -1343,11 +1343,11 @@ def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
     return {"present": present, "blocking": blocking}
 
 
-TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': 'fd59d1ab20ee85f4d3dab1d072697aed6596a017dd5a18b8b8f15b71b325d68a',
-                                'scripts/hermes-busdriver-lock': '193219fe3223ef1454a31d860233c693d7fa662a5edae36c5aafb1c9316561a1',
+TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': '35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76',
+                                'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
                                 'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
-                                'scripts/hermes-busdriver-relay-role': '3eb0871f87effd7fa8339fa67f18380b389949e1f5b8bc5fe5d05ef1d945e338',
-                                'scripts/hermes-busdriver-status': '0193f186f3d93b5650f16a3526436c7771654ab40eccc5fdacad24afbd7ab0a0'}
+                                'scripts/hermes-busdriver-relay-role': '0430f7271d6c070bdb5826979ed09ed89373ef4438634a7f9ca6725fe6bf394d',
+                                'scripts/hermes-busdriver-status': 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'}
 
 
 def _read_authenticated_helper(path: Path, expected_digest: str) -> bytes:
