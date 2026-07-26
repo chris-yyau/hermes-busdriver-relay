@@ -80,6 +80,9 @@ PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
 LOCK_CLI_USAGE_PITFALLS_REFERENCE = REFERENCE_DIR / "lock-cli-usage-pitfalls.md"
 OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE = REFERENCE_DIR / "opencode-fallback-proof-audit-lessons.md"
 GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE = REFERENCE_DIR / "gated-finalization-executor-opencode-lessons.md"
+END_TO_END_PR_GRIND_REDACTION_REFERENCE = (
+    REFERENCE_DIR / "end-to-end-pr-grind-and-redaction-lessons.md"
+)
 PRIVATE_PATH_LEAKS = (
     "/" + "Users/" + "vfrvndtt",
     "/" + "tmp/",
@@ -95,6 +98,21 @@ def test_all_skill_references_end_with_terminal_newline():
     ]
 
     assert missing_terminal_newline == []
+
+
+def test_dependabot_recreate_pr_grind_lessons_are_durable():
+    assert END_TO_END_PR_GRIND_REDACTION_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = END_TO_END_PR_GRIND_REDACTION_REFERENCE.read_text()
+
+    assert END_TO_END_PR_GRIND_REDACTION_REFERENCE.name in skill_text
+    assert "preserve the bot-signed provenance" in skill_text
+    assert "Preserve Dependabot provenance" in reference_text
+    assert "@dependabot rebase" in reference_text
+    assert "@dependabot recreate" in reference_text
+    assert "replacement as a wholly new immutable boundary" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
 
 
 def test_june_2026_pr_reviewer_evaluation_is_durable_skill_reference():

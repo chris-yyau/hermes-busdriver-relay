@@ -14,6 +14,9 @@ Session lessons from Hermes Busdriver Relay dogfooding on Dependabot PR-grind an
   - verify relevant action inputs still exist and behavior used by the repo did not change;
   - only then resolve/comment as part of an explicit PR-grind finalization path.
 - `gh pr update-branch` may leave the immediate PR view at the old head/`UNKNOWN`; rerun the read-only PR-grind loop after GitHub observes the new head. Treat the new head as invalidating all previous clean state.
+- Preserve Dependabot provenance when a bot-authored branch is behind the base. A generic `gh pr update-branch --rebase` can rewrite the head under a non-Dependabot identity; `dependabot/fetch-metadata` then correctly fails with an unverified-signature / “PR is not from Dependabot” error even when the code diff is unchanged.
+- Prefer one `@dependabot rebase` request while the branch is still untouched. If Dependabot reports that another actor edited the branch, follow its explicit `@dependabot recreate` recovery instead of force-pushing, reopening the old PR, or using admin merge.
+- Recreate may close the old PR and open a replacement PR with a newer grouped update. Poll both the old PR state and the open-PR inventory; do not wait only for the old head to change. Treat the replacement as a wholly new immutable boundary: re-read its exact diff, verify every added dependency/release/SHA and bot signature, rerun current-head checks/manual review, then merge with head matching.
 
 ## Reviewer-thread handling
 
