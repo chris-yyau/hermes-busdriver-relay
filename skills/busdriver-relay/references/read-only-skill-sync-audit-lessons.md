@@ -39,6 +39,9 @@ For a frozen parent→candidate skill-source sync, review the Git objects rather
 6. Classify inert security examples manually after high-confidence scanning; a documented placeholder such as `https://user:secret@host` is not a live credential. Do not let that false positive hide real local-path leakage in another file.
 7. Never overwrite a shared repo skill file from the installed copy merely to obtain tree equality. Run the repo's focused policy contracts first; if installed shared text is older or authority-positive, preserve the parent/canonical repo blob and explicitly realign the installed copy only after the reviewed repo candidate merges.
 8. When an installed-only reference becomes an in-repo SKILL link, update the repository documentation-policy inventory in the same candidate. Move any newly present path out of `external_or_unavailable_references`, classify retained evolution evidence as historical, and add the conspicuous `HISTORICAL / SUPERSEDED — NON-PRODUCTION` banner plus current authority pointer required by the policy contracts.
+9. Treat a late asynchronous review as evidence even when its reviewed candidate has already merged. Recompute the finding against the merged blobs; if it is real, roll forward in a new narrow PR rather than rewriting history or dismissing it because a newer review passed.
+10. Make whole-reference integrity checks recursive (`references/**/*.md`) and report relative paths, not only basenames. For terminal-newline defects, first preserve a RED test, then append exactly one LF to each affected blob and verify every other byte remains unchanged.
+11. Any candidate mutation—including a reviewer-driven one-line test hardening—invalidates the prior exact review, digest, and test boundary. Recompute identity/digest, rerun the scoped gate, and obtain a fresh independent closing review before merge.
 
 ## CURRENT_STATUS follow-up after merge
 

@@ -6,6 +6,12 @@ SKILL = ROOT / "skills" / "busdriver-relay" / "SKILL.md"
 REFERENCE_DIR = ROOT / "skills" / "busdriver-relay" / "references"
 REFERENCE = REFERENCE_DIR / "june-2026-pr-reviewer-quality-evaluation.md"
 CONTINUATION_REFERENCE = REFERENCE_DIR / "continuation-subagent-dispatch-lessons.md"
+CONCURRENT_DIRTY_CANDIDATE_EXACT_REVIEW_REFERENCE = (
+    REFERENCE_DIR / "concurrent-dirty-candidate-exact-review.md"
+)
+IMMUTABLE_REVIEW_RUNTIME_CLOSURE_REFERENCE = (
+    REFERENCE_DIR / "immutable-review-runtime-closure-and-provenance.md"
+)
 PR49_TO_PR52_REFERENCES = {
     "pr49-skill-sync-delivery-lessons.md": "Finalization-readiness expects the raw PR-grind loop payload",
     "pr50-docs-status-refresh-lessons.md": "Preserve policy guardrails verbatim",
@@ -152,6 +158,40 @@ def test_continuation_reference_preserves_late_async_follow_up_policy():
     assert "late async reviewer/subagent result arrives after a PR was already merged" in reference_text
     assert "Non-blocking suggestions can become the next tiny follow-up PR" in reference_text
     assert "do not silently ignore them or pretend they were handled in the earlier PR" in reference_text
+
+
+def test_concurrent_dirty_candidate_exact_review_is_durable_skill_reference():
+    assert CONCURRENT_DIRTY_CANDIDATE_EXACT_REVIEW_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = CONCURRENT_DIRTY_CANDIDATE_EXACT_REVIEW_REFERENCE.read_text()
+
+    assert "references/concurrent-dirty-candidate-exact-review.md" in skill_text
+    assert "Seal before execution" in reference_text
+    assert "keep it remote-free" in reference_text
+    assert "Separate candidate correctness from review admissibility" in reference_text
+    assert "canonical raw Git patch inside the scratch process" in reference_text
+    assert "Digest-only reseal invariant" in reference_text
+    assert "replacing every digest token with one placeholder" in reference_text
+    assert "Any new commit/ref update during the lane invalidates a PASS" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
+
+
+def test_immutable_review_runtime_closure_is_durable_skill_reference():
+    assert IMMUTABLE_REVIEW_RUNTIME_CLOSURE_REFERENCE.exists()
+    skill_text = SKILL.read_text()
+    reference_text = IMMUTABLE_REVIEW_RUNTIME_CLOSURE_REFERENCE.read_text()
+
+    assert "references/immutable-review-runtime-closure-and-provenance.md" in skill_text
+    assert "Exact committed-tree closure review" in reference_text
+    assert "git show candidate:path" in reference_text
+    assert "require the normalized bytes to be identical" in reference_text
+    assert "approved runtime root" in reference_text
+    assert "Recompute the same HEAD/tree/parent/ref/index/refs/status seal" in reference_text
+    assert "If only Git metadata moved" in reference_text
+    assert "Bind the final `PASS`/`BLOCKER` to exact base/commit/tree/patch IDs" in reference_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in reference_text
 
 
 def test_relay_router_role_policy_references_are_durable_skill_references():
@@ -703,6 +743,9 @@ def test_read_only_skill_sync_audit_lessons_are_durable_skill_reference():
     assert "classify it as a blocker or explicit scope decision" in reference_text
     assert "Preserve authority boundaries" in reference_text
     assert "CURRENT_STATUS follow-up after merge" in reference_text
+    assert "Treat a late asynchronous review as evidence even when its reviewed candidate has already merged" in reference_text
+    assert "Make whole-reference integrity checks recursive" in reference_text
+    assert "Any candidate mutation" in reference_text
     for leaked_path in PRIVATE_PATH_LEAKS:
         assert leaked_path not in reference_text
 
@@ -777,6 +820,9 @@ def test_idle_and_convergence_lessons_are_durable_skill_references():
             "watch the focused test fail against the stale repo source",
             "Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope",
             "Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible",
+            "Qualify volatile observations at their actual evidence point",
+            "Keep current-state chronology contracts fail-closed",
+            "Reviewer feedback that changes even one test line creates a new candidate",
             "Run `git fetch --prune` during merge cleanup before the completion audit",
             "no open PRs, relay topic branches, or stale remote-tracking topic branches remain",
             "CURRENT_STATUS required fresh tokens are present and stale tokens are absent",

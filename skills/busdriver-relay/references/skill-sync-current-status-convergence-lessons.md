@@ -30,6 +30,9 @@ Do not stop at the first clean PR if either of these surfaces is still stale:
 - For a user-explicit safe continuation slice that says to leave the working tree dirty for main Hermes, stop at a verified draft: add/update the durable contract assertion first, watch the focused test fail against the stale repo source, sync only the scoped reference drift, rerun focused tests and `git diff --check`, compare the synced repo reference against the installed skill copy, and report the exact dirty files. Do not commit, push, open a PR, merge, or touch `docs/CURRENT_STATUS.md` unless the user explicitly changes scope.
 - Keep each convergence step tiny and explicit: one skill-sync PR or one docs-only evidence refresh PR, then PR-grind, merge, cleanup, and final audit.
 - Make `docs/CURRENT_STATUS.md` the last convergence slice whenever possible, because it records the latest merged PR/head and verification evidence; any skill-sync PR merged after it will make it stale again.
+- Qualify volatile observations at their actual evidence point. For example, if open PR count was zero before the docs-refresh PR was opened, say so explicitly instead of leaving a statement that becomes false as soon as the refresh PR exists.
+- Keep current-state chronology contracts fail-closed: assert both the current-section start and end markers, extract with `partition`, require a nonempty separator, and then check required tokens and order only inside that bounded section. A missing end marker must not let historical text satisfy the current contract.
+- Reviewer feedback that changes even one test line creates a new candidate. Rerun the focused docs gate and independent exact review against the new commit/tree before merge; never carry forward the earlier seal.
 - Run `git fetch --prune` during merge cleanup before the completion audit so stale remote-tracking topic branches are observable as state, not hidden inside a checklist item.
 
 ## Completion audit

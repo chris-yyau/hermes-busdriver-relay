@@ -226,6 +226,8 @@ For production observation paths:
 
 When these invariants change, add hostile filter/signature/submodule/lazy-fetch regressions first, refresh all transitive executable and script pins to a fixed point, then rerun the exact-byte full contract suite before freezing a review boundary.
 
+For exact reviews of dirty candidates that may be concurrently resealed or committed, use `references/concurrent-dirty-candidate-exact-review.md`: reconstruct the expected virtual tree with scratch-only index/objects, stop testing the live worktree after sealing, run tests from an immutable remote-free scratch view, and fail closed when the opening/closing source or ref seal changes.
+
 ## Runtime Variables
 
 Use symbolic runtime values, not hardcoded local paths:

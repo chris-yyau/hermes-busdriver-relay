@@ -54,6 +54,7 @@
     "ADRs/0008-gated-delivery-executor-and-opencode-adapter.md",
     "docs/hermes-busdriver-integration-contract-v2.md",
     "docs/settling-checks-v2.md",
+    "skills/busdriver-relay/references/concurrent-dirty-candidate-exact-review.md",
     "skills/busdriver-relay/references/git-observation-sandbox-lessons.md",
     "skills/busdriver-relay/references/relay-role-status-integration-lessons.md"
   ],

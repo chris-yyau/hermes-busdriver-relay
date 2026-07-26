@@ -24,6 +24,23 @@ If a reviewer returns a greeting, empty report, tiny error summary, or otherwise
 
 A background tracker’s missing/`None` exit metadata is not stronger than direct evidence. Judge completion from process liveness, result/report files, stderr, and START/END closure together.
 
+### Exact committed-tree closure review
+
+When the authority is an exact base commit, candidate commit, candidate tree, and evidence patch, review Git objects rather than trusting the checked-out worktree:
+
+1. Record base, candidate, `candidate^{tree}`, parent(s), symbolic ref, porcelain-v2 branch/status, index SHA-256, and a deterministic refs snapshot/hash. Use `GIT_OPTIONAL_LOCKS=0`; isolate global/system Git config when required.
+2. Read candidate bytes with `git show candidate:path`, inventory with `git ls-tree -r candidate`, and diff with `git diff --full-index --no-ext-diff --no-textconv base candidate`.
+3. Reconcile exact changed paths/statuses, numstat totals, and modes. For a digest-only refresh, require every added/deleted line to contain the expected digest literal, replace every 64-hex SHA-256 token in each before/after blob with one placeholder, and require the normalized bytes to be identical. This is stronger than AST/JSON equality and also proves formatting, paths, flags, and adjacent policy bytes did not move; AST/JSON comparison remains a useful second opinion.
+4. Verify the root producer independently: hash the real bytes and, when part of the contract, prove literal path, non-symlink state, owner/mode, and trusted ancestry. Search the base tree for the old producer digest and the candidate tree for the new digest; require identical `(path, line)` consumer sites, old absent from candidate, and new absent from base.
+5. For every changed authenticated helper, compute the base/candidate blob SHA-256, compare all old/new consumer sites, reject every stale old occurrence, build producer-to-consumer edges among changed helpers, and reject cycles. This proves the embedded DAG reached a fixed point rather than merely refreshing a manifest root.
+6. Validate every repo-local manifest entry against the candidate **commit blob**, not disk bytes or a hand-picked subset. For external evidence, independently compare names/numstat/patch bytes, recompute declared hashes and proof before/after blob hashes, compare a supplied index with `git ls-tree -r candidate`, and validate supplied loose-object IDs after decompression. Historical pre-commit status evidence must reconcile its status code, path inventory, and base blob OIDs; never present it as current state.
+
+Run focused closure tests under an approved runtime root with isolated `HOME`, `TMPDIR`, cache roots, `PYTHONPYCACHEPREFIX`, `PYTHONDONTWRITEBYTECODE=1`, cache-disabled pytest, and Git optional locks disabled. If a full suite contains one already-adjudicated host-pin drift, reproduce that exact node, deselect only its exact node ID, and report passed/skipped/deselected counts; do not relabel the remainder as an unconditional full-suite pass. After a timeout, first prove no test process remains, then remove every isolated runtime leftover before closing the review.
+
+Recompute the same HEAD/tree/parent/ref/index/refs/status seal after all required checks. Any mismatch invalidates that temporal review window. Source/tree/index drift requires a full restart. If only Git metadata moved while HEAD/tree/index and the clean worktree remained exact, disclose the drift, open a fresh seal, rerun every required object/content check and focused authority test inside the new window, and close that window exactly; earlier exact-commit tests are supplemental evidence, not the new seal. If a stable reseal cannot be completed, return `BLOCKER`.
+
+Bind the final `PASS`/`BLOCKER` to exact base/commit/tree/patch IDs and report digest-only proof, producer consumers, stale-hash count, helper DAG/manifest closure, test counts and exact deselections, seal result, and all temporary artifacts created and cleaned. Keep command-backed operator evidence separate from conclusions that could not be executed.
+
 ### Reviewer identity and transport are part of closure
 
 - Record lane role, transport/provider, actual model identity, and artifact identity separately. A lane name is not provenance.
