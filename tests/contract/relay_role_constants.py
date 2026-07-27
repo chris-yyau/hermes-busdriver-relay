@@ -1,7 +1,7 @@
 FULL_RELAY_ROLE_MAP = {
-    "relay.impl.primary": "codex",
-    "relay.impl.secondary": "opencode",
-    "relay.impl.fallback": "opencode",
+    "relay.impl.primary": "pi",
+    "relay.impl.secondary": "pi",
+    "relay.impl.fallback": "codex",
     "relay.review.fast": "grok",
     "relay.review.long_context": "gemini",
     "relay.ide.manual": "cursor",

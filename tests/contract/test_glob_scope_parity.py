@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GLOB_RELAYS = {
     "hermes-busdriver-gate": "scripts/hermes-busdriver-gate",
     "run-pi-busdriver-draft": "scripts/pi/run-pi-busdriver-draft",
-    "run-opencode-busdriver-draft": "scripts/opencode/run-opencode-busdriver-draft",
+    "run-opencode-busdriver-draft": "tests/fixtures/opencode/run-opencode-busdriver-draft",
 }
 
 

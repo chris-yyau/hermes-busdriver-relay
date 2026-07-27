@@ -4,7 +4,7 @@
 
 Accepted non-mutating design/spike contract. This ADR does not grant finalization authority and adds no executor, dispatcher, marker writer, commit, push, PR, merge, deploy, release, or publish path.
 
-This dual-review/marker-interop surface has no programmatic execution, finalization, marker-write, commit, push, PR, merge, deploy, release, or publish authority. Draft dispatch through the separately contracted Pi/OpenCode adapters and operator-explicit Delivery Mode are governed by ADR 0008; neither grants this ADR's future dual-review seam reusable authority.
+This dual-review/marker-interop surface has no programmatic execution, finalization, marker-write, commit, push, PR, merge, deploy, release, or publish authority. The current Pi-only route metadata, its blocked production dispatch contract, and operator-explicit Delivery Mode are governed by ADR 0008; none grants this ADR's future dual-review seam reusable authority. OpenCode remains historical, test-only non-executor evidence and is not a draft route.
 
 ## Context
 
@@ -53,7 +53,7 @@ ADR 0008 exposes an operator-explicit `pre-pr-review` parser/result-envelope sur
 - no marker forging;
 - no MCP/plugin graph replication;
 - no deploy/release/publish automation;
-- no draft-adapter authority expansion; Pi/OpenCode draft lanes are governed separately by ADR 0008 and remain non-finalizing.
+- no draft-adapter authority expansion; the Pi route is governed separately by ADR 0008 and remains production-blocked and non-finalizing, while OpenCode is historical test evidence rather than a lane.
 
 ## Staged Unlock Plan
 

@@ -88,7 +88,6 @@ def namespaces() -> dict[str, dict]:
     ]
     loaded = {name: runpy.run_path(str(ROOT / "scripts" / name)) for name in names}
     loaded["run-pi-busdriver-draft"] = runpy.run_path(str(ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"))
-    loaded["run-opencode-busdriver-draft"] = runpy.run_path(str(ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"))
     return loaded
 
 
@@ -110,7 +109,7 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         ("hermes-busdriver-deliver", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec", "gh", "jq", "bash", "python3")}),
         ("hermes-busdriver-delivery-status", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec", "gh", "jq", "python3")}),
         ("hermes-busdriver-pr-grind-check", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("gh", "git", "jq", "bash", "python3")}),
-        ("hermes-busdriver-agent-draft", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "gh", "pi", "opencode", "bash", "python3")}),
+        ("hermes-busdriver-agent-draft", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "gh", "pi", "bash", "python3")}),
         # v16-r34c: the git-only consumers carry the same table shape as the git/gh/jq ones rather
         # than a lone TRUSTED_GIT_DIGEST/TRUSTED_GIT_SHA256 constant each, so one assertion covers
         # every copy and a new consumer cannot invent a third spelling.
@@ -125,9 +124,7 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         ("hermes-busdriver-status", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec")}),
         ("hermes-busdriver-relay-brief", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec", "python3")}),
         ("run-pi-busdriver-draft", "TRUSTED_EXECUTABLE_DIGESTS", {"git": executables["git"]}),
-        ("run-opencode-busdriver-draft", "TRUSTED_EXECUTABLE_DIGESTS", {"git": executables["git"]}),
         # --- single embedded executable pins ---
-        ("run-opencode-busdriver-draft", "TRUSTED_OPENCODE_SHA256", executables["opencode"]),
         ("run-pi-busdriver-draft", "TRUSTED_NODE_SHA256", executables["node"]),
         ("run-pi-busdriver-draft", "TRUSTED_PI_TREE_SHA256", manifest["executables"]["pi-package-tree"]["sha256"]),
         # v16-r30 B: the adapter has no openat(2), so its filesystem containment runs as brokered
@@ -139,10 +136,9 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         # straight onto node's `-e`. It defines every tool boundary in the run, so it is in the
         # closure like the broker beside it.
         ("run-pi-busdriver-draft", "TRUSTED_PI_TOOLS_SHA256", manifest["adapter_runtime"]["adapters/pi/busdriver-tools.ts"]),
-        # v16-r31 A2: agent-draft executes both child wrappers, so both are executed bytes like any
-        # other. Neither wrapper pins agent-draft, so this edge adds no cycle.
+        # Agent-draft executes only the Pi child wrapper. OpenCode has no
+        # production wrapper edge or executable pin.
         ("hermes-busdriver-agent-draft", "TRUSTED_PI_WRAPPER_SHA256", entrypoints["scripts/pi/run-pi-busdriver-draft"]),
-        ("hermes-busdriver-agent-draft", "TRUSTED_OPENCODE_WRAPPER_SHA256", entrypoints["scripts/opencode/run-opencode-busdriver-draft"]),
         # --- embedded plugin-script pins ---
         # `plugin_scripts` is the union across consumers, so each consumer binds the rows it runs
         # rather than the whole section: the checker runs these four, status runs the resolver.
@@ -207,6 +203,7 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
 def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namespaces):
     assert manifest["schema"] == "hermes-busdriver-trusted-runtime/v1"
     assert manifest["refresh_contract"]
+    assert "opencode" not in manifest["executables"]
 
     deliver = namespaces["hermes-busdriver-deliver"]
     assert deliver["TRUSTED_BUSDRIVER_PLUGIN_COMMIT"] == manifest["busdriver"]["commit"]
@@ -234,16 +231,14 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
     # The AGENT-lane anchors still resolve, and must: `pi` is an npm shim symlinking into
     # node_modules, so the manifest names the anchor an operator would recognise while the constant
     # holds what actually gets read. They are outside the root-owned contract by construction —
-    # both live under $HOME, whose ancestry this UID can write — which is the same fact that keeps
+    # it lives under $HOME, whose ancestry this UID can write — which is the same fact that keeps
     # agent dispatch policy_blocked. Resolving here asserts the pin, not a safety property.
     for script, constant, name in [
         ("hermes-busdriver-agent-draft", "TRUSTED_PI", "pi"),
-        ("hermes-busdriver-agent-draft", "TRUSTED_OPENCODE", "opencode"),
         ("run-pi-busdriver-draft", "TRUSTED_NODE", "node"),
         # v16-r27 item 7: the Pi wrapper no longer PATH-resolves its anchor, so it has one to pin.
         ("run-pi-busdriver-draft", "TRUSTED_PI", "pi"),
         ("run-pi-busdriver-draft", "TRUSTED_BROKER_PYTHON", "python3"),
-        ("run-opencode-busdriver-draft", "TRUSTED_OPENCODE", "opencode"),
     ]:
         assert str(namespaces[script][constant]) == str(Path(manifest["executables"][name]["path"]).resolve()), f"{script}:{constant}"
 
@@ -265,7 +260,6 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
             ("hermes-busdriver-relay-role", ("python3",)),
             ("hermes-busdriver-smoke", ("python3",)),
         ("run-pi-busdriver-draft", ("git",)),
-        ("run-opencode-busdriver-draft", ("git",)),
     ]:
         assert namespaces[script]["TRUSTED_EXECUTABLE_SOURCES"] == {
             name: Path(manifest["executables"][name]["path"]) for name in names
@@ -299,7 +293,6 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
         "scripts/check-required-checks.sh",
         "scripts/hermes-busdriver-deliver",
         "scripts/hermes-busdriver-relay-brief",
-        "scripts/opencode/run-opencode-busdriver-draft",
         "scripts/pi/run-pi-busdriver-draft",
     }
     assert set(manifest["production_entrypoints"]) == expected_production_entrypoints

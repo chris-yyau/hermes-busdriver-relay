@@ -22,18 +22,24 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--plugin-root", required=True)
-    ap.add_argument("--agent", required=True, choices=["pi", "opencode"])
+    ap.add_argument("--agent", required=True, choices=["pi"])
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi")
-    ap.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"), help="OpenCode executable for --agent opencode")
-    ap.add_argument("--opencode-agent", default=os.environ.get("OPENCODE_BD_AGENT", "build"), help="OpenCode agent for --agent opencode")
-    ap.add_argument("--opencode-model", default=os.environ.get("OPENCODE_BD_MODEL", ""), help="Optional OpenCode provider/model")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--keep-repo", action="store_true", help="Accepted for parser compatibility; production never creates a repository")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
-    result = {"schema": SCHEMA, "ok": False, "status": "blocked", "reason": BLOCKER}
+    result = {
+        "schema": SCHEMA,
+        "ok": False,
+        "status": "blocked",
+        "reason": BLOCKER,
+        "programmatic_dispatch_allowed": False,
+        "dispatch_allowed": False,
+        "mutation_allowed": False,
+        "finalization_allowed": False,
+    }
     print(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True))
     return 2
 

@@ -35,6 +35,7 @@ UNSAFE_BOOLEAN_KEYS = [
     "programmatic_execution_allowed",
     "marker_interop_allowed",
     "raw_codex_exec_allowed",
+    "non_pi_executor_enablement_allowed",
     "non_codex_agent_enablement_allowed",
     "capability_allowed",
     "repo_mutation_allowed",
@@ -119,7 +120,7 @@ def fake_user_config(path: Path) -> Path:
 
 def relay_config(path: Path, route: object) -> Path:
     path.write_text(json.dumps({
-        "coding_agent": "opencode",
+        "coding_agent": "pi",
         "avoid_coding_agent_for_review": True,
         "routes": {"relay.pr.backstop": route},
     }))
@@ -440,6 +441,7 @@ def test_readiness_handoff_includes_machine_readable_remaining_finalization_work
         "busdriver_marker_write",
         "gate_bypass",
         "raw_codex_exec",
+        "non_pi_executor_enablement",
         "non_codex_agent_enablement",
         "autonomous_git_github_mutation",
     }
@@ -612,7 +614,7 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
     user_config = fake_user_config(tmp_path / "busdriver.json")
     relay_cfg = tmp_path / "relay-config.json"
     relay_cfg.write_text(json.dumps({
-        "coding_agent": "codex",
+        "coding_agent": "pi",
         "avoid_coding_agent_for_review": False,
         "routes": {
             "relay.litmus.reviewer": ["codex"],
@@ -654,9 +656,9 @@ def test_readiness_handoff_includes_read_only_dual_review_status_envelope(tmp_pa
         assert entry["configured"] is True
         assert entry["selected_agent"] == "codex"
         assert entry["source"] == "relay_config"
-        assert entry["status"] == "degraded"
-        assert entry["degraded"] is True
-        assert phase0_roles["roles"][role]["dispatch_blocker"] == "independent_review_session_contract_unavailable"
+        assert entry["status"] == "configured_non_dispatchable_status_only"
+        assert entry["degraded"] is False
+        assert phase0_roles["roles"][role]["dispatch_blocker"] == "relay_role_dispatcher_unavailable"
         assert phase0_roles["roles"][role]["programmatic_dispatch_allowed"] is False
         assert entry["dispatch_allowed"] is False
         assert entry["mutation_allowed"] is False
@@ -1272,7 +1274,7 @@ def test_readiness_handoff_includes_optional_relay_role_resolution(tmp_path: Pat
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
     user_config = fake_user_config(tmp_path / "busdriver.json")
-    cfg = relay_config(tmp_path / "relay-config.json", ["opencode", "codex"])
+    cfg = relay_config(tmp_path / "relay-config.json", ["pi", "codex"])
     (repo / "work.txt").write_text("draft\n")
 
     cp, data = invoke(

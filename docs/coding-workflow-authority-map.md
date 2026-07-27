@@ -26,9 +26,9 @@ Workers produce draft evidence; Hermes routes and verifies evidence and may oper
 authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
-implementation.primary.current            = Codex metadata only; no production dispatcher; relay_role_dispatcher_unavailable
-implementation.secondary.current          = OpenCode + Go fallback draft-only metadata; production dispatch blocked by agent_containment_and_credential_broker_unavailable
-implementation.deferred.history           = Pi adapter harness/schema history retained; not current or preferred
+implementation.executor.current           = Pi only; route metadata; production dispatch blocked by agent_containment_and_credential_broker_unavailable
+implementation.fallback.current           = Codex coder metadata only; no production dispatcher; relay_role_dispatcher_unavailable
+implementation.non_executor.history       = OpenCode adapter proof retained for comparison only; never a current executor route
 review.pr_lead                            = Codex metadata; same-provider review requires a fresh independent-session contract
 review.backstop                           = Claude Code / Busdriver authority path
 read_only.fast_review                     = Grok
@@ -41,10 +41,11 @@ finalization.authority_path               = ClaudeCode / Busdriver
 Short form:
 
 ```text
-Codex is implementation-primary metadata and PR lead by user policy; no relay-role entry dispatches it.
-OpenCode + Go is secondary/fallback draft-only metadata; its contract is verified only in non-installed harnesses and production launch is blocked.
-Pi is deferred. Its explicit harness/adapter history remains useful evidence, but it is not the current, default, or preferred route.
-Codex PR-lead metadata does not prove review independence; with `avoid_coding_agent_for_review=true`, same-provider review remains non-dispatchable without a fresh independent-session contract.
+Pi is the sole executor route by user policy; production launch remains blocked until containment and credential brokering exist.
+Codex remains fallback coder metadata and PR lead; no relay-role entry dispatches it.
+OpenCode is non-executor historical/comparison evidence only and is absent from current implementation routes.
+Relay config cannot override `coding_agent=pi` or the fixed implementation-role metadata (`relay.impl.primary=pi`, `relay.impl.secondary=pi`, `relay.impl.fallback=codex`); any current route naming OpenCode is rejected.
+Codex PR-lead metadata remains non-dispatchable via `relay_role_dispatcher_unavailable`; review-independence degradation applies only when a review-sensitive role selects the current `coding_agent` (Pi) without a fresh independent-session contract.
 Grok/Gemini critique.
 Cursor is the human/manual editing surface.
 Hermes routes/verifies/delivers.
@@ -56,9 +57,9 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Codex lane    = implementation-primary and PR-lead metadata only; production relay-role dispatch is unavailable.
-OpenCode + Go lane = secondary/fallback draft-only metadata; adapter contract verified in non-installed harnesses; production dispatch is policy-blocked.
-Pi lane       = deferred adapter history, not a current route.
+Pi lane       = sole executor route metadata; production dispatch is policy-blocked.
+Codex lane    = fallback coder and PR-lead metadata only; production relay-role dispatch is unavailable.
+OpenCode lane = non-executor historical/comparison evidence only; no current implementation route.
 ```
 
 A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, wrapper, contract tests, and fake-adapter smoke prove the non-installed adapter contract; they do not prove production dispatch.
@@ -89,7 +90,7 @@ All non-authority workers should normalize to a minimum envelope like:
 ```json
 {
   "schema": "hermes-worker-result/v0",
-  "worker": "codex|pi|opencode|grok|gemini",
+  "worker": "codex|pi|grok|gemini",
   "mode": "mutating_draft|read_only_review|generic_draft",
   "ok": false,
   "status": "needs_busdriver_review",
@@ -115,9 +116,11 @@ All non-authority workers should normalize to a minimum envelope like:
 }
 ```
 
+OpenCode historical fixtures may retain legacy envelope evidence, but `worker=opencode` is invalid for the current production envelope and must never be paired with `mode=mutating_draft`.
+
 Hard rule: every non-authority worker result must keep all authority flags false.
 
-## Retained Pi adapter hardening history
+## Pi executor adapter hardening contract
 
 Pi's value is not that it can write code; Pi's value is that it can only write through the tool boundary we define.
 
@@ -201,9 +204,9 @@ record what was sent
 
 Long-context review is powerful but should not become a reason to dump whole repositories blindly.
 
-## OpenCode lane
+## OpenCode non-executor history
 
-OpenCode + Go is the secondary/fallback draft-only adapter contract proven in non-installed harnesses. Production dispatch is blocked by `agent_containment_and_credential_broker_unavailable`; no current route launches OpenCode or copies credentials. Commit/push/PR/merge/marker/deploy/release/publish flags remain false.
+OpenCode adapter proof is retained as historical/comparison evidence only. OpenCode is not an executor and no current implementation route selects or launches it. Commit/push/PR/merge/marker/deploy/release/publish flags remain false.
 
 ## Clockwork wording
 

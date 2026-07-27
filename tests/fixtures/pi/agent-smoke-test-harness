@@ -106,12 +106,19 @@ def main() -> int:
             except Exception:
                 draft = {"parse_error": True, "stdout": cp.stdout, "stderr": cp.stderr}
         status = run(["git", "status", "--short"], cwd=repo)
+        invalid_agent = f"argument --agent: invalid choice: {args.agent!r}"
+        failure_reason = (
+            "agent_not_supported_by_draft_policy"
+            if cp.returncode == 2 and invalid_agent in cp.stderr
+            else None
+        )
         result = {
             "schema": SCHEMA,
             "ok": cp.returncode == 0 and bool(draft.get("ok")),
             "repo": str(repo),
             "kept_repo": args.keep_repo,
             "agent_draft_returncode": cp.returncode,
+            "failure_reason": failure_reason,
             "summary": summarize_report(draft) if isinstance(draft, dict) else {},
             "git_status_after": status.stdout.splitlines(),
             "target": target,

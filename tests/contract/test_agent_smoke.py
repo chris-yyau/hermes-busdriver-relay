@@ -39,6 +39,21 @@ def test_production_agent_smoke_rejects_custom_wrapper(tmp_path: Path):
     assert "custom" in cp.stderr
 
 
+def test_production_agent_smoke_rejects_opencode_executor(tmp_path: Path):
+    plugin = fake_busdriver(tmp_path)
+    cp = subprocess.run(
+        [sys.executable, str(SMOKE), "--plugin-root", str(plugin), "--agent", "opencode"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 2
+    assert cp.stdout == ""
+    assert "invalid choice" in cp.stderr
+    assert "opencode" in cp.stderr
+
+
 def test_production_agent_smoke_blocks_before_ambient_git(tmp_path: Path):
     ambient_bin = tmp_path / "bin"
     ambient_bin.mkdir()
@@ -56,7 +71,15 @@ def test_production_agent_smoke_blocks_before_ambient_git(tmp_path: Path):
     )
 
     assert cp.returncode == 2
-    assert json.loads(cp.stdout)["reason"] == "agent_containment_and_credential_broker_unavailable"
+    data = json.loads(cp.stdout)
+    assert data["reason"] == "agent_containment_and_credential_broker_unavailable"
+    for key in (
+        "programmatic_dispatch_allowed",
+        "dispatch_allowed",
+        "mutation_allowed",
+        "finalization_allowed",
+    ):
+        assert data[key] is False
     assert not sentinel.exists()
 
 
@@ -87,7 +110,7 @@ def test_agent_smoke_help_renders_fixed_production_policy_blocker():
     assert "production never dispatches" in cp.stdout.lower()
 
 
-def test_agent_smoke_fixture_routes_opencode_to_test_launcher(tmp_path: Path):
+def test_agent_smoke_fixture_rejects_removed_opencode_executor(tmp_path: Path):
     plugin = fake_busdriver(tmp_path)
     cp = subprocess.run(
         [
@@ -107,7 +130,10 @@ def test_agent_smoke_fixture_routes_opencode_to_test_launcher(tmp_path: Path):
 
     assert cp.returncode == 2
     data = json.loads(cp.stdout)
-    assert data["summary"]["agent"] == "opencode"
+    assert data["agent_draft_returncode"] == 2
+    assert data["failure_reason"] == "agent_not_supported_by_draft_policy"
+    assert data["summary"]["agent"] is None
+    assert data["git_status_after"] == []
     assert data["target"] == "src/opencode_smoke.txt"
     assert data["target_content"] is None
 

@@ -27,6 +27,7 @@ AUTHORITY: dict[str, bool] = {
     "mutation_allowed": False,
     "finalization_allowed": False,
     "dispatch_allowed": False,
+    "programmatic_dispatch_allowed": False,
     "programmatic_execution_allowed": False,
 }
 
@@ -40,8 +41,8 @@ def build_plan() -> dict[str, Any]:
             "max_parallel": 1,
             "parallelizable": False,
             "requires_gate": True,
-            "selected_agent": "codex",
-            "current_agent": "codex",
+            "selected_agent": "pi",
+            "current_agent": "pi",
             "repo_mutation_allowed": False,
             "draft_mutation_scope": "would_use_agent_draft_gate_if_separately_dispatched",
             "finalization_allowed": False,
@@ -96,7 +97,7 @@ def build_plan() -> dict[str, Any]:
             "read_only_lanes_parallelizable": True,
             "main_hermes_role": "relay_router_verifier_delivery_mode_operator",
             "delivery_mode_required_for_finalization": True,
-            "summary": "Select Codex as implementation-primary metadata with parallel read-only review/status lanes; this helper does not dispatch work.",
+            "summary": "Select Pi as the sole executor route metadata with Codex fallback/PR-lead metadata and parallel read-only lanes; this helper does not dispatch work.",
         },
         "authority": dict(AUTHORITY),
         "lanes": lanes,

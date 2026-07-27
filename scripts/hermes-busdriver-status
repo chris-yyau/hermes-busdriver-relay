@@ -358,24 +358,23 @@ DEFAULT_ROLE_ROUTES = {
     "council.researcher": ["grok", "droid"],
 }
 
-DEFAULT_RELAY_CODING_AGENT = "codex"
-# Codex is implementation-primary metadata and PR lead, OpenCode is the
-# fallback/comparison draft-only candidate, Cursor is the manual IDE sidecar,
-# and Pi is deferred adapter history. No relay role has a production
-# dispatcher; route resolution is metadata only.
+DEFAULT_RELAY_CODING_AGENT = "pi"
+# Pi is the sole executor route metadata. Codex remains fallback coder metadata
+# and PR lead; OpenCode is retained only as non-executor historical evidence.
+# No relay role has a production dispatcher; route resolution is metadata only.
 DEFAULT_RELAY_AVOID_CODING_AGENT_FOR_REVIEW = True
 DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     "relay.impl.primary": {
-        "native_busdriver_role": "implementation primary draft worker",
-        "route": ["codex"],
+        "native_busdriver_role": "Pi sole executor route metadata",
+        "route": ["pi"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
-        "dispatch_blocker": "relay_role_dispatcher_unavailable",
+        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
     },
     "relay.impl.secondary": {
-        "native_busdriver_role": "implementation secondary draft worker",
-        "route": ["opencode"],
+        "native_busdriver_role": "Pi sole executor route metadata (secondary alias)",
+        "route": ["pi"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
@@ -383,11 +382,11 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
     },
     "relay.impl.fallback": {
         "native_busdriver_role": "implementation fallback draft worker",
-        "route": ["opencode"],
+        "route": ["codex"],
         "review_independence_sensitive": False,
         "programmatic_dispatch_allowed": False,
         "adapter_verified": False,
-        "dispatch_blocker": "agent_containment_and_credential_broker_unavailable",
+        "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
     "relay.review.fast": {
         "native_busdriver_role": "fast read-only reviewer",
@@ -502,6 +501,17 @@ DEFAULT_RELAY_EQUIVALENT_ROUTES = {
         "adapter_verified": False,
         "dispatch_blocker": "relay_role_dispatcher_unavailable",
     },
+}
+
+FIXED_RELAY_IMPLEMENTATION_ROUTES = {
+    "relay.impl.primary": ["pi"],
+    "relay.impl.secondary": ["pi"],
+    "relay.impl.fallback": ["codex"],
+}
+FIXED_RELAY_IMPLEMENTATION_ROUTE_ERRORS = {
+    "relay.impl.primary": "implementation_primary_must_be_pi",
+    "relay.impl.secondary": "implementation_secondary_must_be_pi",
+    "relay.impl.fallback": "implementation_fallback_must_be_codex_metadata",
 }
 
 MARKER_FILES = [
@@ -1127,6 +1137,8 @@ def relay_equivalent_roles(
     coding_agent_config_error = None
     if "coding_agent" in relay_cfg and (not isinstance(configured_coding_agent, str) or not configured_coding_agent):
         coding_agent_config_error = "coding_agent_must_be_non_empty_string"
+    elif "coding_agent" in relay_cfg and configured_coding_agent != DEFAULT_RELAY_CODING_AGENT:
+        coding_agent_config_error = "coding_agent_must_be_pi"
     coding_agent = configured_coding_agent if coding_agent_config_error is None and isinstance(configured_coding_agent, str) else DEFAULT_RELAY_CODING_AGENT
     configured_avoid = relay_cfg.get("avoid_coding_agent_for_review")
     avoid_config_error = None
@@ -1179,6 +1191,13 @@ def relay_equivalent_roles(
                 route = list(default_route)
         if not route and config_error is None:
             config_error = "empty_route"
+        if config_error is None and any(agent.strip().lower() == "opencode" for agent in route):
+            route = []
+            config_error = "opencode_not_allowed_in_current_relay_routes"
+        fixed_route = FIXED_RELAY_IMPLEMENTATION_ROUTES.get(role)
+        if config_error is None and fixed_route is not None and route != fixed_route:
+            route = []
+            config_error = FIXED_RELAY_IMPLEMENTATION_ROUTE_ERRORS[role]
         selected = next((agent for agent in route if not (avoid and review_sensitive) or agent != coding_agent), route[0] if route else None)
         same_as_coding_agent = selected == coding_agent
         independence_degraded = config_error is None and avoid and review_sensitive and same_as_coding_agent
@@ -1198,7 +1217,7 @@ def relay_equivalent_roles(
             "dispatch_blocker": dispatch_blocker,
             "degraded": bool(config_error) or independence_degraded,
             "config_error": config_error,
-            "configurable": True,
+            "configurable": role not in FIXED_RELAY_IMPLEMENTATION_ROUTES,
             "not_busdriver_native_claude_runtime": True,
             "finalization_allowed": False,
             "mutation_allowed": False,
@@ -1207,7 +1226,7 @@ def relay_equivalent_roles(
         "coding_agent": coding_agent,
         "coding_agent_source": "relay_config" if "coding_agent" in relay_cfg and coding_agent_config_error is None else "default",
         "coding_agent_config_error": coding_agent_config_error,
-        "role_policy": "codex_primary_opencode_fallback_pi_deferred",
+        "role_policy": "pi_only_executor_codex_fallback_opencode_non_executor",
         "review_independence_policy": "avoid_coding_agent_for_review_roles",
         "avoid_coding_agent_for_review": avoid,
         "avoid_coding_agent_for_review_source": "relay_config" if "avoid_coding_agent_for_review" in relay_cfg and avoid_config_error is None else "default",

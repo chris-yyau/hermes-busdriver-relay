@@ -36,7 +36,6 @@
     "ADRs/0004-draft-agent-launcher.md",
     "ADRs/0007-pi-tool-harness-adapter.md",
     "README.md",
-    "adapters/opencode/README.md",
     "adapters/pi/README.md",
     "docs/CURRENT_STATUS.md",
     "docs/coding-workflow-authority-map.md",
@@ -59,6 +58,7 @@
     "skills/busdriver-relay/references/relay-role-status-integration-lessons.md"
   ],
   "historical": [
+    "adapters/opencode/README.md",
     "docs/settling-checks-v1.md",
     "skills/busdriver-relay/references/adr0005-authority-source-status-lessons.md",
     "skills/busdriver-relay/references/agent-draft-readiness-evidence-lessons.md",

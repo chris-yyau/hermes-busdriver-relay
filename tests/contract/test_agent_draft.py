@@ -19,9 +19,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DRAFT = ROOT / "tests" / "fixtures" / "pi" / "agent-draft-test-harness"
 PRODUCTION_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
-PRODUCTION_OPENCODE = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
+OPENCODE_FIXTURE_SOURCE = ROOT / "tests" / "fixtures" / "opencode" / "run-opencode-busdriver-draft"
 OPENCODE = ROOT / "tests" / "fixtures" / "opencode" / "run-opencode-test-harness"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+
+
+def test_pi_artifact_authority_requires_exact_strict_false_contract():
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    authority = dict(ns["AUTHORITY_FALSE"])
+    validate = ns["pi_artifact_authority_valid"]
+
+    assert validate(authority) is True
+    assert validate({"commit_allowed": False}) is False
+    assert validate({**authority, "unexpected_allowed": False}) is False
+    assert validate({**authority, "commit_allowed": 0}) is False
+    assert validate(None) is False
 
 
 def sh(cmd, cwd=None, check=True, env=None):
@@ -137,48 +149,39 @@ def test_agent_command_resolves_default_pi_to_manifest_path(tmp_path: Path):
     assert hashlib.sha256(private_pi.read_bytes()).hexdigest() == ns["TRUSTED_EXECUTABLE_DIGESTS"]["pi"]
 
 
-def test_agent_command_resolves_default_opencode_to_manifest_path(tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    args = argparse.Namespace(
-        agent="opencode",
-        timeout=180,
-        repo=str(tmp_path),
-        opencode_bin="opencode",
-        opencode_agent="build",
-        opencode_model="",
-        scope_include=[],
-        scope_exclude=[],
+def test_production_agent_draft_rejects_opencode_executor(tmp_path: Path):
+    cp = subprocess.run(
+        [
+            sys.executable,
+            str(PRODUCTION_DRAFT),
+            "--plugin-root",
+            str(tmp_path / "plugin"),
+            "--repo",
+            str(tmp_path / "repo"),
+            "--agent",
+            "opencode",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
-    cmd = ns["agent_command"](args, tmp_path / "prompt.md", tmp_path / "run")
-
-    private_opencode = Path(cmd[cmd.index("--opencode-bin") + 1])
-    assert private_opencode != ns["TRUSTED_OPENCODE"]
-    assert stat.S_IMODE(private_opencode.stat().st_mode) == 0o500
-    assert hashlib.sha256(private_opencode.read_bytes()).hexdigest() == ns["TRUSTED_EXECUTABLE_DIGESTS"]["opencode"]
+    assert cp.returncode == 2
+    assert cp.stdout == ""
+    assert "invalid choice" in cp.stderr
+    assert "opencode" in cp.stderr
 
 
-def test_agent_command_rejects_untrusted_opencode_override(tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    args = argparse.Namespace(
-        agent="opencode",
-        timeout=180,
-        repo=str(tmp_path),
-        opencode_bin=str(tmp_path / "untrusted-opencode"),
-        opencode_agent="build",
-        opencode_model="",
-        scope_include=[],
-        scope_exclude=[],
-    )
+def test_opencode_fixture_is_historical_and_non_personal():
+    source = OPENCODE_FIXTURE_SOURCE.read_text()
+    harness = OPENCODE.read_text()
+    fixture_text = source + harness
 
-    try:
-        ns["agent_command"](args, tmp_path / "prompt.md", tmp_path / "run")
-    except SystemExit as exc:
-        data = json.loads(str(exc))
-    else:
-        raise AssertionError("untrusted OpenCode override was accepted")
-
-    assert data["error"] == "opencode_executable_override_rejected"
+    assert "Historical OpenCode draft parser fixture" in source
+    assert "macOS-specific historical evidence" in source
+    assert "/Users/" not in fixture_text
+    assert "PRODUCTION =" not in harness
+    assert "_production_ns" not in harness
 
 
 def run_opencode_adapter(
@@ -349,13 +352,13 @@ def environment_keys_read(tree: ast.Module) -> set[str]:
     return keys
 
 
-def test_production_opencode_wrapper_never_reads_binary_from_ambient_env_or_path():
+def test_opencode_fixture_wrapper_never_reads_binary_from_ambient_env_or_path():
     # v16-r25 MEDIUM-5: this wrapper mounts a private HOME holding a real
     # auth.json, so a PATH- or env-selected executable would run as arbitrary
     # code with live provider credentials. Neither source may name the launch
     # target, and there is no PATH fallback to regress back into. Asserted over
     # the AST so the docstring may keep naming the defect it closes.
-    tree = ast.parse(PRODUCTION_OPENCODE.read_text())
+    tree = ast.parse(OPENCODE_FIXTURE_SOURCE.read_text())
     called = {
         node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
         for node in ast.walk(tree)
@@ -378,7 +381,7 @@ def test_production_opencode_wrapper_never_reads_binary_from_ambient_env_or_path
 
 
 def test_trusted_opencode_executable_rejects_untrusted_and_retains_verified_bytes(monkeypatch, tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_OPENCODE))
+    ns = runpy.run_path(str(OPENCODE_FIXTURE_SOURCE))
     planted_dir = tmp_path / "planted-bin"
     planted_dir.mkdir()
     planted = planted_dir / "opencode"
@@ -425,7 +428,7 @@ def opencode_wrapper_main(ns: dict, monkeypatch, repo: Path, run_dir: Path, *ext
     monkeypatch.setenv("HERMES_AGENT_DRAFT_GUARD_BIN", str(guard_bin))
     monkeypatch.setenv("PATH", str(guard_bin) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setattr(sys, "argv", [
-        str(PRODUCTION_OPENCODE),
+        str(OPENCODE_FIXTURE_SOURCE),
         "--repo", str(repo),
         "--prompt-file", str(prompt_file),
         "--run-dir", str(run_dir),
@@ -434,11 +437,11 @@ def opencode_wrapper_main(ns: dict, monkeypatch, repo: Path, run_dir: Path, *ext
     return ns["main"]()
 
 
-def test_production_opencode_wrapper_ignores_ambient_opencode_bin_env(monkeypatch, capsys, tmp_path: Path):
+def test_opencode_fixture_wrapper_ignores_ambient_opencode_bin_env(monkeypatch, capsys, tmp_path: Path):
     repo = tmp_path / "repo-env-planted-opencode"
     repo.mkdir()
     init_repo(repo)
-    ns = runpy.run_path(str(PRODUCTION_OPENCODE))
+    ns = runpy.run_path(str(OPENCODE_FIXTURE_SOURCE))
     monkeypatch.setitem(ns["main"].__globals__, "production_dispatch_blocker", lambda: None)
     planted_dir = tmp_path / "planted-bin"
     planted_dir.mkdir()
@@ -466,11 +469,11 @@ def test_production_opencode_wrapper_ignores_ambient_opencode_bin_env(monkeypatc
     assert stat.S_IMODE(Path(launched[0]).stat().st_mode) == 0o500
 
 
-def test_production_opencode_wrapper_blocks_planted_binary_before_mounting_private_auth(monkeypatch, capsys, tmp_path: Path):
+def test_opencode_fixture_wrapper_blocks_planted_binary_before_mounting_private_auth(monkeypatch, capsys, tmp_path: Path):
     repo = tmp_path / "repo-planted-opencode"
     repo.mkdir()
     init_repo(repo)
-    ns = runpy.run_path(str(PRODUCTION_OPENCODE))
+    ns = runpy.run_path(str(OPENCODE_FIXTURE_SOURCE))
     monkeypatch.setitem(ns["main"].__globals__, "production_dispatch_blocker", lambda: None)
     planted_sentinel = tmp_path / "planted-ran"
     planted = tmp_path / "planted-opencode"
@@ -955,7 +958,7 @@ def test_opencode_wrapper_blocks_when_not_inside_agent_draft_guard(tmp_path: Pat
     assert (run_dir / "opencode-result.json").exists()
 
 
-def test_production_opencode_blocks_valid_guard_before_worker_launch(tmp_path: Path):
+def test_opencode_fixture_blocks_valid_guard_before_worker_launch(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -986,7 +989,7 @@ def test_production_opencode_blocks_valid_guard_before_worker_launch(tmp_path: P
     cp = subprocess.run(
         [
             sys.executable,
-            str(PRODUCTION_OPENCODE),
+            str(OPENCODE_FIXTURE_SOURCE),
             "--repo", str(repo),
             "--prompt-file", str(prompt),
             "--run-dir", str(run_dir),
@@ -1365,12 +1368,8 @@ def test_production_agent_draft_blocks_before_opencode_executable_dispatch(tmp_p
     )
 
     assert cp.returncode == 2
-    data = json.loads(cp.stdout)
-    assert data["status"] == "blocked"
-    assert data["agent"] == "opencode"
-    assert data["reason"] == "agent_containment_and_credential_broker_unavailable"
-    assert data["blockers"] == ["agent_containment_and_credential_broker_unavailable"]
-    assert "preflight" not in data
+    assert cp.stdout == ""
+    assert "invalid choice: 'opencode'" in cp.stderr
     assert not sentinel.exists()
     assert not state.exists()
     assert sh(["git", "status", "--short"], cwd=repo).stdout == ""
@@ -1393,7 +1392,7 @@ def test_production_agent_draft_defaults_to_non_dispatch_noop(tmp_path: Path):
     assert json.loads(cp.stdout)["agent"] == "noop"
 
 
-@pytest.mark.parametrize("agent", ["pi", "opencode"])
+@pytest.mark.parametrize("agent", ["pi"])
 def test_production_agent_draft_policy_blocker_precedes_repo_home_and_state_access(tmp_path: Path, agent: str):
     repo = tmp_path / "repo-must-not-be-read"
     plugin = tmp_path / "plugin-must-not-be-read"
@@ -1716,7 +1715,7 @@ def test_frozen_timestamp_concurrent_run_directories_are_unique_and_exclusive(mo
 # --- v16-r21: opencode git helper structured OSError fail-closed ---
 
 def test_opencode_git_output_raises_structured_error_on_launch_oserror(tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_OPENCODE))
+    ns = runpy.run_path(str(OPENCODE_FIXTURE_SOURCE))
     not_a_dir = tmp_path / "file.txt"
     not_a_dir.write_text("x\n")
 
@@ -1737,7 +1736,7 @@ def test_opencode_repo_pointing_at_a_file_fails_closed_without_traceback(tmp_pat
     cp = subprocess.run(
         [
             sys.executable,
-            str(PRODUCTION_OPENCODE),
+            str(OPENCODE_FIXTURE_SOURCE),
             "--repo",
             str(not_a_dir),
             "--prompt-file",

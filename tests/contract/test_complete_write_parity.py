@@ -95,7 +95,7 @@ def test_the_derivation_finds_every_copy_of_the_loop():
     parametrized cases and pass, which is the shape of every vacuous enumeration this file exists to
     replace. The floor is the count when this was written; a new loop is fine, being SKIPPED is not.
     """
-    assert len(COMPLETE_WRITE_LOOPS) >= 16, COMPLETE_WRITE_LOOPS
+    assert len(COMPLETE_WRITE_LOOPS) >= 15, COMPLETE_WRITE_LOOPS
     for expected in (
         ("scripts/hermes-busdriver-deliver", "write_private_authenticated"),
         ("scripts/hermes-busdriver-deliver", "write_artifact_bytes"),
@@ -127,9 +127,16 @@ def test_no_authenticated_copy_loop_can_spin_on_a_zero_write(module_path: str, f
 
 
 ZERO_WRITE_CALLABLE = [
-    ("scripts/opencode/run-opencode-busdriver-draft", "write_private_file"),
     ("scripts/hermes-busdriver-gate", "write_baseline_file"),
+    ("tests/fixtures/opencode/run-opencode-busdriver-draft", "write_private_file"),
 ]
+
+
+def test_retained_historical_opencode_write_keeps_zero_write_coverage():
+    assert (
+        "tests/fixtures/opencode/run-opencode-busdriver-draft",
+        "write_private_file",
+    ) in ZERO_WRITE_CALLABLE
 
 
 @pytest.mark.parametrize("module_path,func_name", ZERO_WRITE_CALLABLE)

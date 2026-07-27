@@ -555,10 +555,6 @@ def test_every_file_carrying_the_contract_is_discovered():
         "hermes-busdriver-relay-brief",
         "hermes-busdriver-agent-draft",
         "run-pi-busdriver-draft",
-        # v16-r34c: this one was found by the sweep, not by the handoff list. It ran
-        # `run_bounded(["git", *args])` — a bare name with no env at all, so the ambient PATH chose
-        # the binary that inspected the worker's repository, and /opt/homebrew/bin is on it.
-        "run-opencode-busdriver-draft",
         "busdriver-fs-broker.py",
         *_PYTHON_ONLY_EQUIVALENT,
     } <= found, f"a git/gh consumer lost the contract: {found}"

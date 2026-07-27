@@ -36,12 +36,14 @@ def test_readme_contents_cover_every_manifested_production_entrypoint():
 
 def test_current_status_names_security_closure_artifacts_explicitly():
     text = CURRENT_STATUS.read_text()
+    assert "PR #168's final exact pre-merge candidate completed `4042 passed, 13 skipped`" in text
+    assert "affected focused closure completed `1206 passed`" in text
     required = {
         "config/trusted-runtime-manifest.json",
         "adapters/pi/busdriver-fs-broker.py",
         "adapters/pi/busdriver-tools.ts",
         "scripts/check-required-checks.sh",
-        "scripts/opencode/run-opencode-busdriver-draft",
+        "tests/fixtures/opencode/run-opencode-busdriver-draft",
         "tests/contract/test_required_checks.py",
         "tests/contract/test_trusted_runtime_manifest.py",
         "tests/contract/test_trusted_root_owned_execution.py",

@@ -77,7 +77,7 @@ def test_the_enumeration_finds_every_copy_of_the_primitive():
     The floor is the count at the time this was written. It is a floor and not an equality because
     a new bounded runner is a fine thing to add — being SKIPPED by this file is not.
     """
-    assert len(BOUNDED_CAPTURE_MODULES) >= 15, BOUNDED_CAPTURE_MODULES
+    assert len(BOUNDED_CAPTURE_MODULES) >= 14, BOUNDED_CAPTURE_MODULES
     assert "scripts/hermes-busdriver-deliver" in BOUNDED_CAPTURE_MODULES
 
 

@@ -6,7 +6,7 @@
 
 ## Current production truth
 
-`scripts/hermes-busdriver-agent-draft` is a fail-closed production launcher/parser surface. For Pi and OpenCode it returns, before worker, repository, HOME, or credential handling:
+`scripts/hermes-busdriver-agent-draft` is a fail-closed production launcher/parser surface. Pi is its sole current executor route and OpenCode is rejected during parser validation. A Pi probe returns, before worker, repository, HOME, or credential handling:
 
 ```text
 agent_containment_and_credential_broker_unavailable

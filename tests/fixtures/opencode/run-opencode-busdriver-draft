@@ -1,9 +1,10 @@
 #!/usr/bin/python3
-"""Production OpenCode draft parser with fail-closed dispatch.
+"""Historical OpenCode draft parser fixture with fail-closed dispatch.
 
-Production dispatch remains blocked until OS containment and parent-held
-credential brokering exist. A non-installed runpy harness exercises the
-adapter schema/scope implementation without exposing a CLI or env bypass.
+This macOS-specific historical evidence is test-only: OpenCode is no longer a
+Relay executor route. Dispatch remains blocked; a non-installed runpy harness
+exercises the adapter schema/scope implementation without exposing a production
+CLI or environment bypass.
 """
 from __future__ import annotations
 
@@ -339,7 +340,7 @@ TRUSTED_EXECUTABLE_DIGESTS = {
 TRUSTED_EXECUTABLE_SOURCES = {
     "git": Path("/usr/bin/git"),
 }
-TRUSTED_OPENCODE = Path("/Users/vfrvndtt/.opencode/bin/opencode").resolve()
+TRUSTED_OPENCODE = Path("/nonexistent/historical-opencode-fixture/opencode")
 TRUSTED_OPENCODE_SHA256 = "43f7083d450567706a80b6441331a25b5ed6d6c9f742826790545b068229cbb2"
 # The most this wrapper will hold of the opencode anchor. The real binary is ~131 MB, so this is
 # generous on purpose: the point is not to guess the size, it is that the NUMBER stops being the
@@ -1274,7 +1275,7 @@ def main() -> int:
         epilog=(
             "policy_blocked\n"
             "agent_containment_and_credential_broker_unavailable\n"
-            "Production is blocked and exits nonzero before dispatch; no agent process is launched."
+            "Historical fixture dispatch is blocked and exits nonzero; no agent process is launched."
         ),
     )
     parser.add_argument("--repo", required=True)
