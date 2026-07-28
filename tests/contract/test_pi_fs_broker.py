@@ -1074,7 +1074,10 @@ def test_the_hostile_filter_fixture_fires_against_an_unpinned_git(
     for cmd in (["git", "add", ".gitattributes"], ["git", "commit", "-qm", "attributes"]):
         subprocess.run(cmd, cwd=repo, env=git_test_env(), check=True, capture_output=True)
     hostile_git_config(repo, "filter.pwn.clean", sentinel_program)
-    (repo / "src" / "app.txt").write_text("drafted-to-force-filter\n")
+    replacement = "world\n"
+    target = repo / "src" / "app.txt"
+    assert len(replacement.encode()) == target.stat().st_size
+    target.write_text(replacement)
     ns = runpy.run_path(str(BROKER))
 
     subprocess.run(

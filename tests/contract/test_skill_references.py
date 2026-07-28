@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "busdriver-relay" / "SKILL.md"
+DOC_POLICY_INVENTORY = ROOT / "config" / "doc-policy-inventory.json"
 REFERENCE_DIR = ROOT / "skills" / "busdriver-relay" / "references"
 REFERENCE = REFERENCE_DIR / "june-2026-pr-reviewer-quality-evaluation.md"
 CONTINUATION_REFERENCE = REFERENCE_DIR / "continuation-subagent-dispatch-lessons.md"
@@ -80,6 +82,13 @@ PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
 LOCK_CLI_USAGE_PITFALLS_REFERENCE = REFERENCE_DIR / "lock-cli-usage-pitfalls.md"
 OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE = REFERENCE_DIR / "opencode-fallback-proof-audit-lessons.md"
 GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE = REFERENCE_DIR / "gated-finalization-executor-opencode-lessons.md"
+EXECUTOR_RETIREMENT_POLICY_REFERENCE = (
+    REFERENCE_DIR / "executor-retirement-and-policy-convergence.md"
+)
+EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE = (
+    REFERENCE_DIR / "executor-retirement-pr-grind-lessons.md"
+)
+
 END_TO_END_PR_GRIND_REDACTION_REFERENCE = (
     REFERENCE_DIR / "end-to-end-pr-grind-and-redaction-lessons.md"
 )
@@ -98,6 +107,143 @@ def test_all_skill_references_end_with_terminal_newline():
     ]
 
     assert missing_terminal_newline == []
+
+
+def test_executor_retirement_and_review_surface_lessons_are_durable():
+    skill_text = SKILL.read_text()
+    expected_references = {
+        EXECUTOR_RETIREMENT_POLICY_REFERENCE: "Retire all four surfaces",
+        EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE: "Validate aggregate/list paths independently",
+    }
+
+    for reference, expected_text in expected_references.items():
+        assert reference.exists()
+        reference_text = reference.read_text()
+        skill_reference = reference.relative_to(SKILL.parent).as_posix()
+        assert f"`{skill_reference}`" in skill_text
+        assert expected_text in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
+
+    assert "removing a production route, relocating historical code to fixtures" in skill_text
+
+    policy_text = EXECUTOR_RETIREMENT_POLICY_REFERENCE.read_text()
+    assert "Workflow entry point: start with this guide" in policy_text
+    assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in policy_text
+    assert (
+        "Pi is the sole executor route; Codex is fallback-coder/PR-lead metadata only; "
+        "OpenCode is non-executor history"
+    ) in policy_text
+    assert (
+        "all relay dispatch/finalization authority remains false; "
+        "the production dispatch blocker is fixed"
+    ) in policy_text
+    assert "Follow `executor-retirement-pr-grind-lessons.md`" in policy_text
+    assert "git diff origin/main" not in policy_text
+    assert (
+        "verify the merged main tree, squash equivalence, and post-merge checks "
+        "before updating live consumers"
+    ) in policy_text
+    assert policy_text.index("verify the merged main tree") < policy_text.index(
+        "converge live relay config"
+    )
+
+    pr_grind_text = EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE.read_text()
+    assert "Closing phase: enter this guide only after" in pr_grind_text
+    assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in pr_grind_text
+    assert "Audit attributes and clean/process filters before staging or status" in pr_grind_text
+    assert pr_grind_text.index("Audit attributes and clean/process filters") < pr_grind_text.index(
+        "stage every intended new path"
+    )
+    assert "filter.<name>.clean" in pr_grind_text
+    assert "filter.<name>.process" in pr_grind_text
+    assert "reject every `.gitattributes` or `info/attributes` file" in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf "
+        "-c core.attributesFile=/dev/null add --"
+    ) in pr_grind_text
+    assert "stage every intended new path" in pr_grind_text
+    assert (
+        "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main"
+    ) in pr_grind_text
+    assert "git -c core.fsmonitor=false ls-files -v" in pr_grind_text
+    assert "reject every assume-unchanged or skip-worktree entry" in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
+        "--porcelain=v1 --untracked-files=all --ignore-submodules=none"
+    ) in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
+        "--porcelain=v1 --ignored=matching --untracked-files=all --ignore-submodules=none"
+    ) in pr_grind_text
+    assert "block every tracked index/worktree divergence" in pr_grind_text
+    assert "block every ignored path before testing" in pr_grind_text
+    assert "tests execute the same tracked bytes that will be committed" in pr_grind_text
+    assert (
+        "fail closed on `.gitattributes`, `$GIT_DIR/info/attributes`, or configured diff drivers"
+    ) in pr_grind_text
+    assert "git merge-base --is-ancestor origin/main HEAD" in pr_grind_text
+    assert "git rev-parse origin/main" in pr_grind_text
+    freeze_lines = [
+        line
+        for line in pr_grind_text.splitlines()
+        if "diff --cached" in line
+    ]
+    assert len(freeze_lines) == 1
+    freeze_line = freeze_lines[0]
+    for required_flag in (
+        "--cached",
+        "--binary",
+        "--no-color",
+        "--full-index",
+        "--no-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=3",
+        "--no-ext-diff",
+        "--no-textconv",
+    ):
+        assert required_flag in freeze_line
+    assert "diff.algorithm=myers" in freeze_line
+    assert "core.fsmonitor=false" in freeze_line
+    assert "diff.relative=false" in freeze_line
+    assert "core.attributesFile=/dev/null" in freeze_line
+    assert "--no-indent-heuristic" in freeze_line
+    assert "--submodule=short" in freeze_line
+    assert "run from the repository root" in pr_grind_text
+    assert "root-scoped, `diff.relative=false` staged path inventory" in pr_grind_text
+    assert "secret/private-path scan" in pr_grind_text
+    assert "justify `--binary`" in pr_grind_text
+    assert "every `GIT binary patch` path" in pr_grind_text
+    assert "literal or delta" in pr_grind_text
+    assert "After every head change, return to step 8" in pr_grind_text
+    assert "re-freeze the exact candidate" in pr_grind_text
+    assert "regenerate the immutable review artifact" in pr_grind_text
+    assert (
+        "Inspect unresolved threads, inline comments, issue comments, and full "
+        "aggregate review bodies independently."
+    ) in pr_grind_text
+    assert (
+        "An actionable outside-diff finding may exist only in a body attached "
+        "to an older head commit"
+    ) in pr_grind_text
+    assert "body-only finding ledger" in pr_grind_text
+    assert "A later green reviewer check and zero unresolved threads do not prove closure" in pr_grind_text
+    assert "Do not treat a helper/check clean result as sufficient" in pr_grind_text
+    assert "follow step 8 of `executor-retirement-and-policy-convergence.md`" in pr_grind_text
+    for postmerge_owner_phrase in (
+        "converge live relay config",
+        "the installed skill copy",
+    ):
+        assert postmerge_owner_phrase in policy_text
+        assert postmerge_owner_phrase not in pr_grind_text
+
+    inventory = json.loads(DOC_POLICY_INVENTORY.read_text())
+    expected_inventory_paths = {
+        reference.relative_to(ROOT).as_posix()
+        for reference in expected_references
+    }
+    assert expected_inventory_paths <= set(inventory["current_reference"])
 
 
 def test_dependabot_recreate_pr_grind_lessons_are_durable():
