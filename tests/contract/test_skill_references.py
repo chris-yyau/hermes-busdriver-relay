@@ -160,7 +160,11 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "reject every `.gitattributes` or `info/attributes` file" in pr_grind_text
     assert "git -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null add --" in pr_grind_text
     assert "stage every intended new path" in pr_grind_text
-    assert "git fetch --no-tags origin main" in pr_grind_text
+    assert (
+        "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main"
+    ) in pr_grind_text
+    assert "git ls-files -v" in pr_grind_text
+    assert "reject every assume-unchanged or skip-worktree entry" in pr_grind_text
     assert (
         "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
         "--porcelain=v1 --untracked-files=all --ignore-submodules=none"
@@ -206,7 +210,8 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "root-scoped, `diff.relative=false` staged path inventory" in pr_grind_text
     assert "secret/private-path scan" in pr_grind_text
     assert "justify `--binary`" in pr_grind_text
-    assert "binary literal chunks" in pr_grind_text
+    assert "every `GIT binary patch` path" in pr_grind_text
+    assert "literal or delta" in pr_grind_text
     assert "Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks" in pr_grind_text
     assert "full aggregate review bodies" in pr_grind_text
     assert "older head commit" in pr_grind_text
