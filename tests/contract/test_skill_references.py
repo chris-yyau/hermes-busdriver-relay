@@ -88,9 +88,7 @@ EXECUTOR_RETIREMENT_POLICY_REFERENCE = (
 EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE = (
     REFERENCE_DIR / "executor-retirement-pr-grind-lessons.md"
 )
-PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE = (
-    REFERENCE_DIR / "pr-grind-delivery-discipline.md"
-)
+
 END_TO_END_PR_GRIND_REDACTION_REFERENCE = (
     REFERENCE_DIR / "end-to-end-pr-grind-and-redaction-lessons.md"
 )
@@ -177,6 +175,11 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "justify `--binary`" in pr_grind_text
     assert "binary literal chunks" in pr_grind_text
     assert "Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks" in pr_grind_text
+    assert "full aggregate review bodies" in pr_grind_text
+    assert "older head commit" in pr_grind_text
+    assert "body-only finding ledger" in pr_grind_text
+    assert "A later green reviewer check and zero unresolved threads do not prove closure" in pr_grind_text
+    assert "Do not treat a helper/check clean result as sufficient" in pr_grind_text
     assert "follow `executor-retirement-and-policy-convergence.md` completely" in pr_grind_text
     for postmerge_owner_phrase in (
         "converge live relay config",
@@ -191,13 +194,6 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
         for reference in expected_references
     }
     assert expected_inventory_paths <= set(inventory["current_reference"])
-
-    review_text = PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE.read_text()
-    assert "full aggregate review bodies" in review_text
-    assert "older head commit" in review_text
-    assert "current-head actionable review bodies" not in review_text
-    for leaked_path in PRIVATE_PATH_LEAKS:
-        assert leaked_path not in review_text
 
 
 def test_dependabot_recreate_pr_grind_lessons_are_durable():

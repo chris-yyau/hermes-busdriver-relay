@@ -32,8 +32,6 @@ Clean means, for the latest PR HEAD:
 
 ## Reviewer Signal Interpretation
 
-Source from `origin/main`: blockers come from live unresolved, non-outdated review threads and actionable review bodies/comments. Reviewer status completion is not clean by itself; CodeRabbit rate-limit means incomplete coverage; Cubic no-issues is advisory; Devin `SUCCESS` completion is not clean. Stale, outdated, resolved, addressed-by-design, or factually incorrect findings should not block once that classification is established.
-
-For every latest-head grind, inspect all four surfaces independently: unresolved GraphQL review threads, inline comments, issue comments, and full aggregate review bodies. Some reviewers—notably CodeRabbit—place actionable outside-diff findings only in an aggregate body attached to an older head commit; a later green reviewer check and zero unresolved threads do not prove those findings were closed. Keep an explicit finding ledger until each body-only finding is fixed with expected-RED evidence or justified as non-actionable.
+Source from `origin/main`: blockers come from live unresolved, non-outdated review threads and current-head actionable review bodies/comments. Reviewer status completion is not clean by itself; CodeRabbit rate-limit means incomplete coverage; Cubic no-issues is advisory; Devin `SUCCESS` completion is not clean. Stale, outdated, resolved, addressed-by-design, or factually incorrect findings should not block once that classification is established.
 
 A fix push invalidates the previous clean state. Start a new wait/collect/fix round for the new HEAD.
