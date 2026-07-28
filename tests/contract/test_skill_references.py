@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -120,7 +121,8 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     for reference, expected_text in expected_references.items():
         assert reference.exists()
         reference_text = reference.read_text()
-        assert reference.name in skill_text
+        skill_reference = reference.relative_to(SKILL.parent).as_posix()
+        assert f"`{skill_reference}`" in skill_text
         assert expected_text in reference_text
         for leaked_path in PRIVATE_PATH_LEAKS:
             assert leaked_path not in reference_text
@@ -183,10 +185,12 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
         assert postmerge_owner_phrase in policy_text
         assert postmerge_owner_phrase not in pr_grind_text
 
-    inventory_text = DOC_POLICY_INVENTORY.read_text()
-    for reference in expected_references:
-        relative_reference = reference.relative_to(ROOT).as_posix()
-        assert f'"{relative_reference}"' in inventory_text
+    inventory = json.loads(DOC_POLICY_INVENTORY.read_text())
+    expected_inventory_paths = {
+        reference.relative_to(ROOT).as_posix()
+        for reference in expected_references
+    }
+    assert expected_inventory_paths <= set(inventory["current_reference"])
 
     review_text = PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE.read_text()
     assert "full aggregate review bodies" in review_text
