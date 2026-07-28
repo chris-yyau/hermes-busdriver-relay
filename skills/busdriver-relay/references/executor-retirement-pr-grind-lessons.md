@@ -4,6 +4,8 @@ Use this when removing a production executor or fixing role/authority policy acr
 
 Current authority: `coding-workflow-authority-map-v0.1.md`. This procedural guide must not override that policy map.
 
+Closing phase: enter this guide only after steps 1–6 in `executor-retirement-and-policy-convergence.md` pass; return there for postmerge convergence after PR grind.
+
 ## Closure order
 
 1. **Inventory every surface before editing.** Search production parsers, wrappers, manifests, consumer pins, status/brief envelopes, role resolvers, current-reference docs/ADRs, copied examples, and historical fixtures. A retired executor may remain only where the policy explicitly permits historical test evidence.
@@ -13,8 +15,11 @@ Current authority: `coding-workflow-authority-map-v0.1.md`. This procedural guid
 5. **Name current policy directly.** When policy changes from “non-Codex” to “Pi-only,” add a `non_pi_*_allowed=false` invariant. Retain the old field only for schema compatibility, and teach every recursive authority validator that the new field is unsafe if true.
 6. **Treat current docs as executable policy.** Include current-reference ADRs, active skill text, synchronized authority-map copies, copied config examples, and worker-envelope enums in semantic negative tests. Historical OpenCode prose must be past-tense or fixture-qualified; it cannot appear as a current lane, worker enum, digest-convergence item, or mutating mode.
 7. **Close runtime-byte changes before PR grind.** For fixed-point resealing and downstream manifest validation, follow `executor-retirement-and-policy-convergence.md`; PR grind starts only after that closure passes.
-8. **Freeze the exact candidate.** Before freezing, stage every intended new path and require `git status --porcelain` to show no unexpected untracked files; then review `git diff origin/main --binary --no-ext-diff` so staged renames and tracked unstaged changes are both included. Record hash and line count, run immutable review against that exact file, then verify the live diff still hashes identically before commit.
-9. **Restart the PR grind after every head change.** Re-run the full suite, focused closure, static scan, readiness, immutable review, required checks, unresolved-thread query, and mergeability check. A prior green bot/check result is stale after force-push. Resolve a thread only after the fix is pushed and replied to.
+8. **Freeze the exact candidate.**
+   - Refresh the base with `git fetch --no-tags origin main`, then stage every intended new path. Read and record the entire two-column output of `git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all`: block on unexpected paths or unstaged tracked modifications, and record every deliberate index/worktree divergence. Require `git merge-base --is-ancestor origin/main HEAD` to pass; otherwise rebase before freezing. Record the base SHA from `git rev-parse origin/main` beside the candidate hash.
+   - Freeze the staged candidate with `git --no-pager -c diff.algorithm=myers diff --cached origin/main --binary --no-color --full-index --no-renames --src-prefix=a/ --dst-prefix=b/ --unified=3 --no-ext-diff --no-textconv`. This reads indexed blobs instead of invoking worktree clean filters, pins deterministic format choices, and disables external diff/textconv helpers.
+   - Record hash and line count. Run a secret/private-path scan on the frozen bytes before any external handoff; when binary files are in scope, justify `--binary` and inspect every path represented by binary literal chunks out-of-band, recording the result, or exclude those binaries for separate delivery. Run immutable review against that exact file, then verify the live staged diff still hashes identically before commit.
+9. **Restart the PR grind after every head change.** Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks; then re-run the full suite, focused closure, static scan, readiness, immutable review, required checks, unresolved-thread query, and mergeability check. A prior green bot/check result is stale after force-push. Resolve a thread only after the fix is pushed and replied to.
 10. **Verify before cleanup.** After merge, follow `executor-retirement-and-policy-convergence.md` completely; only then remove worktree and topic branches.
 
 ## Pitfalls

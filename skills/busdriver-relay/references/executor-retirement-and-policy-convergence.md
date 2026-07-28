@@ -4,6 +4,8 @@ Use this when a relay policy removes one production executor but keeps another, 
 
 Current authority: `coding-workflow-authority-map-v0.1.md`. This procedural guide must not override that policy map.
 
+Workflow entry point: start with this guide for policy, inventory, reseal, and postmerge convergence; use `executor-retirement-pr-grind-lessons.md` only for the closing review/delivery phase.
+
 ## Policy tuple first
 
 Write one current-policy tuple before editing:

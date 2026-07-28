@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = ROOT / "skills" / "busdriver-relay" / "SKILL.md"
+DOC_POLICY_INVENTORY = ROOT / "config" / "doc-policy-inventory.json"
 REFERENCE_DIR = ROOT / "skills" / "busdriver-relay" / "references"
 REFERENCE = REFERENCE_DIR / "june-2026-pr-reviewer-quality-evaluation.md"
 CONTINUATION_REFERENCE = REFERENCE_DIR / "continuation-subagent-dispatch-lessons.md"
@@ -127,6 +128,7 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "removing a production route, relocating historical code to fixtures" in skill_text
 
     policy_text = EXECUTOR_RETIREMENT_POLICY_REFERENCE.read_text()
+    assert "Workflow entry point: start with this guide" in policy_text
     assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in policy_text
     assert (
         "Pi is the sole executor route; Codex is fallback-coder/PR-lead metadata only; "
@@ -140,11 +142,51 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "git diff origin/main" not in policy_text
 
     pr_grind_text = EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE.read_text()
+    assert "Closing phase: enter this guide only after" in pr_grind_text
     assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in pr_grind_text
     assert "stage every intended new path" in pr_grind_text
-    assert "git status --porcelain" in pr_grind_text
-    assert "follow `executor-retirement-and-policy-convergence.md`" in pr_grind_text
-    assert "live-config/installed-skill convergence" not in pr_grind_text
+    assert "git fetch --no-tags origin main" in pr_grind_text
+    assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in pr_grind_text
+    assert "record every deliberate index/worktree divergence" in pr_grind_text
+    assert "git merge-base --is-ancestor origin/main HEAD" in pr_grind_text
+    assert "git rev-parse origin/main" in pr_grind_text
+    freeze_lines = [
+        line
+        for line in pr_grind_text.splitlines()
+        if "diff --cached" in line
+    ]
+    assert len(freeze_lines) == 1
+    freeze_line = freeze_lines[0]
+    for required_flag in (
+        "--cached",
+        "--binary",
+        "--no-color",
+        "--full-index",
+        "--no-renames",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--unified=3",
+        "--no-ext-diff",
+        "--no-textconv",
+    ):
+        assert required_flag in freeze_line
+    assert "diff.algorithm=myers" in freeze_line
+    assert "secret/private-path scan" in pr_grind_text
+    assert "justify `--binary`" in pr_grind_text
+    assert "binary literal chunks" in pr_grind_text
+    assert "Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks" in pr_grind_text
+    assert "follow `executor-retirement-and-policy-convergence.md` completely" in pr_grind_text
+    for postmerge_owner_phrase in (
+        "converge live relay config",
+        "the installed skill copy",
+    ):
+        assert postmerge_owner_phrase in policy_text
+        assert postmerge_owner_phrase not in pr_grind_text
+
+    inventory_text = DOC_POLICY_INVENTORY.read_text()
+    for reference in expected_references:
+        relative_reference = reference.relative_to(ROOT).as_posix()
+        assert f'"{relative_reference}"' in inventory_text
 
     review_text = PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE.read_text()
     assert "full aggregate review bodies" in review_text
