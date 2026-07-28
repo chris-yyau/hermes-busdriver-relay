@@ -151,12 +151,21 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     pr_grind_text = EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE.read_text()
     assert "Closing phase: enter this guide only after" in pr_grind_text
     assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in pr_grind_text
+    assert "Audit attributes and clean/process filters before staging or status" in pr_grind_text
+    assert pr_grind_text.index("Audit attributes and clean/process filters") < pr_grind_text.index(
+        "stage every intended new path"
+    )
+    assert "filter.<name>.clean" in pr_grind_text
+    assert "filter.<name>.process" in pr_grind_text
     assert "stage every intended new path" in pr_grind_text
     assert "git fetch --no-tags origin main" in pr_grind_text
-    assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in pr_grind_text
     assert (
-        "git -c core.fsmonitor=false status --porcelain=v1 --ignored=matching "
-        "--untracked-files=all"
+        "git -c core.fsmonitor=false -c core.attributesFile=/dev/null status "
+        "--porcelain=v1 --untracked-files=all --ignore-submodules=none"
+    ) in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false -c core.attributesFile=/dev/null status "
+        "--porcelain=v1 --ignored=matching --untracked-files=all --ignore-submodules=none"
     ) in pr_grind_text
     assert "block every tracked index/worktree divergence" in pr_grind_text
     assert "block every ignored path before testing" in pr_grind_text
