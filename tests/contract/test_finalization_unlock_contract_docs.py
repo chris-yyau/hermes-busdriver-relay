@@ -749,12 +749,26 @@ def test_all_active_agent_policy_docs_are_blocked_and_semantically_consistent():
 def test_docs_distinguish_observed_plugin_version_from_trust_manifest_version():
     manifest = json.loads((ROOT / "config" / "trusted-runtime-manifest.json").read_text())
     pinned = manifest["busdriver"]["version"]
+    pinned_commit = manifest["busdriver"]["commit"]
     status_text = CURRENT_STATUS.read_text()
     readme_text = README.read_text()
 
-    # The smoke observation and the reviewed trust pin are different facts; a doc that names
-    # only one of them reads as if the manifest tracked the installed plugin.
-    assert "1.91.2" in status_text
+    # The live observation and the reviewed trust pin are different facts; a doc that names
+    # only one of them reads as if the manifest tracked the installed plugin. Keep the
+    # observation shape durable without pinning a once-observed marketplace version forever.
+    observed = re.search(
+        r"Last observed installed Busdriver marketplace plugin: version `(\d+\.\d+\.\d+)`, "
+        r"commit `([0-9a-f]{40})`",
+        status_text,
+    )
+    assert observed
+    pinned_claim = re.search(
+        r"The reviewed repository `trusted-runtime-manifest` separately pins Busdriver "
+        r"package version `([^`]+)` and commit `([0-9a-f]{40})`",
+        status_text,
+    )
+    assert pinned_claim
+    assert pinned_claim.groups() == (pinned, pinned_commit)
     assert pinned in status_text
     assert "trust-manifest" in status_text or "trusted-runtime-manifest" in status_text
     assert pinned in readme_text
