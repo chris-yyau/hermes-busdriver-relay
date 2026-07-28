@@ -24,7 +24,7 @@ Closing phase: enter this guide only after steps 1–6 in `executor-retirement-a
    - Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks; then re-run the full suite, focused closure, static scan, readiness, immutable review, required checks, unresolved-thread query, and mergeability check.
    - Inspect unresolved threads, inline comments, issue comments, and full aggregate review bodies independently. An actionable outside-diff finding may exist only in a body attached to an older head commit; keep a body-only finding ledger until each finding is fixed with expected-RED evidence or explicitly rebutted. A later green reviewer check and zero unresolved threads do not prove closure. Do not treat a helper/check clean result as sufficient.
    - A prior green bot/check result is stale after force-push. Resolve a thread only after the fix is pushed and replied to.
-10. **Verify before cleanup.** After merge, follow `executor-retirement-and-policy-convergence.md` completely; only then remove worktree and topic branches.
+10. **Verify before cleanup.** After merge, follow step 8 of `executor-retirement-and-policy-convergence.md`; only then remove worktree and topic branches.
 
 ## Pitfalls
 
