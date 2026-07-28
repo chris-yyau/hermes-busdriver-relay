@@ -140,6 +140,13 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     ) in policy_text
     assert "Follow `executor-retirement-pr-grind-lessons.md`" in policy_text
     assert "git diff origin/main" not in policy_text
+    assert (
+        "verify the merged main tree, squash equivalence, and post-merge checks "
+        "before updating live consumers"
+    ) in policy_text
+    assert policy_text.index("verify the merged main tree") < policy_text.index(
+        "converge live relay config"
+    )
 
     pr_grind_text = EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE.read_text()
     assert "Closing phase: enter this guide only after" in pr_grind_text
@@ -147,7 +154,8 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "stage every intended new path" in pr_grind_text
     assert "git fetch --no-tags origin main" in pr_grind_text
     assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in pr_grind_text
-    assert "record every deliberate index/worktree divergence" in pr_grind_text
+    assert "block every tracked index/worktree divergence" in pr_grind_text
+    assert "tests execute the same tracked bytes that will be committed" in pr_grind_text
     assert "git merge-base --is-ancestor origin/main HEAD" in pr_grind_text
     assert "git rev-parse origin/main" in pr_grind_text
     freeze_lines = [

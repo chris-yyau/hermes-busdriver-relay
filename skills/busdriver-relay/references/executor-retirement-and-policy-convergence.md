@@ -64,7 +64,7 @@ Do not pretty-print every constant map unconditionally. That creates unrelated s
 5. Fix all same-class inventory/floor assumptions found by a repository-wide search.
 6. Run the complete suite to completion.
 7. Follow `executor-retirement-pr-grind-lessons.md` for candidate freeze, exact-diff hashing, immutable review, and latest-head PR-grind mechanics. Start that sequence only after steps 1–6 pass.
-8. After merge, converge live relay config and the installed skill copy, then verify clean main and the retired executor's absence from production surfaces.
+8. After merge, verify the merged main tree, squash equivalence, and post-merge checks before updating live consumers: confirm the observed main commit and merged tree match the reviewed candidate, required push-to-main checks are green, and post-merge focused contracts pass. Only then converge live relay config and the installed skill copy, and verify the retired executor's absence from production surfaces.
 
 ## Pitfalls
 
