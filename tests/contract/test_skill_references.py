@@ -80,6 +80,15 @@ PR118_SKILL_SYNC_DELIVERY_REFERENCE = (
 LOCK_CLI_USAGE_PITFALLS_REFERENCE = REFERENCE_DIR / "lock-cli-usage-pitfalls.md"
 OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE = REFERENCE_DIR / "opencode-fallback-proof-audit-lessons.md"
 GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE = REFERENCE_DIR / "gated-finalization-executor-opencode-lessons.md"
+EXECUTOR_RETIREMENT_POLICY_REFERENCE = (
+    REFERENCE_DIR / "executor-retirement-and-policy-convergence.md"
+)
+EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE = (
+    REFERENCE_DIR / "executor-retirement-pr-grind-lessons.md"
+)
+PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE = (
+    REFERENCE_DIR / "pr-grind-delivery-discipline.md"
+)
 END_TO_END_PR_GRIND_REDACTION_REFERENCE = (
     REFERENCE_DIR / "end-to-end-pr-grind-and-redaction-lessons.md"
 )
@@ -98,6 +107,26 @@ def test_all_skill_references_end_with_terminal_newline():
     ]
 
     assert missing_terminal_newline == []
+
+
+def test_executor_retirement_and_review_surface_lessons_are_durable():
+    skill_text = SKILL.read_text()
+    expected_references = {
+        EXECUTOR_RETIREMENT_POLICY_REFERENCE: "Retire all four surfaces",
+        EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE: "Validate aggregate/list paths independently",
+    }
+
+    for reference, expected_text in expected_references.items():
+        assert reference.exists()
+        reference_text = reference.read_text()
+        assert reference.name in skill_text
+        assert expected_text in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
+
+    review_text = PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE.read_text()
+    assert "full aggregate review bodies" in review_text
+    assert "older head commit" in review_text
 
 
 def test_dependabot_recreate_pr_grind_lessons_are_durable():
