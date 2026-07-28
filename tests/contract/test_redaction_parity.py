@@ -15,36 +15,33 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-# Every production entrypoint that emits subprocess output or a remote URL into an envelope.
-REDACTING_RELAYS = (
-    "hermes-busdriver-deliver",
-    "hermes-busdriver-delivery-status",
-    "hermes-busdriver-pr-grind-check",
-    "hermes-busdriver-pr-grind-loop",
-    "hermes-busdriver-litmus-status",
-    "hermes-busdriver-finalization-readiness",
-    # v16-r28 item 2: the OpenCode wrapper emits opencode's stdout/stderr into its blocked
-    # envelopes and writes both to the run dir, so it is a redacting relay like any other. It was
-    # simply never listed — and had drifted to five patterns, no credential env values, and the
-    # redact-then-bound order this suite exists to forbid. Listing it is the fix that stays fixed.
-    "opencode/run-opencode-busdriver-draft",
+# Every production emitter plus retained historical fixtures whose redaction parity remains security evidence.
+REDACTING_RELAYS = {
+    "hermes-busdriver-deliver": "scripts/hermes-busdriver-deliver",
+    "hermes-busdriver-delivery-status": "scripts/hermes-busdriver-delivery-status",
+    "hermes-busdriver-pr-grind-check": "scripts/hermes-busdriver-pr-grind-check",
+    "hermes-busdriver-pr-grind-loop": "scripts/hermes-busdriver-pr-grind-loop",
+    "hermes-busdriver-litmus-status": "scripts/hermes-busdriver-litmus-status",
+    "hermes-busdriver-finalization-readiness": "scripts/hermes-busdriver-finalization-readiness",
+
     # v16-r30 C: the Pi wrapper and the agent-draft launcher emit a subprocess's stdout/stderr into
     # their envelopes through a `tail` that was a bare `text[-n:]` — no redaction at all, the very
-    # leak this suite was built to catch. They are listed here for the same reason OpenCode was:
-    # the contract is the membership, so an unlisted emitter is the bug.
-    "pi/run-pi-busdriver-draft",
-    "hermes-busdriver-agent-draft",
+    # leak this suite was built to catch. The historical OpenCode fixture remains listed because
+    # its security parity is retained as fixture evidence rather than production dispatch.
+    "pi/run-pi-busdriver-draft": "scripts/pi/run-pi-busdriver-draft",
+    "opencode-fixture/run-opencode-busdriver-draft": "tests/fixtures/opencode/run-opencode-busdriver-draft",
+    "hermes-busdriver-agent-draft": "scripts/hermes-busdriver-agent-draft",
     # v16-r31 D8: the gate emits a verifier's stdout/stderr into its envelope — a verifier is an
     # arbitrary command line, so its output is exactly the untrusted text this suite governs — and
     # it was emitting a bare `cp.stdout[-4000:]`: no redaction at all, and bounded after the scan
     # rather than before it. Unlisted emitter, same bug, same fix as OpenCode and the two above.
-    "hermes-busdriver-gate",
-)
+    "hermes-busdriver-gate": "scripts/hermes-busdriver-gate",
+}
 SECRET = "ghp_" + "a" * 36
 
 
 def load(name: str) -> dict:
-    return runpy.run_path(str(ROOT / "scripts" / name))
+    return runpy.run_path(str(ROOT / REDACTING_RELAYS[name]))
 
 
 @pytest.fixture(scope="module")
@@ -308,7 +305,7 @@ def test_every_relay_leaves_short_output_untouched(name: str, relays):
 
 
 def _defines_redact_value(name: str) -> bool:
-    return "\ndef redact_value(" in (ROOT / "scripts" / name).read_text(errors="replace")
+    return "\ndef redact_value(" in (ROOT / REDACTING_RELAYS[name]).read_text(errors="replace")
 
 
 # Derived, not typed: REDACTING_RELAYS is the emitter list, and only some emitters walk a structure.
@@ -332,7 +329,7 @@ def test_every_relay_redacts_a_credential_that_arrives_as_a_dict_key(name: str, 
     finalization-readiness did not, and emitted it verbatim from the one function whose entire job is
     to make an envelope safe to print.
 
-    Only the leak is asserted, not the key-NAME heuristic: deliver/gate/agent-draft/pi/opencode
+    Only the leak is asserted, not the key-NAME heuristic: deliver/gate/agent-draft/pi
     redact a key called `token`, while delivery-status/finalization-readiness instead learn the
     capability's VALUE from the key via capability_scalars(). Those are two designs for the same
     problem and both are fine; emitting the credential itself is what none of them may do.

@@ -340,7 +340,7 @@ DEFAULT_INSTALLED_SKILL = Path.home() / ".hermes" / "skills" / "autonomous-ai-ag
 CONTRACT_STATUS_SCHEMA = "hermes-busdriver-finalization-contract-status/v0"
 CONTRACT_STATUS = ROOT / "scripts" / "hermes-busdriver-finalization-contract-status"
 # Pinned from config/trusted-runtime-manifest.json; test_trusted_runtime_manifest asserts they agree.
-TRUSTED_CONTRACT_STATUS_SHA256 = "d85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c"
+TRUSTED_CONTRACT_STATUS_SHA256 = 'fca49c884f185fe0ad070fba545e3a4d50dce4cb977344f1300d14e7a48d41bc'
 
 AUTHORITY_FALSE: dict[str, bool] = {
     "finalization_allowed": False,
@@ -354,6 +354,7 @@ AUTHORITY_FALSE: dict[str, bool] = {
     "marker_write_allowed": False,
     "mutation_allowed": False,
     "programmatic_execution_allowed": False,
+    "non_pi_executor_enablement_allowed": False,
     "non_codex_agent_enablement_allowed": False,
 }
 
@@ -391,13 +392,13 @@ ROADMAP_TASKS: list[dict[str, Any]] = [
     {
         "id": "pi-adapter-proof",
         "label": "Pi adapter proof",
-        "status": "historical_pi_adapter_proof_retained_codex_primary_metadata_only",
+        "status": "pi_selected_as_sole_executor_route_production_dispatch_policy_blocked",
         "evidence": [
             "skills/busdriver-relay/references/pi-adapter-candidate-workflow.md",
             "skills/busdriver-relay/references/coding-workflow-authority-map-v0.1.md",
             "tests/contract/test_relay_brief.py",
         ],
-        "safe_next": "use_codex_primary_metadata_only_keep_agent_dispatch_blocked",
+        "safe_next": "keep_pi_as_only_executor_route_and_agent_dispatch_blocked_until_containment_exists",
     },
     {
         "id": "status-ux-layer",

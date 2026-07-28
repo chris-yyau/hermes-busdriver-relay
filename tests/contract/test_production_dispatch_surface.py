@@ -25,7 +25,6 @@ def _repo_relative_path(path: Path) -> str | None:
 def _approved_script_name(path: Path) -> str | None:
     relative = _repo_relative_path(path)
     special_paths = {
-        "run-opencode-busdriver-draft": "scripts/opencode/run-opencode-busdriver-draft",
         "run-pi-busdriver-draft": "scripts/pi/run-pi-busdriver-draft",
         "busdriver-fs-broker.py": "adapters/pi/busdriver-fs-broker.py",
     }
@@ -69,7 +68,6 @@ APPROVED_FUNCTION_AST_SHA256 = {
     ("hermes-busdriver-relay-brief", "run"): "63e3c33120b00982240e831c20a66615bae3416fceedd5865eddec8a0932ff09",
     ("hermes-busdriver-smoke", "run"): "a64f01edf251e951c33df2a0845c17a272b34f06ca97618604476f431161a231",
     ("hermes-busdriver-status", "run"): "95369bb68edd800d3da3120ee2b72d71e58bd77d468f4a15c544cd33304864c0",
-    ("run-opencode-busdriver-draft", "run"): "b2bda6f8b79f42f0137379bc1c5450e8b4676728e96cf207edee4757e4ea0e0b",
     ("run-pi-busdriver-draft", "run"): "06f0fa5cce5635d2dbaf7f6a88ddc4e25cd19efa8938abfcc7405e140ba6f7a5",
 }
 # The identical installed run_bounded implementation is approved at these paths.
@@ -78,7 +76,7 @@ for _launcher_path in {
     "hermes-busdriver-finalization-readiness", "hermes-busdriver-gate", "hermes-busdriver-litmus-status",
     "hermes-busdriver-lock", "hermes-busdriver-pr-grind-check", "hermes-busdriver-pr-grind-loop",
     "hermes-busdriver-relay-brief", "hermes-busdriver-relay-role", "hermes-busdriver-smoke",
-    "hermes-busdriver-status", "run-opencode-busdriver-draft", "run-pi-busdriver-draft",
+    "hermes-busdriver-status", "run-pi-busdriver-draft",
 }:
     APPROVED_FUNCTION_AST_SHA256[(_launcher_path, "run_bounded")] = "c723de307ea7ac262033aac32ab36d6e015165b549185695841b3ff00789a729"
 SHELL_BUILTINS = {
@@ -109,7 +107,6 @@ APPROVED_BOUNDED_FORWARDING_ARGUMENTS = {
     ("hermes-busdriver-relay-brief", "run"): "argv",
     ("hermes-busdriver-smoke", "run"): "cmd",
     ("hermes-busdriver-status", "run"): "cmd",
-    ("run-opencode-busdriver-draft", "run"): "cmd",
     ("run-pi-busdriver-draft", "run"): "cmd",
 }
 APPROVED_ENV_SANITIZER_AST_SHA256 = {
@@ -123,7 +120,6 @@ APPROVED_ENV_SANITIZER_AST_SHA256 = {
     ("hermes-busdriver-pr-grind-loop", "safe_subprocess_env"): "ec26bf32138decad64911a78e9a267354152e6372a9adfe5f87b1688e6ff65f2",
     ("hermes-busdriver-relay-role", "child_env"): "a63ae026b2d42c39ba07426f625cf3fc9bc953e91451e07a5a5ec5a732adc2d9",
     ("hermes-busdriver-smoke", "child_env"): "70921e22133ee52201cc89ca5478c95661c1f7cd14ebe5c797cf69971c6fd38d",
-    ("run-opencode-busdriver-draft", "git_env"): "a6d30ace4c5d991ac90cab53663a9986505eb1fbe701c673263f729367616a31",
 }
 
 
@@ -965,7 +961,7 @@ def _is_existing_parameterized_launcher(path: Path, node: ast.Call, parents: dic
     if expected_digest is None or hashlib.sha256(_canonical_ast_bytes(function)).hexdigest() != expected_digest:
         return False
     if name == "run_bounded" and approved_name in {
-        "run-opencode-busdriver-draft", "run-pi-busdriver-draft", "hermes-busdriver-pr-grind-loop",
+        "run-pi-busdriver-draft", "hermes-busdriver-pr-grind-loop",
         "hermes-busdriver-status", "hermes-busdriver-relay-brief", "hermes-busdriver-pr-grind-check",
         "hermes-busdriver-gate", "hermes-busdriver-smoke", "hermes-busdriver-lock",
         "hermes-busdriver-deliver", "hermes-busdriver-relay-role", "hermes-busdriver-agent-draft",

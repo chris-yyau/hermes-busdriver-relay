@@ -338,6 +338,16 @@ ENV_DENIED_FOR_TRUSTED_DISPATCH = frozenset({
     "DEVELOPER_DIR", "SDKROOT", "XCODE_DEVELOPER_DIR_PATH", "TOOLCHAINS", "XCRUN_CACHE_PATH",
 })
 MAX_TRUSTED_EXECUTABLE_BYTES = 256 * 1024 * 1024
+FIXED_RELAY_ROLE_AGENTS = {
+    "relay.impl.primary": "pi",
+    "relay.impl.secondary": "pi",
+    "relay.impl.fallback": "codex",
+}
+FIXED_RELAY_ROLE_BLOCKERS = {
+    "relay.impl.primary": "agent_containment_and_credential_broker_unavailable",
+    "relay.impl.secondary": "agent_containment_and_credential_broker_unavailable",
+    "relay.impl.fallback": "relay_role_dispatcher_unavailable",
+}
 
 
 def _trusted_source_refusal(name: str, reason: str, detail: str | None = None) -> SystemExit:
@@ -424,7 +434,7 @@ def trusted_executable_path(name: str) -> Path:
 
 
 STATUS_SCRIPT = Path(__file__).resolve().with_name("hermes-busdriver-status")
-TRUSTED_STATUS_SHA256 = 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'
+TRUSTED_STATUS_SHA256 = 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'
 MAX_AUTHENTICATED_STATUS_BYTES = 1 << 20
 STATUS_STDIN_LOADER = (
     "import sys\n"
@@ -562,22 +572,56 @@ def load_status_payload(args: argparse.Namespace) -> tuple[dict[str, Any] | None
     return data, None
 
 
+def coding_agent_policy_error(relay_roles: dict[str, Any]) -> str | None:
+    coding_agent = relay_roles.get("coding_agent")
+    if not isinstance(coding_agent, str):
+        return "status_probe_invalid_coding_agent_shape"
+    if coding_agent != "pi":
+        return "status_probe_coding_agent_policy_violation"
+    return None
+
+
+def relay_config_error(relay_roles: dict[str, Any]) -> str | None:
+    for key in (
+        "relay_config_parse_error",
+        "relay_config_shape_error",
+        "routes_config_error",
+        "coding_agent_config_error",
+        "avoid_coding_agent_for_review_config_error",
+    ):
+        value = relay_roles.get(key)
+        if value:
+            return value if isinstance(value, str) else "status_probe_config_error"
+    return None
+
+
+def role_entry_config_error(roles: dict[str, Any]) -> str | None:
+    for role in sorted(roles):
+        entry = roles[role]
+        if not isinstance(entry, dict):
+            return "status_probe_invalid_role_shape"
+        value = entry.get("config_error")
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return "status_probe_invalid_role_config_error_shape"
+        return value
+    return None
+
+
 def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, bool, dict[str, Any] | None, str]:
     roles = relay_roles.get("roles", {}) if isinstance(relay_roles, dict) else {}
     if not isinstance(roles, dict):
         return "degraded", False, False, None, "status_probe_invalid_roles_shape"
+    coding_agent_error = coding_agent_policy_error(relay_roles)
+    if coding_agent_error:
+        return "degraded", False, False, None, coding_agent_error
     if role not in roles:
         return "unknown_role", False, False, None, "unknown_role"
     selected = roles[role]
     if not isinstance(selected, dict):
         return "degraded", False, False, None, "status_probe_invalid_role_shape"
-    top_level_config_error = (
-        relay_roles.get("relay_config_parse_error")
-        or relay_roles.get("relay_config_shape_error")
-        or relay_roles.get("routes_config_error")
-        or relay_roles.get("coding_agent_config_error")
-        or relay_roles.get("avoid_coding_agent_for_review_config_error")
-    )
+    top_level_config_error = relay_config_error(relay_roles)
     if top_level_config_error:
         return "degraded", False, False, selected, top_level_config_error
     degraded = selected.get("degraded")
@@ -612,6 +656,14 @@ def role_status(relay_roles: dict[str, Any], role: str) -> tuple[str, bool, bool
     dispatch_blocker = selected["dispatch_blocker"]
     if not isinstance(dispatch_blocker, str) or not dispatch_blocker.strip():
         return "degraded", False, False, selected, "status_probe_invalid_dispatch_blocker_shape"
+    if selected_agent.strip().lower() == "opencode":
+        return "degraded", False, False, selected, "status_probe_opencode_agent_forbidden"
+    expected_agent = FIXED_RELAY_ROLE_AGENTS.get(role)
+    if expected_agent is not None and selected_agent != expected_agent:
+        return "degraded", False, False, selected, "status_probe_role_policy_violation"
+    expected_blocker = FIXED_RELAY_ROLE_BLOCKERS.get(role)
+    if expected_blocker is not None and (adapter_verified or dispatch_blocker != expected_blocker):
+        return "degraded", False, False, selected, "status_probe_role_policy_violation"
     return "resolved", True, False, selected, dispatch_blocker
 
 
@@ -628,8 +680,17 @@ def build_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     roles = relay_roles.get("roles", {})
     if not isinstance(roles, dict):
         return fail_closed_payload("status_probe_invalid_roles_shape", args.role), 2
+    coding_agent_error = coding_agent_policy_error(relay_roles)
+    if coding_agent_error:
+        return fail_closed_payload(coding_agent_error, args.role), 2
     known_roles = sorted(roles.keys())
     if args.list_roles:
+        top_level_config_error = relay_config_error(relay_roles)
+        if top_level_config_error:
+            return fail_closed_payload(top_level_config_error, args.role), 2
+        role_config_error = role_entry_config_error(roles)
+        if role_config_error:
+            return fail_closed_payload(role_config_error, args.role), 2
         return {
             "schema": "hermes-busdriver-relay-role/v0",
             "version": 1,

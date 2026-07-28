@@ -446,10 +446,10 @@ TRUSTED_HELPER_PATHS = {
     "finalization_readiness": FINALIZATION_READINESS,
     "gate": GATE,
 }
-TRUSTED_HELPER_DIGESTS = {'status': 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad',
-                          'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
-                          'finalization_readiness': 'f81409838c2c09a0636530964d9d6fc85a7788311fb8e0a10d1b071e8ea6c72f',
-                          'gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31'}
+TRUSTED_HELPER_DIGESTS = {'finalization_readiness': '9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a',
+ 'gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
+ 'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
+ 'status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
 MAX_TRUSTED_HELPER_BYTES = 1024 * 1024
 TRUSTED_HELPER_STDIN_LOADER = (
     "import sys\n"

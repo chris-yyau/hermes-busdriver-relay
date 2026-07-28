@@ -23,7 +23,7 @@ Date: 2026-06-28
 
 ## Backstop-driven pitfalls
 
-1. **Top-level config errors must block dispatch.** A selected role can look healthy while global relay config is malformed (for example empty `coding_agent`). Treat top-level parse/shape/routes/coding_agent/avoid_coding_agent errors as fail-closed.
+1. **Top-level config errors must block dispatch.** A selected role can look healthy while global relay config is malformed (for example empty or non-Pi `coding_agent`). Treat top-level parse/shape/routes/coding_agent/avoid_coding_agent errors as fail-closed. Enforce fixed implementation agents again in the resolver, and reject a forged clean OpenCode selection even when status reports all authority flags false.
 2. **Root authority flags matter.** Some consumers read only the root envelope, not nested `decision`; root must include `dispatch_allowed`, `mutation_allowed`, `finalization_allowed`, and runtime identity flags.
 3. **Invalid CLI invocations must return JSON.** Avoid argparse plain-text stderr/empty stdout paths. Use `exit_on_error=False`, catch parse errors, disable abbreviated long options with `allow_abbrev=False`, and emit JSON fail-closed payloads on stdout.
 4. **Subprocess output must be revalidated.** Validate top-level status JSON shape, `relay_config`, `relay_equivalent_roles`, `roles`, selected role entry, `selected_agent`, and `degraded` before accepting resolved metadata. Any positive programmatic-dispatch claim is forbidden.

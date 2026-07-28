@@ -8,13 +8,13 @@ Accepted implementation slice.
 
 ADR 0005 identified five policy-blocked finalization surfaces: mutating delivery execution, mutating result envelopes, programmatic dual review, PR-grind fix/push/re-poll, and marker interop. The safe unlock is not to make Hermes a standing Busdriver authority. The safe unlock is to give Hermes a narrow executor that re-checks Busdriver-equivalent evidence immediately before each side effect and fails closed when evidence is stale, missing, malformed, or outside scope.
 
-The user also wants OpenCode + Go to be a secondary/fallback draft-only metadata lane, but only with adapter proof and authority flags false.
+The OpenCode adapter work below is retained as historical proof only. Current policy makes Pi the sole executor route and gives OpenCode no production entrypoint.
 
 ## Decision
 
 Add a narrow `hermes-busdriver-deliver execute` side-effect surface:
 
-- production Pi/OpenCode execution is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; adapter execution tests use explicit non-installed harnesses and grant no production dispatch authority.
+- production Pi execution is `policy_blocked` by `agent_containment_and_credential_broker_unavailable`; OpenCode is parser-rejected and absent from the production manifest.
 - caller-supplied verifier execution is `policy_blocked` by `verifier_containment_unavailable`; production gate/deliver surfaces fail before launching a verifier.
 - `pre-pr-review` is `policy_blocked` by `isolated_review_runtime_unavailable` before delivery-status, repository/state/lock, artifact, credential, or trusted-writer handling. The dormant Busdriver-writer adapter is not executed. Hermes does **not** raw-write `.claude/*` marker files.
 - `commit` requires staged changes, a commit message, and fresh litmus/pre-PR evidence from `hermes-busdriver-litmus-status`.
@@ -24,9 +24,9 @@ Add a narrow `hermes-busdriver-deliver execute` side-effect surface:
 
 Only an operation that passes its fixed early policy blocker may acquire the Hermes `finalization` single-flight lock or record a redacted `hermes-busdriver-mutating-delivery-run/v0` side-effect transcript. Early-blocked operations truthfully report the lock as skipped, do not synthesize run identity/timestamp state, and do not persist artifacts. All paths keep the legacy reusable authority flags default-deny so persisted artifacts cannot become standing authority for later operations.
 
-Add an OpenCode fallback adapter proof:
+Retain historical OpenCode adapter proof:
 
-- `scripts/opencode/run-opencode-busdriver-draft` launches OpenCode in a generic gated draft lane.
+- `tests/fixtures/opencode/run-opencode-busdriver-draft` is test-only fixture source with no production caller.
 - `adapters/opencode/opencode-result.schema.json` requires `needs_busdriver_review | blocked` status and all commit/push/PR/merge/marker/deploy/release/publish/finalization flags false.
 - The non-installed test harness validates `opencode-result.json`, preflight/postflight contracts, schema/authority, scope reconciliation, timeout/missing/malformed/oversized artifacts, and fake-binary behavior. Historical real-smoke evidence does not supply OS-enforced containment or a parent-held credential broker, so production programmatic dispatch remains blocked.
 
@@ -36,7 +36,7 @@ Hermes is not a trusted marker writer by filename convention. The trusted writer
 
 ## PR-grind fix loops
 
-This slice deliberately does **not** add an autonomous `pr-grind-fix-loop` mutating entrypoint. Production Pi/OpenCode fixes remain blocked by `agent_containment_and_credential_broker_unavailable`; functional test harnesses are not a production routing seam. Push and PR creation remain blocked by `atomic_push_base_binding_unavailable` and `atomic_pr_create_binding_unavailable`; no workflow may bypass those guards with direct Git/GitHub commands.
+This slice deliberately does **not** add an autonomous `pr-grind-fix-loop` mutating entrypoint. Production Pi fixes remain blocked by `agent_containment_and_credential_broker_unavailable`; OpenCode is not an executor and functional test harnesses are not a production routing seam. Push and PR creation remain blocked by `atomic_push_base_binding_unavailable` and `atomic_pr_create_binding_unavailable`; no workflow may bypass those guards with direct Git/GitHub commands.
 
 ## Consequences
 

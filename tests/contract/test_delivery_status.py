@@ -254,7 +254,7 @@ def assert_no_delivery_authority(authority: dict) -> None:
 
 def relay_config(path: Path, route: object) -> Path:
     path.write_text(json.dumps({
-        "coding_agent": "opencode",
+        "coding_agent": "pi",
         "avoid_coding_agent_for_review": True,
         "routes": {"relay.pr.backstop": route},
     }))
@@ -1031,7 +1031,7 @@ def assert_capability_entry_is_metadata_only(entry: dict[str, Any]) -> None:
 def test_delivery_status_can_resolve_requested_relay_role_read_only(tmp_path: Path):
     repo = init_repo(tmp_path / "repo")
     plugin = fake_busdriver(tmp_path / "busdriver")
-    cfg = relay_config(tmp_path / "relay-config.json", ["opencode", "codex"])
+    cfg = relay_config(tmp_path / "relay-config.json", ["pi", "codex"])
 
     data = invoke(repo, plugin, "--relay-role", "relay.pr.backstop", "--relay-config", str(cfg))
 
@@ -1215,6 +1215,7 @@ def test_relay_role_status_probe_executes_retained_bytes_not_swappable_path(monk
     trusted_payload = {
         "relay_config": {"path": "fixture"},
         "relay_equivalent_roles": {
+            "coding_agent": "pi",
             "roles": {
                 "relay.pr.backstop": {
                     "degraded": False,

@@ -30,7 +30,7 @@ WRAPPERS = {
         ("run",),
     ),
     "opencode": (
-        "scripts/opencode/run-opencode-busdriver-draft",
+        "tests/fixtures/opencode/run-opencode-busdriver-draft",
         ("trusted_opencode_executable",),
         # opencode_child_env() is where prepare_private_opencode_home() copies live credentials
         # into the HOME this process is about to hand the worker.

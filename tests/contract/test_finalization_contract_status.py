@@ -24,6 +24,7 @@ UNSAFE_BOOLEAN_KEYS = [
     "programmatic_execution_allowed",
     "marker_interop_allowed",
     "raw_codex_exec_allowed",
+    "non_pi_executor_enablement_allowed",
     "non_codex_agent_enablement_allowed",
     "capability_allowed",
     "safe_to_execute_by_this_helper",
@@ -117,6 +118,7 @@ def test_contract_status_emits_read_only_policy_blocked_matrix():
         "busdriver_marker_write",
         "gate_bypass",
         "raw_codex_exec",
+        "non_pi_executor_enablement",
         "non_codex_agent_enablement",
         "autonomous_git_github_mutation",
     }

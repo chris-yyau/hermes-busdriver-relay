@@ -2,11 +2,11 @@
 
 ## Status
 
-**Accepted as deferred adapter history and fixture proof; not a current route and not enabled for production dispatch.**
+**Accepted as the sole executor route contract; not enabled for production dispatch.**
 
 ## Current production truth
 
-Pi is deferred adapter history, not the current, default, or preferred implementation route. Production `hermes-busdriver-agent-draft`, the Pi wrapper, and role/status surfaces fail closed before worker, repository, HOME, or credential handling with:
+Pi is the sole current executor route. Production `hermes-busdriver-agent-draft`, the Pi wrapper, and role/status surfaces still fail closed before worker, repository, HOME, or credential handling with:
 
 ```text
 agent_containment_and_credential_broker_unavailable
@@ -27,9 +27,9 @@ Historical fake-worker or real-model smoke proves adapter shape only. It does no
 ```text
 ClaudeCode / Busdriver = canonical authority
 Hermes                 = relay / router / verifier / explicit Delivery Mode operator
-Codex                  = implementation-primary metadata and PR lead; no production relay-role dispatcher
-OpenCode + Go          = secondary/fallback draft-only metadata; production non-programmatic
-Pi                     = deferred adapter history; production non-programmatic
+Pi                     = sole executor route metadata; production non-programmatic
+Codex                  = fallback coder metadata and PR lead; no production relay-role dispatcher
+OpenCode               = non-executor historical/comparison evidence only
 ```
 
 ## Target-state adapter design
@@ -103,4 +103,4 @@ Adapter tests and smoke evidence are necessary but not sufficient. Production di
 5. no fixture, environment, or caller-command bypass;
 6. status/docs/skill metadata updated atomically from false only after all proofs pass.
 
-Until then, Pi and OpenCode remain non-programmatic production routes regardless of adapter quality.
+Until then, Pi remains non-programmatic regardless of adapter quality. OpenCode is not an executor route.

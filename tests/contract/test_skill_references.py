@@ -404,7 +404,12 @@ def test_pi_adapter_candidate_workflow_is_durable_skill_reference():
     assert "not through the ResourceLoader itself" in reference_text
     assert "Launch Pi with built-in mutating tools disabled" in reference_text
     assert "Only after the in-repo schema/wrapper/smoke/contract tests pass" in reference_text
-    assert "Pi is deferred route history, not current or preferred route metadata" in reference_text
+    assert "Pi is the sole current executor route metadata" in reference_text
+    assert "choose Codex/Pi/reviewer routes; retain OpenCode only as historical/comparison evidence" in reference_text
+    assert "choose Codex/Pi/OpenCode/reviewer routes" not in reference_text
+    assert "review.pr_lead                         = Codex metadata; non-dispatchable; independence degradation applies only if a review-sensitive role selects current coding agent Pi" in reference_text
+    assert "review.pr_lead                         = Codex metadata; fresh independent session required" not in reference_text
+    assert '"relay.impl.primary": ["pi"], "relay.impl.secondary": ["pi"], "relay.impl.fallback": ["codex"]' in skill_text
     assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "bd_bash` must be argv-only and allowlist-only" in reference_text
     assert "Any allowed `git status` form must inject `-c core.fsmonitor=false`" in reference_text
@@ -460,8 +465,13 @@ def test_coding_workflow_authority_map_is_durable_skill_reference():
     reference_text = CODING_WORKFLOW_AUTHORITY_MAP_REFERENCE.read_text()
 
     assert "references/coding-workflow-authority-map-v0.1.md" in skill_text
-    assert "implementation.primary.current            = Codex metadata only" in reference_text
-    assert "OpenCode + Go lane = secondary/fallback draft-only metadata; adapter contract verified in non-installed harnesses; production dispatch is policy-blocked." in reference_text
+    assert "implementation.executor.current           = Pi only" in reference_text
+    assert "OpenCode lane = non-executor historical/comparison evidence only; no current implementation route." in reference_text
+    assert "Codex PR-lead metadata remains non-dispatchable via `relay_role_dispatcher_unavailable`" in reference_text
+    assert "review-sensitive role selects the current `coding_agent` (Pi)" in reference_text
+    assert '"worker": "codex|pi|grok|gemini"' in reference_text
+    assert "`worker=opencode` is invalid for the current production envelope" in reference_text
+    assert '"worker": "codex|pi|opencode|grok|gemini"' not in reference_text
     assert "agent_containment_and_credential_broker_unavailable" in reference_text
     assert "Workers produce draft evidence; Hermes verifies evidence" in reference_text
     assert "Hermes must not commit a dirty tree unless every dirty path is classified" in reference_text
@@ -491,6 +501,9 @@ def test_active_skill_uses_authority_negative_role_resolution_semantics():
     skill_text = SKILL.read_text()
     resolver_text = (REFERENCE_DIR / "relay-role-resolver-lessons.md").read_text()
     role_status_text = (REFERENCE_DIR / "relay-role-status-integration-lessons.md").read_text()
+
+    assert "avoid_coding_agent errors" in resolver_text
+    assert "avoid-coding-agent errors" not in resolver_text
 
     assert role_status_text.splitlines()[2] == (
         "> **CURRENT AUTHORITY-NEGATIVE — NON-PRODUCTION-DISPATCH.** Current policy authority: "
@@ -542,7 +555,7 @@ def test_skill_catalog_marks_superseded_role_policy_evidence_historical():
 def test_skill_catalog_counts_active_and_historical_roadmap_rows_separately():
     skill_text = SKILL.read_text()
 
-    assert "four active tasks plus one retained historical Pi-evidence row" in skill_text
+    assert "four active tasks plus the Pi executor-route blocker row" in skill_text
     assert "five active roadmap tasks" not in skill_text
 
 
@@ -602,15 +615,15 @@ def test_full_role_map_and_live_config_lessons_are_durable_skill_references():
     references = {
         FULL_ROLE_MAP_DISPATCHABILITY_REFERENCE: [
             "Resolver-ready is not the same as dispatchable",
-            "OpenCode fallback/comparison roles stay non-dispatchable until the complete production safety proof exists",
+            "Pi is the only executor route",
             "agent_containment_and_credential_broker_unavailable",
             "After repo skill-source merges, check installed skill drift",
         ],
         OPENCODE_FALLBACK_PROOF_AUDIT_REFERENCE: [
             "OpenCode fallback proof audit lessons",
-            "Requirements before any future promotion",
+            "Retention rule",
             "every reusable authority flag false",
-            "configured fallback/comparison **route**, not a production programmatic lane",
+            "OpenCode is not an executor and is absent from current implementation routes",
         ],
         GATED_FINALIZATION_EXECUTOR_OPENCODE_REFERENCE: [
             "Gated finalization executor + OpenCode fallback lessons",

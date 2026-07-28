@@ -108,6 +108,9 @@ def test_adr_0006_frames_non_mutating_dual_review_marker_interop_contract():
         "marker interop only if Busdriver defines it",
     ]:
         assert phrase in text
+    assert "OpenCode remains historical, test-only non-executor evidence" in text
+    assert "Pi/OpenCode adapters" not in text
+    assert "Pi/OpenCode draft lanes" not in text
 
 
 def test_adr_0006_is_linked_without_loosening_adr_0005_authority_contract():
@@ -178,6 +181,9 @@ def test_active_agent_docs_reject_stale_production_dispatch_claims():
         "Agent-draft PATH guards shadow finalization commands",
         "`hermes-busdriver-gate` preflight/postflight around scoped draft-mode agents",
         "Pi-default constrained draft launcher with a verified guarded OpenCode fallback/comparison adapter",
+        "Pi is retained adapter history and is not the current, default, or preferred route.",
+        "production agent-draft/Pi/OpenCode remains `policy_blocked`",
+        "live OpenCode digest mismatch remains a separate trusted-runtime convergence item",
         "verify-only local verifiers",
     )
     for path in ACTIVE_AGENT_POLICY_DOCS:
@@ -585,7 +591,6 @@ def test_authoritative_doc_inventory_rejects_html_local_doc_link(html: str):
     (
         "scripts/hermes-busdriver-agent-draft",
         "scripts/pi/run-pi-busdriver-draft",
-        "scripts/opencode/run-opencode-busdriver-draft",
     ),
 )
 def test_production_agent_help_renders_exact_fixed_blocker(relative: str):

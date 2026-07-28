@@ -10,7 +10,7 @@ During Delivery Mode dogfood on an OpenCode fallback adapter slice, commit-mode 
 ## Durable lessons
 
 1. **The OpenCode wrapper must fail closed when run outside `hermes-busdriver-agent-draft`.**
-   - A standalone `scripts/opencode/run-opencode-busdriver-draft` call can bypass the parent launcher’s PATH guard, preflight, postflight, and lock semantics.
+   - A standalone `tests/fixtures/opencode/run-opencode-busdriver-draft` call can bypass the parent launcher’s PATH guard, preflight, postflight, and lock semantics.
    - The wrapper should require a parent-provided proof such as `HERMES_AGENT_DRAFT_GUARDED=1` plus a `HERMES_AGENT_DRAFT_GUARD_BIN` that is first in `PATH` and contains executable `git` / `gh` guard shims.
    - If the guard proof is missing or malformed, write a blocked artifact and exit nonzero; do not launch OpenCode.
 

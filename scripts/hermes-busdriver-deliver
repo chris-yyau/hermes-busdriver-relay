@@ -384,21 +384,21 @@ TRUSTED_PR_GRIND_LOOP_SHA256 = '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93d
 TRUSTED_PR_GRIND_CHECK_SHA256 = 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212'
 TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': '213adeb661452a45c004abb688cfec328013fc0715f468cbcd0094a9ac5ead9c',
-                                           'scripts/hermes-busdriver-agent-draft': 'feb966b3ea6b41e8b78200fe1b682cb48fdfbdff6ace229e45710f80e750e0a8',
-                                           'scripts/hermes-busdriver-agent-smoke': 'eb5ea5742db1658fdb964f1dda1125e32a37227ed41554682b3980f9d53ab1b3',
-                                           'scripts/hermes-busdriver-delivery-status': '30cabab19bc2eaff1ced0bdcf14cc407ad72071c2c2214bb97007a22f347be8e',
-                                           'scripts/hermes-busdriver-finalization-contract-status': 'd85a8f97a488d82d0e8a99cdaf46aeec516344c94aadb65448e3fbcffc6c738c',
-                                           'scripts/hermes-busdriver-finalization-readiness': 'f81409838c2c09a0636530964d9d6fc85a7788311fb8e0a10d1b071e8ea6c72f',
-                                           'scripts/hermes-busdriver-gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
-                                           'scripts/hermes-busdriver-litmus-status': '35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76',
-                                           'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
-                                           'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
-                                           'scripts/hermes-busdriver-pr-grind-loop': '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653',
-                                           'scripts/hermes-busdriver-relay-role': '0430f7271d6c070bdb5826979ed09ed89373ef4438634a7f9ca6725fe6bf394d',
-                                           'scripts/hermes-busdriver-runtime-check': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
-                                           'scripts/hermes-busdriver-smoke': 'ab790e808225bf11dcc56dded2a3d79f324df972aed323c23c70a89515587e13',
-                                           'scripts/hermes-busdriver-status': 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'}
+TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': 'cb97a034066370a01b388f56c5b253c19c8ae545269986f63037d4a461e2109b',
+ 'scripts/hermes-busdriver-agent-draft': 'e82fa32f525ed3810d953acdca5f7aa7b4fe48e5a1baf8a5d7e4f6eda558a092',
+ 'scripts/hermes-busdriver-agent-smoke': '29b7d967f4501be2e18cbfb21a9785b679f692385f91239d2c029cfd29375fc8',
+ 'scripts/hermes-busdriver-delivery-status': '7129487c5c96ee33d751b994738d59ab6802708c52d9e2421c6f0ccc3f18093a',
+ 'scripts/hermes-busdriver-finalization-contract-status': 'fca49c884f185fe0ad070fba545e3a4d50dce4cb977344f1300d14e7a48d41bc',
+ 'scripts/hermes-busdriver-finalization-readiness': '9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a',
+ 'scripts/hermes-busdriver-gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
+ 'scripts/hermes-busdriver-litmus-status': '35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76',
+ 'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
+ 'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
+ 'scripts/hermes-busdriver-pr-grind-loop': '975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653',
+ 'scripts/hermes-busdriver-relay-role': '32376d01a67cb51991df780c856bc8dd86a2a1d9ccec50f84fa8e2ecefe091ae',
+ 'scripts/hermes-busdriver-runtime-check': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
+ 'scripts/hermes-busdriver-smoke': '6e1843d997cc1de2ca004f9d0281bef15a242c348e55ae8ba30cbacfdf6ce209',
+ 'scripts/hermes-busdriver-status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
 # Enumerated independently of TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS above, so that
 # `materialize_delivery_status_runtime`'s set comparison is an actual cross-check: adding a script
 # to one inventory and forgetting the other must fail closed rather than silently agree. Deriving

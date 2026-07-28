@@ -188,7 +188,6 @@ def test_the_agent_draft_pins_the_wrapper_bytes_it_runs(tmp_path):
     manifest = json.loads(MANIFEST.read_text())
 
     assert ns["TRUSTED_PI_WRAPPER_SHA256"] == manifest["production_entrypoints"]["scripts/pi/run-pi-busdriver-draft"]
-    assert ns["TRUSTED_OPENCODE_WRAPPER_SHA256"] == manifest["production_entrypoints"]["scripts/opencode/run-opencode-busdriver-draft"]
     assert ns["TRUSTED_PI_WRAPPER_SHA256"] == sha(PI_WRAPPER.read_bytes())
 
 

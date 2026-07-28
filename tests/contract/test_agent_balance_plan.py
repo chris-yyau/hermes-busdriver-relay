@@ -19,6 +19,7 @@ AUTHORITY_FALSE_KEYS = [
     "mutation_allowed",
     "finalization_allowed",
     "dispatch_allowed",
+    "programmatic_dispatch_allowed",
     "programmatic_execution_allowed",
 ]
 
@@ -75,8 +76,8 @@ def test_agent_balance_plan_emits_read_only_balanced_planning_envelope():
     assert implementation["max_parallel"] == 1
     assert implementation["mode"] == "mutating_draft"
     assert implementation["requires_gate"] is True
-    assert implementation["selected_agent"] == "codex"
-    assert implementation["current_agent"] == "codex"
+    assert implementation["selected_agent"] == "pi"
+    assert implementation["current_agent"] == "pi"
     assert implementation["repo_mutation_allowed"] is False
 
     for lane_id in ["readonly_review", "readonly_status"]:

@@ -279,7 +279,6 @@ def _invoke_rename_writer(ns: dict, func_name: str, tmp_path: Path, payload: byt
 
 
 RENAME_WRITERS = [
-    ("scripts/opencode/run-opencode-busdriver-draft", "write_private_file"),
     ("scripts/hermes-busdriver-gate", "write_baseline_file"),
     ("scripts/pi/run-pi-busdriver-draft", "copy_regular_file_nofollow"),
     # The delivery result artifact. An INDEPENDENT writer, not a wrapper: the private-copy primitive
@@ -450,7 +449,6 @@ SANCTIONED_OS_WRITE_SITES = {
     ("scripts/hermes-busdriver-lock", "write_private_authenticated"),
     ("scripts/hermes-busdriver-litmus-status", "write_private_authenticated"),
     # Atomic-replacement writers: same loop, then rename + parent fsync + reopen-revalidate.
-    ("scripts/opencode/run-opencode-busdriver-draft", "write_private_file"),
     ("scripts/hermes-busdriver-gate", "write_baseline_file"),
     ("scripts/pi/run-pi-busdriver-draft", "copy_regular_file_nofollow"),
     ("scripts/hermes-busdriver-deliver", "write_artifact_bytes"),
@@ -500,7 +498,6 @@ HIGH_LEVEL_WRITE_ALLOWED_IN = {
     # `git`/`gh` shims that ARE executed moved to `write_private_runtime_file`, which is what
     # emptied the old denylist. Production dispatch here is fixed `policy_blocked` besides.
     ("scripts/hermes-busdriver-agent-draft", "main"),
-    ("scripts/opencode/run-opencode-busdriver-draft", "main"),
     ("scripts/pi/run-pi-busdriver-draft", "main"),
 }
 

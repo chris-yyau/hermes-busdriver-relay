@@ -52,6 +52,7 @@ NON_MUTATING_CAPABILITY_FLAGS = {
     "programmatic_execution_allowed": False,
     "marker_interop_allowed": False,
     "raw_codex_exec_allowed": False,
+    "non_pi_executor_enablement_allowed": False,
     "non_codex_agent_enablement_allowed": False,
 }
 
@@ -67,6 +68,7 @@ UNSUPPORTED_MUTATING_OPERATIONS = [
     "busdriver_marker_write",
     "gate_bypass",
     "raw_codex_exec",
+    "non_pi_executor_enablement",
     "non_codex_agent_enablement",
     "autonomous_git_github_mutation",
 ]

@@ -4,9 +4,9 @@
 Pattern:
   lock acquire -> gate preflight -> guarded agent command -> gate postflight -> lock release -> report
 
-Production Pi/OpenCode mutation dispatch is policy-blocked until trusted OS
-containment and credential brokering exist. Non-installed runpy fixtures retain
-adapter contract coverage; no CLI or environment switch enables that seam.
+Production Pi mutation dispatch is policy-blocked until trusted OS containment
+and credential brokering exist. OpenCode is not an executor. Non-installed
+runpy fixtures retain historical adapter contract coverage only.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ TRUSTED_EXECUTABLE_DIGESTS = {
     "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
     "pi": "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca",
-    "opencode": "43f7083d450567706a80b6441331a25b5ed6d6c9f742826790545b068229cbb2",
     "bash": "7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea",
     "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
@@ -52,26 +51,20 @@ TRUSTED_EXECUTABLE_SOURCES = {
     "bash": Path("/bin/bash"),
     "python3": Path("/usr/bin/python3"),
 }
-# Agent binaries. Not in TRUSTED_EXECUTABLE_SOURCES on purpose: both live under $HOME, whose
-# ancestry this UID can write, so neither can satisfy the root-owned contract. See
-# trusted_agent_executable() — production never reaches either.
+# Pi is not in TRUSTED_EXECUTABLE_SOURCES: it lives under $HOME, whose ancestry
+# this UID can write, so it cannot satisfy the root-owned contract. Production
+# never reaches trusted_agent_executable() while the containment blocker is set.
 TRUSTED_PI = Path("/Users/vfrvndtt/.local/bin/pi").resolve()
-TRUSTED_OPENCODE = Path("/Users/vfrvndtt/.opencode/bin/opencode").resolve()
 _TRUSTED_EXECUTABLE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
 _TRUSTED_EXECUTABLE_PATHS: dict[str, Path] = {}
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
-# The child wrappers. Both were launched straight off their repo paths — `python -I <repo>/run-pi-…`
-# — so the one process that holds the entire draft containment was the one nobody authenticated,
-# while git, gh, pi, opencode, the gate and the lock all were. A same-UID writer rewriting either
-# file owns the run. They are pinned and privately retained like every other executed byte.
+# The Pi child wrapper is pinned and privately retained like every other
+# executed byte; OpenCode has no production executor or wrapper edge.
 #
-# No cycle: neither wrapper pins agent-draft, so the graph stays a DAG. The refresh order is
-# broker/tools -> wrappers -> agent-draft -> deliver, which is the order the manifest records.
+# No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
 TRUSTED_PI_WRAPPER_SHA256 = 'd6943576a792a82aa781dfa2be0ecae0c0d0786337ee9c6cf88fb165fd6d73c3'
-OPENCODE_WRAPPER = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
-TRUSTED_OPENCODE_WRAPPER_SHA256 = 'ccd3147fc5aa94d30045d11b8b64472cef9118070a6219d503bed63cc5212b62'
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {
@@ -85,6 +78,15 @@ AUTHORITY_FALSE = {
     "publish_allowed": False,
     "marker_write_allowed": False,
 }
+
+
+def pi_artifact_authority_valid(authority: Any) -> bool:
+    return (
+        isinstance(authority, dict)
+        and set(authority) == set(AUTHORITY_FALSE)
+        and all(authority[key] is False for key in AUTHORITY_FALSE)
+    )
+
 
 BLOCKED_GIT = {"commit", "push", "merge", "rebase", "reset", "tag"}
 BLOCKED_GH_PATTERNS = {
@@ -623,12 +625,12 @@ def trusted_executable_path(name: str) -> Path:
     """The only production entry point for the SYSTEM tools. Takes a name; the path is not
     negotiable.
 
-    git and gh part company from pi and opencode here, and the split is not stylistic. git and gh
-    have fixed root-owned sources, so they are validated and executed in place. pi and opencode
-    exist only under $HOME — user-writable ancestry, which this contract refuses and no walk can
-    fix, because there is no root-owned pi to point at. That is not a gap this function should
+    git and gh part company from pi here, and the split is not stylistic. git and gh
+    have fixed root-owned sources, so they are validated and executed in place. Pi exists only under
+    $HOME — user-writable ancestry, which this contract refuses and no walk can fix, because there is
+    no root-owned Pi to point at. That is not a gap this function should
     paper over: it is the same fact that makes agent dispatch `policy_blocked` by
-    `agent_containment_and_credential_broker_unavailable` in the first place. They keep the private
+    `agent_containment_and_credential_broker_unavailable` in the first place. Pi keeps the private
     -copy resolver, in trusted_agent_executable(), which production never reaches.
 
     Revalidated on every call rather than cached: the contract is "validated immediately before
@@ -641,7 +643,7 @@ def trusted_executable_path(name: str) -> Path:
 
 
 def trusted_agent_executable(name: str) -> Path:
-    """The pi/opencode resolver. Unreachable in production — see trusted_executable_path().
+    """The Pi resolver. Unreachable in production — see trusted_executable_path().
 
     Kept as-is deliberately. A private authenticated copy is the strongest thing available for a
     binary whose only source is user-writable, and it is NOT strong enough: macOS has no fexecve,
@@ -651,7 +653,6 @@ def trusted_agent_executable(name: str) -> Path:
     global _TRUSTED_EXECUTABLE_RUNTIME
     trusted = {
         "pi": TRUSTED_PI,
-        "opencode": TRUSTED_OPENCODE,
     }
     source = trusted.get(name)
     if source is None:
@@ -1033,7 +1034,7 @@ def release_lock(args: argparse.Namespace, token: str, lock_path: str) -> dict[s
 def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) -> list[str]:
     if args.agent == "pi":
         pi_timeout = max(1, args.timeout - 30) if args.timeout > 30 else max(1, args.timeout - 1)
-        # Symmetric with the opencode lane below, which has always refused this. --pi-bin took any
+        # The historical OpenCode fixture also refuses this. --pi-bin took any
         # value and forwarded it RAW to the wrapper, so the flag (and its PI_BIN environment
         # default) named the program this launcher ran — with a private HOME and live provider
         # credentials mounted. "Production is blocked before it gets here" is not the argument: an
@@ -1069,41 +1070,6 @@ def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) ->
         ]
         if args.pi_provider:
             cmd += ["--provider", args.pi_provider]
-        for p in args.scope_include or []:
-            cmd += ["--scope-include", p]
-        for p in args.scope_exclude or []:
-            cmd += ["--scope-exclude", p]
-        return cmd
-    if args.agent == "opencode":
-        opencode_timeout = max(1, args.timeout - 30) if args.timeout > 30 else max(1, args.timeout - 1)
-        if args.opencode_bin not in {"opencode", str(TRUSTED_OPENCODE)}:
-            raise SystemExit(json.dumps({
-                "schema": SCHEMA,
-                "ok": False,
-                "status": "blocked",
-                "agent": "opencode",
-                "error": "opencode_executable_override_rejected",
-            }))
-        opencode_bin = str(trusted_agent_executable("opencode"))
-        cmd = [
-            str(trusted_executable_path("python3")),
-            "-I",
-            str(materialize_trusted_wrapper(run_dir, OPENCODE_WRAPPER, TRUSTED_OPENCODE_WRAPPER_SHA256, "opencode-wrapper")),
-            "--repo",
-            args.repo,
-            "--prompt-file",
-            str(prompt_path),
-            "--run-dir",
-            str(run_dir),
-            "--opencode-bin",
-            opencode_bin,
-            "--opencode-agent",
-            args.opencode_agent,
-            "--timeout",
-            str(opencode_timeout),
-        ]
-        if args.opencode_model:
-            cmd += ["--model", args.opencode_model]
         for p in args.scope_include or []:
             cmd += ["--scope-include", p]
         for p in args.scope_exclude or []:
@@ -1421,13 +1387,10 @@ def main() -> int:
     )
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["pi", "opencode", "noop"], default="noop", help="Safe default is noop; Pi/OpenCode are explicit compatibility probes only.")
+    ap.add_argument("--agent", choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
     ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")
     ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")
-    ap.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"), help="OpenCode executable for --agent opencode.")
-    ap.add_argument("--opencode-agent", default=os.environ.get("OPENCODE_BD_AGENT", "build"), help="OpenCode agent for the guarded fallback lane.")
-    ap.add_argument("--opencode-model", default=os.environ.get("OPENCODE_BD_MODEL", ""), help="Optional OpenCode provider/model.")
 
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")
@@ -1520,7 +1483,7 @@ def main() -> int:
                 "stderr_tail": tail(agent.stderr),
             }
             adapter_artifact_ok = True
-            if args.agent in {"pi", "opencode"}:
+            if args.agent == "pi":
                 adapter_artifact_ok = False
                 worker = args.agent
                 artifact_path = run_dir / f"{worker}-result.json"
@@ -1537,9 +1500,7 @@ def main() -> int:
                             and artifact.get("worker") == worker
                             and artifact.get("status") == "needs_busdriver_review"
                             and artifact.get("ok") is True
-                            and isinstance(authority, dict)
-                            and authority
-                            and all(value is False for value in authority.values())
+                            and pi_artifact_authority_valid(authority)
                         )
                         # Redact for emission only, AFTER validating: the artifact is untrusted
                         # worker output, so echoing it verbatim leaks any credential it quotes —

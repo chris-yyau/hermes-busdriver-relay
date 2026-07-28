@@ -1,13 +1,12 @@
 # OpenCode fallback proof audit lessons — July 2026
 
-Use this note when auditing OpenCode as relay fallback/comparison route metadata or testing its non-installed adapter fixture.
+Use this note when auditing retained OpenCode historical/comparison evidence or testing its non-installed adapter fixture.
 
 ## Current safe interpretation
 
-OpenCode is a configured fallback/comparison **route**, not a production programmatic lane. Production status and role resolution must report:
+OpenCode is not an executor and is absent from current implementation routes. If a historical compatibility probe is inspected, it must report:
 
 ```text
-selected_agent=opencode
 adapter_verified=false
 programmatic_dispatch_allowed=false
 dispatch_allowed=false
@@ -22,7 +21,7 @@ A historical adapter-shape proof included fake-binary negative contracts and a r
 
 Check all of these surfaces before accepting the current default-deny status:
 
-1. `scripts/hermes-busdriver-status` metadata for `relay.impl.secondary` and `relay.impl.fallback`;
+1. `scripts/hermes-busdriver-status` current implementation routes, which must not select OpenCode;
 2. `scripts/hermes-busdriver-relay-role` default-deny semantics;
 3. production `scripts/hermes-busdriver-agent-draft` blocker ordering;
 4. production `scripts/hermes-busdriver-agent-smoke` parser-negative wording;
@@ -68,16 +67,6 @@ publish_allowed=false
 
 Any finalization belongs to Busdriver/Claude authority or to an independently gated Hermes Delivery Mode operation whose own policy blocker has been removed by reviewed evidence. OpenCode never inherits finalization authority from route selection or adapter quality.
 
-## Requirements before any future promotion
+## Retention rule
 
-Do not change production dispatch metadata unless one reviewed change proves all of:
-
-1. enforceable process/container containment for every descendant;
-2. explicit least-privilege credential brokering with no ambient-secret inheritance;
-3. filesystem and network side-effect policy;
-4. reliable timeout teardown and reconciliation;
-5. no production fixture or caller-command unlock seam;
-6. mutation-resistant tests and executable sentinels;
-7. synchronized status, docs, skill references, and trusted-runtime ownership pins.
-
-Until then the correct production blocker is `agent_containment_and_credential_broker_unavailable`.
+Do not promote OpenCode into an executor route. Keep the compatibility probe fail-closed with `agent_containment_and_credential_broker_unavailable` and preserve the fixture only as historical test evidence.

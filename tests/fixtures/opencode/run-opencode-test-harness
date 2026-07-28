@@ -3,12 +3,11 @@
 from pathlib import Path
 import runpy
 
-ROOT = Path(__file__).resolve().parents[3]
-PRODUCTION = ROOT / "scripts" / "opencode" / "run-opencode-busdriver-draft"
-_production_ns = runpy.run_path(str(PRODUCTION))
-_production_ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
-_production_ns["main"].__globals__["trusted_opencode_executable"] = lambda value: Path(value).expanduser().resolve()
-globals().update({key: value for key, value in _production_ns.items() if not key.startswith("__")})
+FIXTURE_SOURCE = Path(__file__).with_name("run-opencode-busdriver-draft")
+_fixture_ns = runpy.run_path(str(FIXTURE_SOURCE))
+_fixture_ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
+_fixture_ns["main"].__globals__["trusted_opencode_executable"] = lambda value: Path(value).expanduser().resolve()
+globals().update({key: value for key, value in _fixture_ns.items() if not key.startswith("__")})
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1344,10 +1344,10 @@ def marker_status(repo: dict[str, Any]) -> dict[str, Any]:
 
 
 TRUSTED_RELAY_HELPER_DIGESTS = {'scripts/hermes-busdriver-litmus-status': '35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76',
-                                'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
-                                'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
-                                'scripts/hermes-busdriver-relay-role': '0430f7271d6c070bdb5826979ed09ed89373ef4438634a7f9ca6725fe6bf394d',
-                                'scripts/hermes-busdriver-status': 'bc5a8109d30f32289a0309f24fdaa3051f1d742b0f98fb384b094db632c9c6ad'}
+ 'scripts/hermes-busdriver-lock': '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9',
+ 'scripts/hermes-busdriver-pr-grind-check': 'e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212',
+ 'scripts/hermes-busdriver-relay-role': '32376d01a67cb51991df780c856bc8dd86a2a1d9ccec50f84fa8e2ecefe091ae',
+ 'scripts/hermes-busdriver-status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
 
 
 def _read_authenticated_helper(path: Path, expected_digest: str) -> bytes:
