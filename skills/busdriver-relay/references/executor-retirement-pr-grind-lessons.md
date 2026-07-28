@@ -2,6 +2,8 @@
 
 Use this when removing a production executor or fixing role/authority policy across runtime, manifests, tests, and docs.
 
+Current authority: `coding-workflow-authority-map-v0.1.md`. This procedural guide must not override that policy map.
+
 ## Closure order
 
 1. **Inventory every surface before editing.** Search production parsers, wrappers, manifests, consumer pins, status/brief envelopes, role resolvers, current-reference docs/ADRs, copied examples, and historical fixtures. A retired executor may remain only where the policy explicitly permits historical test evidence.
@@ -10,10 +12,10 @@ Use this when removing a production executor or fixing role/authority policy acr
 4. **Pin exact trust metadata, not just identity.** Fixed roles must validate selected agent, adapter verification, dispatch blocker, and every mutation/finalization/dispatch flag. A correct agent name with forged trust metadata is still invalid.
 5. **Name current policy directly.** When policy changes from “non-Codex” to “Pi-only,” add a `non_pi_*_allowed=false` invariant. Retain the old field only for schema compatibility, and teach every recursive authority validator that the new field is unsafe if true.
 6. **Treat current docs as executable policy.** Include current-reference ADRs, active skill text, synchronized authority-map copies, copied config examples, and worker-envelope enums in semantic negative tests. Historical OpenCode prose must be past-tense or fixture-qualified; it cannot appear as a current lane, worker enum, digest-convergence item, or mutating mode.
-7. **Reseal after runtime-byte changes.** Any changed manifested script requires fixed-point runtime resealing until consumer digests stop changing, then run manifest/pin closure tests.
-8. **Freeze the exact candidate.** Review `git diff origin/main --binary --no-ext-diff` so staged renames and unstaged changes are both included. Record hash and line count, run immutable review against that exact file, then verify the live diff still hashes identically before commit.
+7. **Close runtime-byte changes before PR grind.** For fixed-point resealing and downstream manifest validation, follow `executor-retirement-and-policy-convergence.md`; PR grind starts only after that closure passes.
+8. **Freeze the exact candidate.** Before freezing, stage every intended new path and require `git status --porcelain` to show no unexpected untracked files; then review `git diff origin/main --binary --no-ext-diff` so staged renames and tracked unstaged changes are both included. Record hash and line count, run immutable review against that exact file, then verify the live diff still hashes identically before commit.
 9. **Restart the PR grind after every head change.** Re-run the full suite, focused closure, static scan, readiness, immutable review, required checks, unresolved-thread query, and mergeability check. A prior green bot/check result is stale after force-push. Resolve a thread only after the fix is pushed and replied to.
-10. **Merge and verify before cleanup.** Latest-head checks and reviews must be clean before merge. Post-merge, probe the retired parser rejection, the retained executor blocker, manifest absence, role/list fail-closed behavior, authority flags, and clean main; only then remove worktree and topic branches.
+10. **Verify before cleanup.** After merge, follow `executor-retirement-and-policy-convergence.md` completely; only then remove worktree and topic branches.
 
 ## Pitfalls
 

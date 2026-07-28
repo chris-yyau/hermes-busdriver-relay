@@ -124,9 +124,34 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
         for leaked_path in PRIVATE_PATH_LEAKS:
             assert leaked_path not in reference_text
 
+    assert "removing a production route, relocating historical code to fixtures" in skill_text
+
+    policy_text = EXECUTOR_RETIREMENT_POLICY_REFERENCE.read_text()
+    assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in policy_text
+    assert (
+        "Pi is the sole executor route; Codex is fallback-coder/PR-lead metadata only; "
+        "OpenCode is non-executor history"
+    ) in policy_text
+    assert (
+        "all relay dispatch/finalization authority remains false; "
+        "the production dispatch blocker is fixed"
+    ) in policy_text
+    assert "Follow `executor-retirement-pr-grind-lessons.md`" in policy_text
+    assert "git diff origin/main" not in policy_text
+
+    pr_grind_text = EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE.read_text()
+    assert "Current authority: `coding-workflow-authority-map-v0.1.md`" in pr_grind_text
+    assert "stage every intended new path" in pr_grind_text
+    assert "git status --porcelain" in pr_grind_text
+    assert "follow `executor-retirement-and-policy-convergence.md`" in pr_grind_text
+    assert "live-config/installed-skill convergence" not in pr_grind_text
+
     review_text = PR_GRIND_DELIVERY_DISCIPLINE_REFERENCE.read_text()
     assert "full aggregate review bodies" in review_text
     assert "older head commit" in review_text
+    assert "current-head actionable review bodies" not in review_text
+    for leaked_path in PRIVATE_PATH_LEAKS:
+        assert leaked_path not in review_text
 
 
 def test_dependabot_recreate_pr_grind_lessons_are_durable():

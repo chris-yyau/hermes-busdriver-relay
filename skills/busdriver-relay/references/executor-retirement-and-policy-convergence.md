@@ -2,6 +2,8 @@
 
 Use this when a relay policy removes one production executor but keeps another, especially when historical adapter code is still valuable as contract evidence.
 
+Current authority: `coding-workflow-authority-map-v0.1.md`. This procedural guide must not override that policy map.
+
 ## Policy tuple first
 
 Write one current-policy tuple before editing:
@@ -12,7 +14,7 @@ Write one current-policy tuple before editing:
 - finalization authority;
 - status of retired adapters: absent from production, historical/test-only, or deleted.
 
-For the current relay policy: Pi is the sole executor route; Codex is fallback-coder/PR-lead metadata only; OpenCode is non-executor history; all relay dispatch/finalization authority remains false while the existing blocker is active.
+For the current relay policy: Pi is the sole executor route; Codex is fallback-coder/PR-lead metadata only; OpenCode is non-executor history; all relay dispatch/finalization authority remains false; the production dispatch blocker is fixed and no CLI flag or environment variable unlocks it.
 
 ## Retire all four surfaces
 
@@ -59,7 +61,7 @@ Do not pretty-print every constant map unconditionally. That creates unrelated s
 4. Run the full suite once with `-x` after a structural deletion to expose the first stale derivation cheaply.
 5. Fix all same-class inventory/floor assumptions found by a repository-wide search.
 6. Run the complete suite to completion.
-7. Only after the candidate is stable, record the diff hash and start immutable independent review. Any later edit invalidates that review and requires a fresh one.
+7. Follow `executor-retirement-pr-grind-lessons.md` for candidate freeze, exact-diff hashing, immutable review, and latest-head PR-grind mechanics. Start that sequence only after steps 1–6 pass.
 8. After merge, converge live relay config and the installed skill copy, then verify clean main and the retired executor's absence from production surfaces.
 
 ## Pitfalls
