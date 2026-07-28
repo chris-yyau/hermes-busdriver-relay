@@ -216,9 +216,17 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "justify `--binary`" in pr_grind_text
     assert "every `GIT binary patch` path" in pr_grind_text
     assert "literal or delta" in pr_grind_text
-    assert "Repeat the fetch, ancestry, base-SHA, full-status, and staged-hash checks" in pr_grind_text
-    assert "full aggregate review bodies" in pr_grind_text
-    assert "older head commit" in pr_grind_text
+    assert "After every head change, return to step 8" in pr_grind_text
+    assert "re-freeze the exact candidate" in pr_grind_text
+    assert "regenerate the immutable review artifact" in pr_grind_text
+    assert (
+        "Inspect unresolved threads, inline comments, issue comments, and full "
+        "aggregate review bodies independently."
+    ) in pr_grind_text
+    assert (
+        "An actionable outside-diff finding may exist only in a body attached "
+        "to an older head commit"
+    ) in pr_grind_text
     assert "body-only finding ledger" in pr_grind_text
     assert "A later green reviewer check and zero unresolved threads do not prove closure" in pr_grind_text
     assert "Do not treat a helper/check clean result as sufficient" in pr_grind_text
