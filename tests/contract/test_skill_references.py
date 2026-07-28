@@ -157,14 +157,16 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     )
     assert "filter.<name>.clean" in pr_grind_text
     assert "filter.<name>.process" in pr_grind_text
+    assert "reject every `.gitattributes` or `info/attributes` file" in pr_grind_text
+    assert "git -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null add --" in pr_grind_text
     assert "stage every intended new path" in pr_grind_text
     assert "git fetch --no-tags origin main" in pr_grind_text
     assert (
-        "git -c core.fsmonitor=false -c core.attributesFile=/dev/null status "
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
         "--porcelain=v1 --untracked-files=all --ignore-submodules=none"
     ) in pr_grind_text
     assert (
-        "git -c core.fsmonitor=false -c core.attributesFile=/dev/null status "
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
         "--porcelain=v1 --ignored=matching --untracked-files=all --ignore-submodules=none"
     ) in pr_grind_text
     assert "block every tracked index/worktree divergence" in pr_grind_text
