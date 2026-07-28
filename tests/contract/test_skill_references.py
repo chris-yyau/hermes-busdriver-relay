@@ -154,8 +154,16 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "stage every intended new path" in pr_grind_text
     assert "git fetch --no-tags origin main" in pr_grind_text
     assert "git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all" in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false status --porcelain=v1 --ignored=matching "
+        "--untracked-files=all"
+    ) in pr_grind_text
     assert "block every tracked index/worktree divergence" in pr_grind_text
+    assert "block every ignored path before testing" in pr_grind_text
     assert "tests execute the same tracked bytes that will be committed" in pr_grind_text
+    assert (
+        "fail closed on `.gitattributes`, `$GIT_DIR/info/attributes`, or configured diff drivers"
+    ) in pr_grind_text
     assert "git merge-base --is-ancestor origin/main HEAD" in pr_grind_text
     assert "git rev-parse origin/main" in pr_grind_text
     freeze_lines = [
@@ -179,6 +187,12 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     ):
         assert required_flag in freeze_line
     assert "diff.algorithm=myers" in freeze_line
+    assert "diff.relative=false" in freeze_line
+    assert "core.attributesFile=/dev/null" in freeze_line
+    assert "--no-indent-heuristic" in freeze_line
+    assert "--submodule=short" in freeze_line
+    assert "run from the repository root" in pr_grind_text
+    assert "root-scoped, `diff.relative=false` staged path inventory" in pr_grind_text
     assert "secret/private-path scan" in pr_grind_text
     assert "justify `--binary`" in pr_grind_text
     assert "binary literal chunks" in pr_grind_text
