@@ -158,12 +158,15 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "filter.<name>.clean" in pr_grind_text
     assert "filter.<name>.process" in pr_grind_text
     assert "reject every `.gitattributes` or `info/attributes` file" in pr_grind_text
-    assert "git -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null add --" in pr_grind_text
+    assert (
+        "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf "
+        "-c core.attributesFile=/dev/null add --"
+    ) in pr_grind_text
     assert "stage every intended new path" in pr_grind_text
     assert (
         "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main"
     ) in pr_grind_text
-    assert "git ls-files -v" in pr_grind_text
+    assert "git -c core.fsmonitor=false ls-files -v" in pr_grind_text
     assert "reject every assume-unchanged or skip-worktree entry" in pr_grind_text
     assert (
         "git -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf -c core.attributesFile=/dev/null status "
@@ -202,6 +205,7 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     ):
         assert required_flag in freeze_line
     assert "diff.algorithm=myers" in freeze_line
+    assert "core.fsmonitor=false" in freeze_line
     assert "diff.relative=false" in freeze_line
     assert "core.attributesFile=/dev/null" in freeze_line
     assert "--no-indent-heuristic" in freeze_line
