@@ -85,14 +85,29 @@ def test_current_status_records_merged_authority_chronology():
     )
     assert base
     base_commit, documented_tree = base.groups()
-    actual_tree = subprocess.run(
+    base_tree = subprocess.run(
         ["git", "rev-parse", f"{base_commit}^{{tree}}"],
         cwd=ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
-    ).stdout.strip()
-    assert actual_tree == documented_tree
+    )
+    if base_tree.returncode == 0:
+        assert base_tree.stdout.strip() == documented_tree
+    else:
+        # Depth-1 clones and source archives legitimately lack the documented
+        # historical commit object; a full non-shallow Git checkout must still
+        # fail here so a typo in the documented commit cannot false-green.
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert shallow.stdout.strip() == "true" or not (ROOT / ".git").exists(), (
+            base_tree.stderr.strip()
+        )
     assert live
     assert historical_seal in current_section
     assert "Current main after" not in current_section
