@@ -758,7 +758,7 @@ def test_docs_distinguish_observed_plugin_version_from_trust_manifest_version():
     claims = re.search(
         r"Pre-refresh plugin observation captured on \d{4}-\d{2}-\d{2}: installed "
         r"Busdriver `(\d+\.\d+\.\d+)` at commit `([0-9a-f]{40})`; trusted "
-        r"production manifest pin `([^`]+)` at commit `([0-9a-f]{40})`\.",
+        r"production manifest pin `(\d+\.\d+\.\d+)` at commit `([0-9a-f]{40})`\.",
         status_text,
     )
     assert claims
