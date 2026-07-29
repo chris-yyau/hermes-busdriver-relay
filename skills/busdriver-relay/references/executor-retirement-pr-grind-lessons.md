@@ -29,6 +29,9 @@ Closing phase: enter this guide only after steps 1–6 in `executor-retirement-a
 ## Pitfalls
 
 - A bot check marked “pass” because it was rate-limited is not a fresh review verdict; rely on the exact immutable review plus live unresolved-thread inspection and required-check policy.
+- A hostile clean-filter control must force Git to read file content: rewrite a tracked file with different bytes but the same byte length as its indexed blob, and assert that invariant in the test. A size change can let `git status` classify the path as dirty from stat data alone without invoking the filter, making the control flaky.
+- Cleanup is scoped to artifacts owned by the current delivery. Inventory pre-existing worktrees and branches before starting; after merge remove the owned topic artifacts, but preserve and report unrelated dirty WIP instead of asserting that the whole repository has only one branch or worktree.
+- A status document cannot name its own future squash commit. Label the verified implementation base as immediately preceding the docs-only refresh; validate separate live-observation and trust-pin claim shapes without hard-coding a transient installed version or requiring observed and pinned versions to differ.
 - Updating only a README leaves active ADRs, status docs, skill references, or copied JSON examples contradictory.
 - `coding_agent=pi` does not prove fixed primary/secondary/fallback route metadata or list-path safety.
 - A full suite from the prior frozen hash is supporting evidence, not final-candidate evidence after another edit.

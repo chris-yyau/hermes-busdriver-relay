@@ -230,6 +230,9 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "body-only finding ledger" in pr_grind_text
     assert "A later green reviewer check and zero unresolved threads do not prove closure" in pr_grind_text
     assert "Do not treat a helper/check clean result as sufficient" in pr_grind_text
+    assert "rewrite a tracked file with different bytes but the same byte length" in pr_grind_text
+    assert "Inventory pre-existing worktrees and branches before starting" in pr_grind_text
+    assert "A status document cannot name its own future squash commit" in pr_grind_text
     assert "follow step 8 of `executor-retirement-and-policy-convergence.md`" in pr_grind_text
     for postmerge_owner_phrase in (
         "converge live relay config",

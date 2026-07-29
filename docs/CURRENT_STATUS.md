@@ -1,12 +1,12 @@
 # Current Status — Hermes Busdriver Relay
 
-Last observed installed Busdriver marketplace plugin: version `1.100.8`, commit `bde3f0ea45c15f7342569ed0a53d9c671173950c`. The reviewed repository `trusted-runtime-manifest` separately pins Busdriver package version `1.90.0` and commit `835dc1784a7ae5c34a5f8f58d6731a482f64df0a`.
+Pre-refresh plugin observation captured on 2026-07-29: installed Busdriver `1.100.9` at commit `f37c4662ef265c63f3713922b29c904a2e9090f8`; trusted production manifest pin `1.90.0` at commit `835dc1784a7ae5c34a5f8f58d6731a482f64df0a`. These are separate live-observation and trust-baseline claims; equality or mismatch between the versions grants no dispatch or mutation authority.
 
 ## Current verification
 
 Historical sealed main immediately before PR #157: commit `1dc6bbf4eaa91341ecda31d4e8e2a05f80c5de96`, tree `2b4de738d04283ebf1d945db63bbbf64d2dfdc1f`, with 32-stack authority result `4090 passed, 14 skipped, 1 deselected`. It is retained only as provenance and is not current main/top.
 
-Current main after squash-merged Pi-only policy PR #168 and executor-retirement skill-source PR #169 is commit `0853d513fb2c7fc35b143e0b71d669b788ffe0d6`, tree `1422232f6635c9d60c8f83869dd2e64f5cfdf42e`; local `main` and `origin/main` are synchronized and clean. The observed squash tree exactly matches the tree of PR #169's reviewed head commit `5a8a70182ad88fc256a08fd9d1164ee03fc8c918`. All seven push-to-main checks—Tests, Compliance, Dependency CVEs, Code Security, IaC Misconfig, Actions Security, and Reports—completed successfully.
+Verified repository base immediately preceding this docs/contract refresh is squash-merged post-Pi-only status PR #170 at commit `4621810c70221cca404f40cc2da7eba52b959ee1`, tree `1a43352c7ce94e19fea7d8b49e76523ad3813cca`. This is branch-open base evidence, not a claim about this refresh's future squash commit. PR #169's reviewed head and squash-merge trees matched exactly; all seven push-to-main checks—Tests, Compliance, Dependency CVEs, Code Security, IaC Misconfig, Actions Security, and Reports—completed successfully on that tree, and immutable review confirmed `0 Blocker / 0 Major / 0 Minor`.
 
 PR #168 established the current Pi-only executor policy: Pi is the sole implementation route; Codex remains non-dispatchable fallback-coder/PR-lead metadata; OpenCode is parser-rejected and retained only as historical fixture evidence. Its final exact candidate passed `4046 passed, 13 skipped`, its focused policy/runtime/docs/manifest closure passed `1206 passed`, and immutable review returned `PASS — 0 Blocker / 0 Major / 0 Minor`.
 

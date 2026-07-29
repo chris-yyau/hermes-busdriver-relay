@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -36,7 +37,7 @@ def test_readme_contents_cover_every_manifested_production_entrypoint():
 
 def test_current_status_names_security_closure_artifacts_explicitly():
     text = CURRENT_STATUS.read_text()
-    assert "PR #168's final exact pre-merge candidate completed `4042 passed, 13 skipped`" in text
+    assert "PR #168's final exact pre-merge candidate completed `4046 passed, 13 skipped`" in text
     assert "affected focused closure completed `1206 passed`" in text
     required = {
         "config/trusted-runtime-manifest.json",
@@ -63,21 +64,6 @@ def test_current_status_records_merged_authority_chronology():
         "authority result `4090 passed, 14 skipped, 1 deselected`. It is retained "
         "only as provenance and is not current main/top."
     )
-    current_main = (
-        "Current main after squash-merged skill-source sync PR #160 and "
-        "terminal-newline follow-up PR #161 is commit "
-        "`f3d35f3774e9da878c780be4f55ada873955feca`, tree "
-        "`76b1cf47023c2fc0e48eece4099670aae67eedb2`"
-    )
-    late_follow_up = (
-        "A late exact security review then found 13 newly synced Markdown "
-        "references without terminal LF."
-    )
-    live_evidence = (
-        "Live post-merge relay evidence captured before this docs-only refresh "
-        "branch was opened reported zero open PRs, a clean `220`-file "
-        "installed/repo skill comparison, no skill reference missing terminal LF"
-    )
     section_start = "## Current verification\n\n"
     section_end = "\n## Locations"
     assert section_start in text
@@ -86,10 +72,30 @@ def test_current_status_records_merged_authority_chronology():
     )
     assert separator
 
-    for required in (historical_seal, current_main, late_follow_up, live_evidence):
-        assert required in current_section
+    base = re.search(
+        r"Verified repository base immediately preceding this docs/contract refresh "
+        r"is .+ at commit `([0-9a-f]{40})`, tree `([0-9a-f]{40})`\.",
+        current_section,
+    )
+    live = re.search(
+        r"Live post-merge evidence captured before this docs-only refresh "
+        r"branch was opened reported zero open PRs and issues, a clean `\d+`-file "
+        r"installed/repository skill comparison",
+        current_section,
+    )
+    assert base
+    base_commit, documented_tree = base.groups()
+    actual_tree = subprocess.run(
+        ["git", "rev-parse", f"{base_commit}^{{tree}}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert actual_tree == documented_tree
+    assert live
+    assert historical_seal in current_section
+    assert "Current main after" not in current_section
     assert "UNMERGED / UNSEALED" not in current_section
-    assert current_section.index(historical_seal) < current_section.index(
-        current_main
-    ) < current_section.index(late_follow_up) < current_section.index(live_evidence)
+    assert current_section.index(historical_seal) < base.start() < live.start()
     assert "## Historical superseded evidence" in text
