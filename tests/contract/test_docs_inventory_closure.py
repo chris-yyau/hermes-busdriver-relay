@@ -11,6 +11,28 @@ CURRENT_STATUS = ROOT / "docs" / "CURRENT_STATUS.md"
 MANIFEST = ROOT / "config" / "trusted-runtime-manifest.json"
 
 
+def reports_explicit_missing_object(
+    result: subprocess.CompletedProcess[str], expression: str
+) -> bool:
+    return (
+        result.returncode == 0
+        and result.stdout.strip() == f"{expression} missing"
+        and not result.stderr.strip()
+    )
+
+
+def test_missing_object_probe_rejects_arbitrary_git_failures():
+    expression = "0" * 40 + "^{tree}"
+    missing = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=f"{expression} missing\n", stderr=""
+    )
+    arbitrary_failure = subprocess.CompletedProcess(
+        args=[], returncode=128, stdout="", stderr="fatal: permission denied"
+    )
+    assert reports_explicit_missing_object(missing, expression)
+    assert not reports_explicit_missing_object(arbitrary_failure, expression)
+
+
 def readme_contents_paths() -> set[str]:
     text = README.read_text()
     section = text.split("## Contents", 1)[1].split("## Commands", 1)[0]
@@ -92,58 +114,78 @@ def test_current_status_records_merged_authority_chronology():
         GIT_NO_REPLACE_OBJECTS="1",
         GIT_ALLOW_PROTOCOL="",
     )
-    base_tree = subprocess.run(
-        ["git", "rev-parse", f"{base_commit}^{{tree}}"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=git_env,
-    )
-    if base_tree.returncode == 0:
-        assert base_tree.stdout.strip() == documented_tree
-    else:
-        # Depth-1 clones and source archives legitimately lack the documented
-        # historical commit object; a full non-shallow Git checkout must still
-        # fail here so a typo in the documented commit cannot false-green.
-        shallow = subprocess.run(
-            ["git", "rev-parse", "--is-shallow-repository"],
+    if (ROOT / ".git").exists():
+        tree_expression = f"{base_commit}^{{tree}}"
+        base_tree = subprocess.run(
+            ["git", "rev-parse", tree_expression],
             cwd=ROOT,
             check=False,
             capture_output=True,
             text=True,
             env=git_env,
         )
-        partial_extension = subprocess.run(
-            ["git", "config", "--local", "--get", "extensions.partialClone"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=git_env,
-        )
-        promisor_remote = subprocess.run(
-            ["git", "config", "--local", "--get-regexp", r"^remote\..*\.promisor$"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=git_env,
-        )
-        partial_clone = (
-            partial_extension.returncode == 0
-            and bool(partial_extension.stdout.strip())
-        ) or (
-            promisor_remote.returncode == 0
-            and any(line.rstrip().endswith(" true") for line in promisor_remote.stdout.splitlines())
-        )
-        assert (
-            shallow.stdout.strip() == "true"
-            or partial_clone
-            or not (ROOT / ".git").exists()
-        ), (
-            base_tree.stderr.strip()
-        )
+        if base_tree.returncode == 0:
+            assert base_tree.stdout.strip() == documented_tree
+        else:
+            # Depth-1 and partial clones may genuinely lack this historical tree.
+            # `--no-lazy-fetch` keeps this a local object-presence probe, while
+            # `cat-file --batch-check` emits an explicit, machine-readable
+            # `<expression> missing`; arbitrary Git errors must not be accepted as
+            # archive signals.
+            missing_tree = subprocess.run(
+                [
+                    "git",
+                    "--no-lazy-fetch",
+                    "cat-file",
+                    "--batch-check=%(objectname) %(objecttype)",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                input=f"{tree_expression}\n",
+                env=git_env,
+            )
+            shallow = subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            partial_extension = subprocess.run(
+                ["git", "config", "--local", "--get", "extensions.partialClone"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            promisor_remote = subprocess.run(
+                ["git", "config", "--local", "--get-regexp", r"^remote\..*\.promisor$"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+            partial_clone = (
+                partial_extension.returncode == 0
+                and bool(partial_extension.stdout.strip())
+            ) or (
+                promisor_remote.returncode == 0
+                and any(
+                    line.rstrip().endswith(" true")
+                    for line in promisor_remote.stdout.splitlines()
+                )
+            )
+            assert reports_explicit_missing_object(missing_tree, tree_expression), (
+                base_tree.stderr.strip()
+            )
+            assert (
+                shallow.returncode == 0 and shallow.stdout.strip() == "true"
+            ) or partial_clone, base_tree.stderr.strip()
     assert live
     assert historical_seal in current_section
     assert "Current main after" not in current_section
