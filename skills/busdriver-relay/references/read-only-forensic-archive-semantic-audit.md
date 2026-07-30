@@ -14,8 +14,8 @@ A patch being non-equivalent under `git cherry` does not make it C. Restacks, sq
 
 ## Strict read-only procedure
 
-1. **Freeze scope.** Record the archive path and exact current-main commit supplied by the caller. Do not fetch, switch branches, inspect the live checkout, or refresh its index. In a delegated audit, make the no-write boundary exhaustive: forbid repository/worktree/archive, HOME, installed-skill, memory, GitHub, ref/index, scratch, cache, and telemetry writes. Explicitly forbid `skill_manage`/memory updates even when generic post-task guidance would normally encourage capturing a lesson; the reviewer should return suggested skill text in its report and let the parent apply it after the closing seal.
-2. **Verify archive integrity and provenance.** Compare the actual recursive inventory, artifact sizes, and SHA-256 values to metadata; report missing and extra paths. Treat the metadata schema as data rather than assuming fixed key names: enumerate its declared artifact map first, then verify each declaration. Recompute `metadata.json` itself and compare it with any archive-creation transcript or signed manifest that recorded the digest—read-only permissions alone are not provenance. For an in-session zero-drift check, compute an opening and closing aggregate digest in memory over sorted `relative_path + NUL + byte_count + NUL + sha256 + LF`; this binds names as well as contents without creating reviewer scratch. Before any Git command, follow `git-observation-sandbox-lessons.md`: authenticate the Git binary, deny child processes, network, and writes, clear ambient `GIT_*`, disable system/global config and pagers, set optional-lock/lazy-fetch/protocol defenses, and fail closed on stderr or partial output. Then run `git bundle list-heads` and `git bundle verify`; never `unbundle`, import objects, or create refs. Inspect every path with `lstat` before opening it: hash regular-file bytes without following symlinks, record symlinks by link text, and classify FIFOs/sockets/devices by type without opening them. File-content hashes do not bind mode, xattrs, ACLs, symlink identity, or timestamps unless the schema records them.
+1. **Freeze scope.** Record the archive path and exact current-main commit supplied by the caller. Before opening, require the caller to define any persistent result channel. If cache, spool, or telemetry is forbidden and no non-persisting bounded channel exists, stop. Forbid repository/worktree/archive, HOME, installed-skill, memory, GitHub, ref/index, and scratch writes; return proposed lessons to the parent instead of mutating skills or memory.
+2. **Verify archive integrity and provenance.** Apply every executable, all-filesystem-write, child/network, environment, descriptor-walker, pipeline, and observer rule in `git-observation-sandbox-lessons.md` to Git, hashing, and parsing. Validate metadata paths as normalized scope-relative names before descriptor-bound reads. Compare recursive kind/mode/size/link-text/content rows and metadata bytes with a trusted creation digest when available. Cross-bind bundle ref/OID to metadata branch/HEAD, metadata base/merge-base to the bundle graph, staged OLD OID/mode/path to the bundle HEAD tree, and each patch payload to its recomputed NEW blob. Without a trusted creation digest, report integrity—not provenance. `git bundle verify` either brokers only its authenticated exact `rev-list` child or is reported unavailable under strict no-child mode; never silently weaken containment.
 3. **Reconstruct and triangulate dirty layers.** Read metadata/status, then inspect:
    - bundle commits (`HEAD` relative to its merge base),
    - `index-vs-head.patch` for staged intent,
@@ -23,7 +23,7 @@ A patch being non-equivalent under `git cherry` does not make it C. Restacks, sq
    - `worktree-vs-head.patch` as the aggregate cross-check,
    - captured untracked bytes exactly as archived.
 
-   Parse `diff --git` paths and full `index OLD..NEW` headers in memory. Require each patch path set to match the corresponding porcelain status column, aggregate paths to equal their union, and per-path blob endpoints to compose as `HEAD→index→worktree = HEAD→worktree`. An empty staged patch is valid only when metadata reports no staged paths. Captured untracked inventory must exactly match metadata; ignored paths are declared exclusions, not captured evidence.
+   Require NUL-framed raw/name-status sidecars for exact path accounting. Handle rename/copy source and destination explicitly; fail closed on unmerged, intent-to-add, typechange, or sparse states not represented by the schema. Validate full-index OLD/NEW modes and OIDs, recompute regular-file NEW blobs from payload bytes, and require `HEAD→index→worktree = HEAD→worktree`. Captured untracked inventory must exactly match metadata; ignored paths are declared exclusions, not captured evidence.
 4. **Avoid the live worktree.** Resolve `.git` during the plain-file preflight: accept either a directory or a gitfile containing one `gitdir:` path, resolve a relative gitfile target against the worktree root, and reject malformed or out-of-scope targets. Bind the result as `$GIT_DIR` and use only `git --git-dir="$GIT_DIR"` with exact object expressions such as `<main>:path`. Disable external diff and text conversion for diff review (`--no-ext-diff --no-textconv`); use `git grep <main> -- <tracked paths>` or `git blame -L ... <main> -- path` for precise evidence.
 5. **Map branch intent.** For each archive-only commit, record subject, changed paths, and the capability/policy it tried to establish. Split mixed commits into separate A/B/C sub-intents.
 6. **Compare against current-main behavior.** Prefer current production parsers, blocker maps, route policy, tests, ADRs, and status docs over historical claims. Look for renamed or relocated equivalents before declaring C.
@@ -36,27 +36,15 @@ A patch being non-equivalent under `git cherry` does not make it C. Restacks, sq
 When two archives appear related, do not compare only commit SHAs or subjects:
 
 1. Enumerate each stack oldest-first from its merge base.
-2. Compute `git show --no-ext-diff --no-textconv --pretty=format: --binary --full-index <commit> | git patch-id --stable` and pair commits by patch-ID and intent.
+2. Broker `git show --no-ext-diff --no-textconv --pretty=format: --binary --full-index <commit>` and `git patch-id --stable` as two separate validated steps with bytes passed in memory; never trust a shell pipeline. Classify merge/empty commits parent-by-parent or mark them unsupported.
 3. If bundle heads still differ, compare the base-to-base delta and head-to-head delta by stable patch-ID. Matching deltas usually prove inherited base drift rather than divergent feature intent.
 4. Compare dirty snapshots independently. Duplicate committed stacks do not make one staged/unstaged/untracked state a forensic substitute for the other.
 
 `git cherry` showing `+` against current main proves only that there is no exact patch-ID match. It does not prove the legacy behavior is unique, desirable, or C.
 
-## Useful read-only commands
+## Brokered read-only operations
 
-```bash
-# Never point these at the live worktree.
-git bundle list-heads "$ARCHIVE/branch.bundle"
-git --git-dir="$GIT_DIR" bundle verify "$ARCHIVE/branch.bundle"
-shasum -a 256 "$ARCHIVE"/branch.bundle "$ARCHIVE"/*.patch
-
-git --git-dir="$GIT_DIR" merge-base "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$GIT_DIR" rev-list --left-right --count "$MAIN...$ARCHIVE_HEAD"
-git --git-dir="$GIT_DIR" cherry "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$GIT_DIR" log --format='%H%x09%P%x09%s' "$MAIN..$ARCHIVE_HEAD"
-git --git-dir="$GIT_DIR" diff --no-ext-diff --no-textconv --name-status "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$GIT_DIR" grep -n -I -E '<policy-or-symbol-pattern>' "$MAIN" -- <tracked-paths>
-```
+Use the authenticated broker—not ambient shell commands or globs—for bundle head listing/verification, descriptor-bound SHA-256, merge-base/count/cherry/log, no-ext-diff/no-textconv comparisons, and object-level grep. Validate each operation's exit status, empty stderr, complete bounded output, and opening/closing inventory. Never point an operation at the live worktree.
 
 ## Evidence and output contract
 
@@ -80,5 +68,5 @@ Report:
 - **Do not run tests in a strict archival audit.** Tests create caches and exercise mutation-oriented fixtures; static current-main contract evidence is the admissible comparison unless the caller explicitly authorizes a sandbox.
 - **Do not import a bundle to inspect it.** If the objects already exist in the canonical object database, inspect them by hash; otherwise stop rather than creating refs, indexes, or scratch repositories under a no-write mandate.
 - **Do not overstate the image.** If ignored bytes, original untracked modes, symlink identity, xattrs, or ACLs were not recorded, call it recovery-complete within its declared scope—not a bit-for-bit forensic image. This limitation does not by itself create a C chunk.
-- **Account for tooling side effects.** Oversized output may be automatically spooled outside the audited scope. Include any such path in the side-effect report; under a strict no-delete order, disclose it rather than silently cleaning it.
+- **Do not excuse tooling side effects afterward.** Persistent output is allowed only when the caller approved that channel before opening. Otherwise fail closed before a tool that may spool; later disclosure does not satisfy no-write.
 - **Do not leave installed skills outside an underspecified no-write boundary.** A reviewer can correctly avoid the archive and repo yet still mutate the live skill library while following generic post-task learning guidance. Name installed skills, memory, and their management tools explicitly in the forbidden surfaces; collect proposed lessons in the report, then patch them only after the audit closes.

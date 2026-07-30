@@ -87,7 +87,11 @@ def test_current_status_records_merged_authority_chronology():
     assert base
     base_commit, documented_tree = base.groups()
     git_env = os.environ.copy()
-    git_env.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
+    git_env.update(
+        GIT_NO_LAZY_FETCH="1",
+        GIT_NO_REPLACE_OBJECTS="1",
+        GIT_ALLOW_PROTOCOL="",
+    )
     base_tree = subprocess.run(
         ["git", "rev-parse", f"{base_commit}^{{tree}}"],
         cwd=ROOT,

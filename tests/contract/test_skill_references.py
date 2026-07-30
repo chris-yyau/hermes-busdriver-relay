@@ -284,11 +284,11 @@ def test_exact_review_and_legacy_worktree_audit_lessons_are_durable():
             "GIT_NO_REPLACE_OBJECTS=1",
             "reject every `refs/replace/**` entry",
             "full sorted row manifest",
-            "sorted, NUL-framed tuples",
-            "FIFOs/sockets/devices by type without opening them",
-            "every linked worktree index",
+            "descriptor-bound no-follow walker",
+            "-I -S -B",
             "`PASS` is allowed only at `0/0/0`",
-            "Recovering accidental loose Git objects",
+            "Accidental mutation",
+            "do not delete, prune, restore",
         ),
         LEGACY_DIRTY_WORKTREE_AUDIT_REFERENCE: (
             "Recover **intent**, not patches",
@@ -299,15 +299,15 @@ def test_exact_review_and_legacy_worktree_audit_lessons_are_durable():
             "a private same-UID executable copy does not solve process containment or credential brokering",
             "If legacy code bypasses a current blocker",
             "Read-only opening and closing seals",
-            "classified with `lstat` before opening it",
+            "exact raw/binary committed, staged, and unstaged diff SHA-256",
+            "Matching committed patch IDs never make divergent dirty snapshots substitutes",
         ),
         READ_ONLY_SEMANTIC_AUDIT_REFERENCE: (
             "Audit intent, not textual novelty",
             "Authenticate the real Git executable",
-            "A status digest alone cannot detect changed bytes",
-            "no repository, worktree, archive, HOME, installed-skill, scratch, cache, result-cache, or telemetry writes",
-            "Classify every path with `lstat` before opening it",
-            "NUL separators",
+            "all-filesystem-write",
+            "descriptor-bound no-follow walker",
+            "Stable patch-ID is semantic deduplication only",
             "C is empty",
         ),
         INTERRUPTED_CLAUDE_TMUX_REFERENCE: (
@@ -321,15 +321,15 @@ def test_exact_review_and_legacy_worktree_audit_lessons_are_durable():
             "restore expected values rather than diagnosing missing auth or binaries",
             "`TMUX` contains an absolute socket path",
             "Never use naked `tmux kill-server`",
+            "interrupted-session recovery never grants install authority",
             "Continue the existing Busdriver/Litmus loop",
         ),
         FORENSIC_ARCHIVE_SEMANTIC_AUDIT_REFERENCE: (
             "Strict read-only procedure",
-            "make the no-write boundary exhaustive",
             "git --git-dir=\"$GIT_DIR\"",
-            "opening and closing aggregate digest",
-            "Inspect every path with `lstat` before opening it",
-            "git show --no-ext-diff --no-textconv",
+            "Cross-bind bundle ref/OID to metadata branch/HEAD",
+            "never trust a shell pipeline",
+            "Without a trusted creation digest, report integrity—not provenance",
             "C = ∅",
             "Do not import a bundle",
             "Do not leave installed skills outside an underspecified no-write boundary",
@@ -347,8 +347,36 @@ def test_exact_review_and_legacy_worktree_audit_lessons_are_durable():
 
     interrupted_text = INTERRUPTED_CLAUDE_TMUX_REFERENCE.read_text()
     assert "  --dangerously-skip-permissions \\" not in interrupted_text
-    assert interrupted_text.index("cleanup() {") < interrupted_text.index("WORK=$(mktemp -d)")
-    assert interrupted_text.index("trap cleanup EXIT") < interrupted_text.index('mkdir -p "$TMUX_TMPDIR"')
+    assert '"$CLAUDE_BIN" -p --resume' in interrupted_text
+    assert "\nclaude -p --resume" not in interrupted_text
+    assert interrupted_text.index("cleanup() {") < interrupted_text.index('WORK=$("$MKTEMP_BIN" -d)')
+    assert interrupted_text.index('WORK=$("$MKTEMP_BIN" -d)') < interrupted_text.index("trap cleanup EXIT")
+    assert '"$TMUX_BIN" -S "$SOCK" kill-server' in interrupted_text
+    assert "\ntmux kill-server" not in interrupted_text
+    assert "TMUX_SERVER_PID" in interrupted_text
+    assert '"$socket_pid" != "$TMUX_SERVER_PID"' in interrupted_text
+    assert "private_tmux_socket_missing" in interrupted_text
+    assert "exit 126" in interrupted_text
+    assert "return 126" not in interrupted_text
+    assert "denies it write access to `$WORK`" in interrupted_text
+    assert 'new-session -d -s private-canary "$SLEEP_BIN" 3600' in interrupted_text
+    assert '"$SLEEP_BIN 3600"' not in interrupted_text
+
+    sandbox_text = (REFERENCE_DIR / "git-observation-sandbox-lessons.md").read_text()
+    for phrase in (
+        "denies **all filesystem writes**",
+        "GIT_ATTR_NOSYSTEM=1",
+        "--ignore-submodules=none",
+        "Reject split indexes, alternates, or reftable",
+        "Descriptor-bound filesystem inventories",
+        "`O_NOFOLLOW|O_NONBLOCK`",
+        "repeat `fstat` after hashing",
+        "sole network-enabled observer profile",
+        "stable patch-ID is semantic deduplication only",
+        "-I -S -B",
+        "caller-approved authenticated GET-only client",
+    ):
+        assert phrase in sandbox_text
 
     assert "hard problem is preserving a strict no-write observation boundary" in skill_text
     assert "semantic classification of legacy Relay intent against current main" in skill_text

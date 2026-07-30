@@ -14,11 +14,11 @@ A `git cherry` or patch-ID miss proves only that the old patch is not exact. It 
 
 ## Truly read-only observation
 
-1. Define the audited paths and make the no-write boundary exhaustive: no repository, worktree, archive, HOME, installed-skill, scratch, cache, result-cache, or telemetry writes.
+1. Define audited paths, caller-approved result channels, and an exhaustive no-write boundary before opening. If cache, result-cache, spool, or telemetry is forbidden and no non-persisting bounded channel exists, stop; the reviewer cannot exempt it afterward.
 2. Before worktree-facing Git, inspect repository/common/worktree config, `.git` pointers, attributes sources, and submodule config as plain files.
 3. Authenticate the real Git executable. On systems where the public Git path is a tool-selection shim, resolve and authenticate the real binary behind it before sandboxing; otherwise a no-child sandbox correctly blocks the shim's second exec.
-4. Run Git under an OS sandbox denying repository writes, network, and child process creation. Also clear ambient `GIT_*`, disable global/system config, set `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`, empty protocols, `core.fsmonitor=false`, and reject any stderr.
-5. Capture opening and closing `HEAD`, exact porcelain-v2 status bytes/SHA-256, index SHA-256, and a deterministic worktree manifest. Classify every path with `lstat` before opening it; hash regular-file bytes without following symlinks, record symlinks by link text, and record FIFOs/sockets/devices by type without opening them. Frame sorted manifest fields unambiguously with NUL separators. A status digest alone cannot detect changed bytes whose dirty path set stayed the same.
+4. Apply the complete executable, all-filesystem-write, child/network, environment, submodule, advanced-layout, and stderr boundary in `git-observation-sandbox-lessons.md` to every observation.
+5. Capture opening and closing `HEAD`, branch/pinned-main/merge-base, exact NUL-framed status, ignored inventory, index/backing bytes, exact raw/binary diff SHA-256, refs/object rows, and a full worktree manifest built by the shared descriptor-bound no-follow walker. Stable patch-ID is semantic deduplication only. After closing, read no candidate surface again.
 6. Run no tests, hooks, formatters, package commands, checkout, stash, fetch, or object-producing Git commands when prohibited.
 
 ## Audit sequence
@@ -36,7 +36,7 @@ A `git cherry` or patch-ID miss proves only that the old patch is not exact. It 
    - production smoke for a retired executor → parser rejection plus historical, non-installed fixture coverage.
 8. **Reconcile with policy history:** current docs and later policy commits can intentionally retire behavior that still looks well-tested in the old tree.
 9. **Report C exactly:** give a literal path/symbol list, including `∅` when empty. Never leave C implicit.
-10. **Give archive safety:** when C is empty, say the worktrees are semantically safe to archive/remove only after a forensic bundle captures HEAD/base, index, exact status, staged/unstaged full diffs, untracked bytes/modes, patch-ID mapping, and byte manifests.
+10. **Give archive safety:** when C is empty, say only that no intent needs rescue. Archive/remove still requires caller retention/discard authority plus verified bundle head/base/merge-base, index bytes, NUL status, ignored exclusions, separate staged/unstaged full-index raw diffs, every untracked entry, and descriptor-bound manifests.
 
 ## Reporting shape
 

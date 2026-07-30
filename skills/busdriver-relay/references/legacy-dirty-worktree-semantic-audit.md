@@ -64,48 +64,28 @@ If legacy code bypasses a current blocker without implementing its required boun
 
 ## Read-only opening and closing seals
 
-For strict audits, inspect `.git` or the linked-worktree gitfile, common-dir config, any `config.worktree`, and every repository/info attributes source as plain files before invoking Git. Then follow `git-observation-sandbox-lessons.md`: dispatch an authenticated Git binary inside a no-child/no-network sandbox and fail closed if that boundary is unavailable. The settings below are defense in depth, not a substitute for containment—repository-selected filters, submodules, or lazy fetch can otherwise execute during nominally read-only status/diff calls:
+For strict audits, resolve topology and inspect Git/common/worktree config, gitfiles, attributes, and submodule metadata as plain descriptor-bound bytes. Then apply the complete executable, all-filesystem-write, child/network, environment, descriptor-walker, and advanced-layout policy in `git-observation-sandbox-lessons.md` to every Git and non-Git observation. Clear all ambient `GIT_*` before rebuilding the documented command-local allowlist. If the sandbox, authenticated executables, non-persisting result channel, or required backing-store seal is unavailable, fail closed.
 
-```text
-GIT_CONFIG_NOSYSTEM=1
-GIT_CONFIG_GLOBAL=/dev/null
-GIT_OPTIONAL_LOCKS=0
-GIT_NO_LAZY_FETCH=1
-GIT_ALLOW_PROTOCOL=
-git -c core.fsmonitor=false -c core.hooksPath=/dev/null ...
-git diff --no-ext-diff --no-textconv ...
-```
+Treat the opening seal as a hard gate: do not begin semantic inspection until it succeeds for every candidate. Seal repositories independently so one bad linked worktree does not erase valid opening evidence for another.
 
-Reject non-empty stderr and partial stdout even when Git exits zero.
+At opening and closing record:
 
-Treat the opening seal as a hard gate: do not begin semantic inspection until it has completed successfully for every candidate. A closing-only hash cannot be relabeled as opening evidence; if the opening seal was not captured, report that limitation instead of claiming full-session no-drift proof.
+- HEAD, symbolic branch ref/value, pinned main, merge-base, and descriptor-bound common/worktree Git topology;
+- exact NUL-framed porcelain-v2 status, separate ignored inventory, and all non-ignored untracked paths;
+- raw index bytes plus any approved backing stores;
+- exact raw/binary committed, staged, and unstaged diff SHA-256; use stable patch-ID only for semantic deduplication;
+- descriptor-bound full worktree, refs, and object-store row manifests including kind, mode, size, link text, and regular-file SHA-256.
 
-For linked worktrees, resolve both paths before hashing anything:
-
-- `git rev-parse --git-dir` owns that worktree's `HEAD` and index;
-- `git rev-parse --git-common-dir` owns the shared object store and usually shared refs/config;
-- never assume `$GIT_DIR/objects` exists for a linked worktree.
-
-Seal repositories independently, or isolate errors per repository, so one bad linked-worktree path cannot discard otherwise valid opening output.
-
-At both opening and closing record:
-
-- HEAD, symbolic branch ref, branch-ref value, pinned main value, and merge-base;
-- porcelain-v2 status with all untracked paths;
-- index path, size, mtime, inode, and SHA-256;
-- aggregate committed/staged/unstaged stable patch IDs (`EMPTY` explicitly for empty layers);
-- an aggregate manifest over every untracked path, classified with `lstat` before opening it: record byte count and SHA-256 only for regular files without following symlinks; record symlinks by type plus link text, and FIFOs/sockets/devices by type without opening them.
-
-Closing must reproduce the opening status, refs, index identity/hash, layer seals, and untracked hashes. This catches optional index refreshes and concurrent edits that a final clean/dirty sentence would miss. After the closing seal, perform no more candidate reads. Tool-managed result caching outside the protected repo/worktree/HOME scope may be reported separately; do not confuse it with project mutation.
+Reject split index, alternates, reftable, unmerged/intent-to-add/sparse states, or populated submodules unless the shared procedure explicitly resolves and seals every backing surface. Closing must reproduce every opening row and digest. After the closing seal, perform no more candidate reads. Caller-forbidden cache, result-cache, spool, or telemetry writes cannot be excused by later disclosure.
 
 ## Worktree disposition
 
 Decide separately from A/B/C:
 
 - **Preserve live** only when unresolved C work still depends on exact dirty state.
-- **Archive as a patch bundle** when there is forensic value, many untracked files, or exact dirty provenance may matter. Capture HEAD/branch/status, a binary tracked diff, every untracked file, and SHA-256 fingerprints; verify the capture before deletion.
+- **Archive exact dirty layers** when there is forensic value or exact provenance may matter. Capture and verify the bundle head/base/merge-base, index bytes/mode, NUL-framed status, separate full-index staged/unstaged raw binary diffs, ignored exclusions, every untracked entry, and descriptor-bound manifests before deletion.
 - **Remove later after explicit discard/capture** when C is empty. Do not keep a dirty worktree alive only because it is dirty.
-- When two worktrees share the same stable patch IDs, prefer one verified archive of the broader/superset dirty state rather than two redundant long-lived worktrees.
+- Matching committed patch IDs never make divergent dirty snapshots substitutes. Preserve each independently required provenance record under the caller's retention policy; C-empty is not discard authority.
 
 ## Read-only pitfalls
 

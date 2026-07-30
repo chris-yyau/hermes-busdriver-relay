@@ -11,9 +11,11 @@ Use this when a Busdriver/Claude run disappears, reaches `--max-turns`, kills it
 
 ## Resume the same work
 
+Before the first resume or setup command, clear imported aliases/functions and dangerous shell environment, then authenticate the absolute `CLAUDE_BIN` path.
+
 Prefer print mode for autonomous recovery:
 ```sh
-claude -p --resume "$SESSION_ID" \
+"$CLAUDE_BIN" -p --resume "$SESSION_ID" \
   --max-turns 40 \
   'Continue from the interrupted state. Preserve existing staged and unstaged WIP, inspect, reproduce safely, test, and report. Do not commit or push without fresh explicit authorization.'
 ```
@@ -39,41 +41,73 @@ Also re-check `HOME`, `USER`, `LOGNAME`, and `PATH` before subsequent operator c
 
 `TMUX` contains an absolute socket path and overrides `TMUX_TMPDIR`. Exporting a private `TMUX_TMPDIR` is **not isolation** when a test starts inside a real tmux pane.
 
-Minimum safe setup defines cleanup before allocation and installs the trap immediately after `WORK` exists, before any later checked command:
+Before tmux setup, authenticate absolute `TMUX_BIN`, `MKTEMP_BIN`, `KILL_BIN`, `RM_BIN`, and `SLEEP_BIN` paths. Require the authenticated tmux to support `new-session ... [shell-command [argument ...]]`; fail closed instead of joining command and arguments into a shell string. Record the original tmux socket from the inherited `TMUX` value before changing the environment. Opening and closing canary observations must use that exact `-S` endpoint, or record `absent`.
+
+The private server uses one fixed socket for creation, probes, and cleanup. The test process must not be able to replace its socket namespace:
 
 ```sh
 cleanup() {
-    sock=$(tmux display-message -p '#{socket_path}' 2>/dev/null || true)
-    case ${sock:-} in
-        "$WORK"/*) tmux kill-server 2>/dev/null ;;
-    esac
-    [ -n "${WORK:-}" ] && rm -rf -- "$WORK"
+    rc=$?
+    trap - EXIT INT TERM
+    if [ -z "${TMUX_SERVER_PID:-}" ]; then
+        if [ -e "$SOCK" ]; then
+            printf '%s\n' 'private_tmux_identity_unknown' >&2
+            exit 126
+        fi
+    elif [ ! -e "$SOCK" ]; then
+        printf '%s\n' 'private_tmux_socket_missing' >&2
+        exit 126
+    else
+        socket_pid=$("$TMUX_BIN" -S "$SOCK" display-message -p '#{pid}') || {
+            printf '%s\n' 'private_tmux_identity_unknown' >&2
+            exit 126
+        }
+        if [ "$socket_pid" != "$TMUX_SERVER_PID" ] || ! "$KILL_BIN" -0 "$TMUX_SERVER_PID" 2>/dev/null; then
+            printf '%s\n' 'private_tmux_identity_changed' >&2
+            exit 126
+        fi
+        if ! "$TMUX_BIN" -S "$SOCK" kill-server; then
+            printf '%s\n' 'private_tmux_cleanup_failed' >&2
+            exit 126
+        fi
+    fi
+    if [ -n "${TMUX_SERVER_PID:-}" ] && "$KILL_BIN" -0 "$TMUX_SERVER_PID" 2>/dev/null; then
+        printf '%s\n' 'private_tmux_still_running' >&2
+        exit 126
+    fi
+    if ! "$RM_BIN" -rf -- "$WORK"; then
+        printf '%s\n' 'private_tmux_workdir_cleanup_failed' >&2
+        exit 126
+    fi
+    exit "$rc"
 }
 
-WORK=$(mktemp -d) || exit 1
+WORK=$("$MKTEMP_BIN" -d) || exit 1
+SOCK=$WORK/tmux.sock
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 unset TMUX
-TMUX_TMPDIR=$WORK/socket
-mkdir -p "$TMUX_TMPDIR" || exit 1
-export TMUX_TMPDIR
+"$TMUX_BIN" -f /dev/null -S "$SOCK" new-session -d -s private-canary "$SLEEP_BIN" 3600
+pid=$("$TMUX_BIN" -S "$SOCK" display-message -p '#{pid}') || exit 1
+case $pid in ''|*[!0-9]*) exit 1 ;; esac
+TMUX_SERVER_PID=$pid
 ```
 
-The cleanup trap is active before `mkdir` or any other fallible setup. Any cleanup that can terminate a server must fail closed:
+The cleanup trap is active before server creation. Every later tmux command uses the authenticated `"$TMUX_BIN" -S "$SOCK"` endpoint. Run the suspect test only inside an OS sandbox that denies it write access to `$WORK`; same-UID directory permissions alone are not a boundary, so fail closed if that sandbox is unavailable. Cleanup binds to the captured server PID, verifies termination before deleting the directory, and exits nonzero while preserving evidence on uncertainty.
 
-Never use naked `tmux kill-server` in test cleanup unless every command is explicitly bound to a private `-L`/`-S` endpoint or the resolved socket is proven to be under the test directory.
+Never use naked `tmux kill-server`, ambient `tmux`, or user configuration for test cleanup.
 
 ## Safe RED/GREEN reproduction
 
-1. Start a disposable **outer** tmux server with a unique `-L` label and private `TMUX_TMPDIR`.
+1. Start a disposable **outer** tmux server with the authenticated binary, `-f /dev/null`, and one exact private `-S` socket.
 2. Run the suspect test with `TMUX` pointing to that outer socket. Before the fix, only this disposable server may die.
 3. Apply the minimum root fix: `unset TMUX` plus socket-guarded cleanup.
 4. Re-run and assert:
    - the suite passes;
    - the outer canary survives;
-   - the default tmux session list is byte-for-byte unchanged;
+   - the original exact `-S` canary endpoint is byte-for-byte unchanged, or remains `absent`;
    - disposable sockets and temp directories are removed.
 
 Do not run a known-broken tmux test from a real/default tmux server just to obtain RED.
@@ -82,6 +116,6 @@ Do not run a known-broken tmux test from a real/default tmux server just to obta
 
 - Continue the existing Busdriver/Litmus loop; do not reset its WIP or use skip files.
 - If `--max-turns` stops the finalizer, resume it again rather than taking an unreviewed shortcut.
-- After PASS, install the reviewed version and re-run the nested outer-canary check.
+- After PASS, install only when the original task or current user separately authorized installation; interrupted-session recovery never grants install authority.
 - Compare repo and live-installed copies, then verify a clean tree and `HEAD == origin/<branch>`.
 - Report non-blocking linter diagnostics separately; do not describe them as a full pass.
