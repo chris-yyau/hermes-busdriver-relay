@@ -57,7 +57,12 @@
     "skills/busdriver-relay/references/executor-retirement-and-policy-convergence.md",
     "skills/busdriver-relay/references/executor-retirement-pr-grind-lessons.md",
     "skills/busdriver-relay/references/git-observation-sandbox-lessons.md",
-    "skills/busdriver-relay/references/relay-role-status-integration-lessons.md"
+    "skills/busdriver-relay/references/interrupted-claude-and-tmux-safety.md",
+    "skills/busdriver-relay/references/legacy-dirty-worktree-semantic-audit.md",
+    "skills/busdriver-relay/references/read-only-forensic-archive-semantic-audit.md",
+    "skills/busdriver-relay/references/read-only-semantic-audit-legacy-dirty-worktrees.md",
+    "skills/busdriver-relay/references/relay-role-status-integration-lessons.md",
+    "skills/busdriver-relay/references/truly-read-only-exact-candidate-review.md"
   ],
   "historical": [
     "adapters/opencode/README.md",

@@ -169,7 +169,7 @@ def init_repo(tmp_path: Path, *, hostile_key: str) -> tuple[Path, Path, Path]:
     git("config", hostile_key, str(payload))
     if hostile_key == "gpg.program":
         git("config", "log.showSignature", "true")
-    (repo / "tracked.txt").write_text("changed\n")
+    (repo / "tracked.txt").write_text("y\n" if hostile_key.startswith("filter.") else "changed\n")
     return repo, home, sentinel
 
 
@@ -195,6 +195,15 @@ def invoke_production_status(script: str, ns: dict[str, Any], repo: Path) -> tup
 
 def test_hostile_filter_control_really_executes_without_the_observation_sandbox(tmp_path: Path):
     repo, home, sentinel = init_repo(tmp_path, hostile_key="filter.pwn.clean")
+
+    indexed = subprocess.run(
+        [str(GIT), "show", "HEAD:tracked.txt"],
+        cwd=repo,
+        env=git_env(home),
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert len((repo / "tracked.txt").read_bytes()) == len(indexed)
 
     subprocess.run([str(GIT), "status", "--porcelain=v1"], cwd=repo, env=git_env(home), capture_output=True)
 
