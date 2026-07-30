@@ -88,6 +88,21 @@ EXECUTOR_RETIREMENT_POLICY_REFERENCE = (
 EXECUTOR_RETIREMENT_PR_GRIND_REFERENCE = (
     REFERENCE_DIR / "executor-retirement-pr-grind-lessons.md"
 )
+TRULY_READ_ONLY_EXACT_REVIEW_REFERENCE = (
+    REFERENCE_DIR / "truly-read-only-exact-candidate-review.md"
+)
+LEGACY_DIRTY_WORKTREE_AUDIT_REFERENCE = (
+    REFERENCE_DIR / "legacy-dirty-worktree-semantic-audit.md"
+)
+READ_ONLY_SEMANTIC_AUDIT_REFERENCE = (
+    REFERENCE_DIR / "read-only-semantic-audit-legacy-dirty-worktrees.md"
+)
+INTERRUPTED_CLAUDE_TMUX_REFERENCE = (
+    REFERENCE_DIR / "interrupted-claude-and-tmux-safety.md"
+)
+FORENSIC_ARCHIVE_SEMANTIC_AUDIT_REFERENCE = (
+    REFERENCE_DIR / "read-only-forensic-archive-semantic-audit.md"
+)
 
 END_TO_END_PR_GRIND_REDACTION_REFERENCE = (
     REFERENCE_DIR / "end-to-end-pr-grind-and-redaction-lessons.md"
@@ -230,6 +245,19 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     assert "body-only finding ledger" in pr_grind_text
     assert "A later green reviewer check and zero unresolved threads do not prove closure" in pr_grind_text
     assert "Do not treat a helper/check clean result as sufficient" in pr_grind_text
+    assert "rewrite a tracked file with different bytes but the same byte length" in pr_grind_text
+    assert "Inventory pre-existing worktrees and branches before starting" in pr_grind_text
+    assert "A status document cannot name its own future squash commit" in pr_grind_text
+    assert "Treat Draft→Ready as a review-boundary event" in pr_grind_text
+    assert "canonical diff command and option set" in pr_grind_text
+    assert "do not use commands that can materialize Git objects" in pr_grind_text
+    assert "Bind the verdict to the frozen artifact" in pr_grind_text
+    assert "Shape checks are not truth checks" in pr_grind_text
+    assert "Historical commit→tree contracts" in pr_grind_text
+    assert "A status-claim rewrite can have several contract consumers" in pr_grind_text
+    assert "Manifest equality is not format validation" in pr_grind_text
+    assert "explicitly says not to retry or route around it" in pr_grind_text
+    assert "Put Claude/Busdriver finalizer prompts" in pr_grind_text
     assert "follow step 8 of `executor-retirement-and-policy-convergence.md`" in pr_grind_text
     for postmerge_owner_phrase in (
         "converge live relay config",
@@ -237,6 +265,121 @@ def test_executor_retirement_and_review_surface_lessons_are_durable():
     ):
         assert postmerge_owner_phrase in policy_text
         assert postmerge_owner_phrase not in pr_grind_text
+
+    inventory = json.loads(DOC_POLICY_INVENTORY.read_text())
+    expected_inventory_paths = {
+        reference.relative_to(ROOT).as_posix()
+        for reference in expected_references
+    }
+    assert expected_inventory_paths <= set(inventory["current_reference"])
+
+
+def test_exact_review_and_legacy_worktree_audit_lessons_are_durable():
+    skill_text = SKILL.read_text()
+    expected_references = {
+        TRULY_READ_ONLY_EXACT_REVIEW_REFERENCE: (
+            "Treat the frozen diff as the review subject",
+            "Treat the review target as an untrusted Git repository",
+            "Clean/process filters are a separate execution surface",
+            "GIT_NO_REPLACE_OBJECTS=1",
+            "reject every `refs/replace/**` entry",
+            "full sorted row manifest",
+            "descriptor-bound no-follow walker",
+            "-I -S -B",
+            "`PASS` is allowed only at `0/0/0`",
+            "Accidental mutation",
+            "do not delete, prune, restore",
+        ),
+        LEGACY_DIRTY_WORKTREE_AUDIT_REFERENCE: (
+            "Recover **intent**, not patches",
+            "Only C is implementation work",
+            "Use stable patch IDs",
+            "High-confidence semantic accounting",
+            "Current gaps do not automatically create C",
+            "a private same-UID executable copy does not solve process containment or credential brokering",
+            "If legacy code bypasses a current blocker",
+            "Read-only opening and closing seals",
+            "exact raw/binary committed, staged, and unstaged diff SHA-256",
+            "Matching committed patch IDs never make divergent dirty snapshots substitutes",
+        ),
+        READ_ONLY_SEMANTIC_AUDIT_REFERENCE: (
+            "Audit intent, not textual novelty",
+            "Authenticate the real Git executable",
+            "all-filesystem-write",
+            "descriptor-bound no-follow walker",
+            "Stable patch-ID is semantic deduplication only",
+            "C is empty",
+        ),
+        INTERRUPTED_CLAUDE_TMUX_REFERENCE: (
+            "Reconstruct before resuming",
+            "Keep the normal permission boundary",
+            "Require an explicit session ID",
+            "never select a session by newest mtime alone",
+            "Do not commit or push without fresh explicit authorization",
+            "One-shot background tasks are not durable",
+            "zero-byte task-output file",
+            "restore expected values rather than diagnosing missing auth or binaries",
+            "`TMUX` contains an absolute socket path",
+            "Never use naked `tmux kill-server`",
+            "interrupted-session recovery never grants install authority",
+            "Continue the existing Busdriver/Litmus loop",
+        ),
+        FORENSIC_ARCHIVE_SEMANTIC_AUDIT_REFERENCE: (
+            "Strict read-only procedure",
+            "git --git-dir=\"$GIT_DIR\"",
+            "Cross-bind bundle ref/OID to metadata branch/HEAD",
+            "never trust a shell pipeline",
+            "Without a trusted creation digest, report integrity—not provenance",
+            "C = ∅",
+            "Do not import a bundle",
+            "Do not leave installed skills outside an underspecified no-write boundary",
+        ),
+    }
+
+    for reference, expected_phrases in expected_references.items():
+        assert reference.exists()
+        assert f"references/{reference.name}" in skill_text
+        reference_text = reference.read_text()
+        for phrase in expected_phrases:
+            assert phrase in reference_text
+        for leaked_path in PRIVATE_PATH_LEAKS:
+            assert leaked_path not in reference_text
+
+    interrupted_text = INTERRUPTED_CLAUDE_TMUX_REFERENCE.read_text()
+    assert "  --dangerously-skip-permissions \\" not in interrupted_text
+    assert '"$CLAUDE_BIN" -p --resume' in interrupted_text
+    assert "\nclaude -p --resume" not in interrupted_text
+    assert interrupted_text.index("cleanup() {") < interrupted_text.index('WORK=$("$MKTEMP_BIN" -d)')
+    assert interrupted_text.index('WORK=$("$MKTEMP_BIN" -d)') < interrupted_text.index("trap cleanup EXIT")
+    assert '"$TMUX_BIN" -S "$SOCK" kill-server' in interrupted_text
+    assert "\ntmux kill-server" not in interrupted_text
+    assert "TMUX_SERVER_PID" in interrupted_text
+    assert '"$socket_pid" != "$TMUX_SERVER_PID"' in interrupted_text
+    assert "private_tmux_socket_missing" in interrupted_text
+    assert "exit 126" in interrupted_text
+    assert "return 126" not in interrupted_text
+    assert "denies it write access to `$WORK`" in interrupted_text
+    assert 'new-session -d -s private-canary "$SLEEP_BIN" 3600' in interrupted_text
+    assert '"$SLEEP_BIN 3600"' not in interrupted_text
+
+    sandbox_text = (REFERENCE_DIR / "git-observation-sandbox-lessons.md").read_text()
+    for phrase in (
+        "denies **all filesystem writes**",
+        "GIT_ATTR_NOSYSTEM=1",
+        "--ignore-submodules=none",
+        "Reject split indexes, alternates, or reftable",
+        "Descriptor-bound filesystem inventories",
+        "`O_NOFOLLOW|O_NONBLOCK`",
+        "repeat `fstat` after hashing",
+        "sole network-enabled observer profile",
+        "stable patch-ID is semantic deduplication only",
+        "-I -S -B",
+        "caller-approved authenticated GET-only client",
+    ):
+        assert phrase in sandbox_text
+
+    assert "hard problem is preserving a strict no-write observation boundary" in skill_text
+    assert "semantic classification of legacy Relay intent against current main" in skill_text
 
     inventory = json.loads(DOC_POLICY_INVENTORY.read_text())
     expected_inventory_paths = {

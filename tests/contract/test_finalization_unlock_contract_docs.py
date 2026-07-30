@@ -753,22 +753,18 @@ def test_docs_distinguish_observed_plugin_version_from_trust_manifest_version():
     status_text = CURRENT_STATUS.read_text()
     readme_text = README.read_text()
 
-    # The live observation and the reviewed trust pin are different facts; a doc that names
-    # only one of them reads as if the manifest tracked the installed plugin. Keep the
-    # observation shape durable without pinning a once-observed marketplace version forever.
-    observed = re.search(
-        r"Last observed installed Busdriver marketplace plugin: version `(\d+\.\d+\.\d+)`, "
-        r"commit `([0-9a-f]{40})`",
+    # Observation and trust pin are separate claims. Validate their shapes and the
+    # manifest-backed pin without freezing a marketplace version or requiring drift.
+    claims = re.search(
+        r"Pre-refresh plugin observation captured on \d{4}-\d{2}-\d{2}: installed "
+        r"Busdriver `(\d+\.\d+\.\d+)` at commit `([0-9a-f]{40})`; trusted "
+        r"production manifest pin `(\d+\.\d+\.\d+)` at commit `([0-9a-f]{40})`\.",
         status_text,
     )
-    assert observed
-    pinned_claim = re.search(
-        r"The reviewed repository `trusted-runtime-manifest` separately pins Busdriver "
-        r"package version `([^`]+)` and commit `([0-9a-f]{40})`",
-        status_text,
-    )
-    assert pinned_claim
-    assert pinned_claim.groups() == (pinned, pinned_commit)
-    assert pinned in status_text
-    assert "trust-manifest" in status_text or "trusted-runtime-manifest" in status_text
+    assert claims
+    observed_version, observed_commit, claimed_pin, claimed_pin_commit = claims.groups()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", observed_version)
+    assert re.fullmatch(r"[0-9a-f]{40}", observed_commit)
+    assert (claimed_pin, claimed_pin_commit) == (pinned, pinned_commit)
+    assert "separate live-observation and trust-baseline claims" in status_text
     assert pinned in readme_text
