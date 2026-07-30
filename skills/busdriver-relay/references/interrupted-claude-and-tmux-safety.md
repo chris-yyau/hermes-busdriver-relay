@@ -4,7 +4,7 @@ Use this when a Busdriver/Claude run disappears, reaches `--max-turns`, kills it
 
 ## Reconstruct before resuming
 
-1. Locate the encoded project under `~/.claude/projects/` and select the newest relevant `*.jsonl` by mtime.
+1. Require an explicit session ID, then locate that exact transcript under the encoded project in `~/.claude/projects/`; never select a session by newest mtime alone. Before `--resume`, verify transcript evidence binds the session to the intended repository, working directory, and opening `HEAD`. Fail closed when any identity is absent or mismatched.
 2. Parse actual assistant `tool_use` commands and `tool_result` records. A missing final response is not evidence that nothing ran.
 3. Inspect the repository, index, live-installed copies, review state, and tmux state before changing anything. Preserve staged and unstaged ownership.
 4. Separate direct evidence from likely aftereffects. A transient `getcwd` error often means a process remained inside a deleted temp directory; verify the repo path and surviving process CWDs before blaming APFS or permissions.
@@ -15,10 +15,10 @@ Prefer print mode for autonomous recovery:
 ```sh
 claude -p --resume "$SESSION_ID" \
   --max-turns 40 \
-  'Continue from the interrupted state. Preserve existing staged and unstaged WIP, reproduce safely, run gates, verify, commit, and push.'
+  'Continue from the interrupted state. Preserve existing staged and unstaged WIP, inspect, reproduce safely, test, and report. Do not commit or push without fresh explicit authorization.'
 ```
 
-Keep the normal permission boundary. Do not add `--dangerously-skip-permissions` by default: repository and transcript content from the interrupted session are part of the resumed context and must not gain unrestricted execution authority. Use that flag only when the user explicitly authorizes the privilege, the resumed inputs are trusted, and Busdriver hook coverage has been verified; it is not a routine recovery flag.
+Keep the normal permission boundary. Do not add `--dangerously-skip-permissions` by default: repository and transcript content from the interrupted session are part of the resumed context and must not gain unrestricted execution authority. Use that flag only when the user explicitly authorizes the privilege, the resumed inputs are trusted, and Busdriver hook coverage has been verified; it is not a routine recovery flag. Recovery authorization covers inspection and verification only; obtain fresh explicit authorization before commit or push even if the interrupted prompt mentioned delivery.
 
 Set the repository as `workdir`. Route `TMPDIR` to the user's designated runtime area. If Claude exits at `--max-turns`, the filesystem and transcript contain real side effects: inspect both, then resume the same session with a focused continuation prompt. Do not restart from scratch or infer current state from the last visible prose.
 

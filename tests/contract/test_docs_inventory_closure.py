@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -85,12 +86,15 @@ def test_current_status_records_merged_authority_chronology():
     )
     assert base
     base_commit, documented_tree = base.groups()
+    git_env = os.environ.copy()
+    git_env.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     base_tree = subprocess.run(
         ["git", "rev-parse", f"{base_commit}^{{tree}}"],
         cwd=ROOT,
         check=False,
         capture_output=True,
         text=True,
+        env=git_env,
     )
     if base_tree.returncode == 0:
         assert base_tree.stdout.strip() == documented_tree
@@ -104,8 +108,36 @@ def test_current_status_records_merged_authority_chronology():
             check=False,
             capture_output=True,
             text=True,
+            env=git_env,
         )
-        assert shallow.stdout.strip() == "true" or not (ROOT / ".git").exists(), (
+        partial_extension = subprocess.run(
+            ["git", "config", "--local", "--get", "extensions.partialClone"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        promisor_remote = subprocess.run(
+            ["git", "config", "--local", "--get-regexp", r"^remote\..*\.promisor$"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        partial_clone = (
+            partial_extension.returncode == 0
+            and bool(partial_extension.stdout.strip())
+        ) or (
+            promisor_remote.returncode == 0
+            and any(line.rstrip().endswith(" true") for line in promisor_remote.stdout.splitlines())
+        )
+        assert (
+            shallow.stdout.strip() == "true"
+            or partial_clone
+            or not (ROOT / ".git").exists()
+        ), (
             base_tree.stderr.strip()
         )
     assert live

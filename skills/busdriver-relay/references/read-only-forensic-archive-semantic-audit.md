@@ -24,7 +24,7 @@ A patch being non-equivalent under `git cherry` does not make it C. Restacks, sq
    - captured untracked bytes exactly as archived.
 
    Parse `diff --git` paths and full `index OLD..NEW` headers in memory. Require each patch path set to match the corresponding porcelain status column, aggregate paths to equal their union, and per-path blob endpoints to compose as `HEAD→index→worktree = HEAD→worktree`. An empty staged patch is valid only when metadata reports no staged paths. Captured untracked inventory must exactly match metadata; ignored paths are declared exclusions, not captured evidence.
-4. **Avoid the live worktree.** Query committed sources with `git --git-dir=<repo>/.git` and exact object expressions such as `<main>:path`. Disable external diff and text conversion for diff review (`--no-ext-diff --no-textconv`); use `git grep <main> -- <tracked paths>` or `git blame -L ... <main> -- path` for precise evidence.
+4. **Avoid the live worktree.** Resolve `.git` during the plain-file preflight: accept either a directory or a gitfile containing one `gitdir:` path, resolve a relative gitfile target against the worktree root, and reject malformed or out-of-scope targets. Bind the result as `$GIT_DIR` and use only `git --git-dir="$GIT_DIR"` with exact object expressions such as `<main>:path`. Disable external diff and text conversion for diff review (`--no-ext-diff --no-textconv`); use `git grep <main> -- <tracked paths>` or `git blame -L ... <main> -- path` for precise evidence.
 5. **Map branch intent.** For each archive-only commit, record subject, changed paths, and the capability/policy it tried to establish. Split mixed commits into separate A/B/C sub-intents.
 6. **Compare against current-main behavior.** Prefer current production parsers, blocker maps, route policy, tests, ADRs, and status docs over historical claims. Look for renamed or relocated equivalents before declaring C.
 7. **Audit tests semantically, including unchanged inherited tests.** Dirty-diff symbol extraction sees only changed lines; unsafe behavior may live unchanged in the archived HEAD. Compare focused legacy tests and their current replacements even when neither appears in the dirty patch. A legacy-only test is not automatically missing coverage. Check whether it asserts retired authority, dispatchability, marker writes, push/PR/merge success, automatic stale-lock reaping, post-commit cleanup, or other behavior that current-main rejection/reconciliation tests deliberately negate. Such tests are B.
@@ -47,15 +47,15 @@ When two archives appear related, do not compare only commit SHAs or subjects:
 ```bash
 # Never point these at the live worktree.
 git bundle list-heads "$ARCHIVE/branch.bundle"
-git --git-dir="$REPO/.git" bundle verify "$ARCHIVE/branch.bundle"
+git --git-dir="$GIT_DIR" bundle verify "$ARCHIVE/branch.bundle"
 shasum -a 256 "$ARCHIVE"/branch.bundle "$ARCHIVE"/*.patch
 
-git --git-dir="$REPO/.git" merge-base "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$REPO/.git" rev-list --left-right --count "$MAIN...$ARCHIVE_HEAD"
-git --git-dir="$REPO/.git" cherry "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$REPO/.git" log --format='%H%x09%P%x09%s' "$MAIN..$ARCHIVE_HEAD"
-git --git-dir="$REPO/.git" diff --no-ext-diff --no-textconv --name-status "$MAIN" "$ARCHIVE_HEAD"
-git --git-dir="$REPO/.git" grep -n -I -E '<policy-or-symbol-pattern>' "$MAIN" -- <tracked-paths>
+git --git-dir="$GIT_DIR" merge-base "$MAIN" "$ARCHIVE_HEAD"
+git --git-dir="$GIT_DIR" rev-list --left-right --count "$MAIN...$ARCHIVE_HEAD"
+git --git-dir="$GIT_DIR" cherry "$MAIN" "$ARCHIVE_HEAD"
+git --git-dir="$GIT_DIR" log --format='%H%x09%P%x09%s' "$MAIN..$ARCHIVE_HEAD"
+git --git-dir="$GIT_DIR" diff --no-ext-diff --no-textconv --name-status "$MAIN" "$ARCHIVE_HEAD"
+git --git-dir="$GIT_DIR" grep -n -I -E '<policy-or-symbol-pattern>' "$MAIN" -- <tracked-paths>
 ```
 
 ## Evidence and output contract

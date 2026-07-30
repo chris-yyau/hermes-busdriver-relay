@@ -14,7 +14,7 @@ A `git cherry` or patch-ID miss proves only that the old patch is not exact. It 
 
 ## Truly read-only observation
 
-1. Define the audited paths and declare automatic Hermes result-cache telemetry outside those surfaces; create no reviewer scratch.
+1. Define the audited paths and make the no-write boundary exhaustive: no repository, worktree, archive, HOME, installed-skill, scratch, cache, result-cache, or telemetry writes.
 2. Before worktree-facing Git, inspect repository/common/worktree config, `.git` pointers, attributes sources, and submodule config as plain files.
 3. Authenticate the real Git executable. On systems where the public Git path is a tool-selection shim, resolve and authenticate the real binary behind it before sandboxing; otherwise a no-child sandbox correctly blocks the shim's second exec.
 4. Run Git under an OS sandbox denying repository writes, network, and child process creation. Also clear ambient `GIT_*`, disable global/system config, set `GIT_OPTIONAL_LOCKS=0`, `GIT_NO_LAZY_FETCH=1`, empty protocols, `core.fsmonitor=false`, and reject any stderr.
