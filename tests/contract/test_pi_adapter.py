@@ -902,10 +902,15 @@ def test_pi_child_receives_no_ambient_credentials(tmp_path: Path):
     }
 
 
-def test_agent_smoke_pi_defaults_respect_environment():
-    text = PRODUCTION_AGENT_SMOKE.read_text()
-    assert 'default=os.environ.get("PI_BIN", "pi")' in text
-    assert 'default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini")' in text
+def test_pi_route_defaults_to_cursor_auto_and_respects_environment():
+    smoke_text = PRODUCTION_AGENT_SMOKE.read_text()
+    draft_text = PRODUCTION_AGENT_DRAFT.read_text()
+    wrapper_text = PRODUCTION_PI_WRAPPER.read_text()
+
+    assert 'default=os.environ.get("PI_BIN", "pi")' in smoke_text
+    assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in smoke_text
+    assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in draft_text
+    assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in wrapper_text
 
 
 def test_agent_draft_pi_forwards_scope_exclude_to_wrapper():

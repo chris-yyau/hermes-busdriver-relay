@@ -64,7 +64,7 @@ TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c
 #
 # No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = 'd6943576a792a82aa781dfa2be0ecae0c0d0786337ee9c6cf88fb165fd6d73c3'
+TRUSTED_PI_WRAPPER_SHA256 = 'dcd34d84c8921d58707f0bfb48a55dda7884a6accab04df1186eaf40b02cfdc3'
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {
@@ -1389,7 +1389,7 @@ def main() -> int:
     ap.add_argument("--repo", required=True)
     ap.add_argument("--agent", choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
-    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"), help="Pi model for --agent pi.")
+    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"), help="Pi model for --agent pi.")
     ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")
 
     ap.add_argument("--prompt")

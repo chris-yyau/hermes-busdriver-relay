@@ -36,7 +36,7 @@ def test_readme_contents_cover_every_manifested_production_entrypoint():
 
 def test_current_status_names_security_closure_artifacts_explicitly():
     text = CURRENT_STATUS.read_text()
-    assert "PR #168's final exact pre-merge candidate completed `4042 passed, 13 skipped`" in text
+    assert "PR #168's final exact pre-merge candidate completed `4046 passed, 13 skipped`" in text
     assert "affected focused closure completed `1206 passed`" in text
     required = {
         "config/trusted-runtime-manifest.json",
@@ -64,19 +64,18 @@ def test_current_status_records_merged_authority_chronology():
         "only as provenance and is not current main/top."
     )
     current_main = (
-        "Current main after squash-merged skill-source sync PR #160 and "
-        "terminal-newline follow-up PR #161 is commit "
-        "`f3d35f3774e9da878c780be4f55ada873955feca`, tree "
-        "`76b1cf47023c2fc0e48eece4099670aae67eedb2`"
+        "Current main after squash-merged Pi-only policy PR #168 and "
+        "executor-retirement skill-source PR #169 is commit "
+        "`0853d513fb2c7fc35b143e0b71d669b788ffe0d6`, tree "
+        "`1422232f6635c9d60c8f83869dd2e64f5cfdf42e`"
     )
-    late_follow_up = (
-        "A late exact security review then found 13 newly synced Markdown "
-        "references without terminal LF."
+    policy_closure = (
+        "PR #168 established the current Pi-only executor policy: Pi is the sole "
+        "implementation route; Codex remains non-dispatchable fallback-coder/PR-lead metadata"
     )
     live_evidence = (
-        "Live post-merge relay evidence captured before this docs-only refresh "
-        "branch was opened reported zero open PRs, a clean `220`-file "
-        "installed/repo skill comparison, no skill reference missing terminal LF"
+        "Live post-merge evidence captured before this docs-only refresh branch was opened "
+        "reported zero open PRs and issues, a clean `223`-file installed/repository skill comparison"
     )
     section_start = "## Current verification\n\n"
     section_end = "\n## Locations"
@@ -86,10 +85,10 @@ def test_current_status_records_merged_authority_chronology():
     )
     assert separator
 
-    for required in (historical_seal, current_main, late_follow_up, live_evidence):
+    for required in (historical_seal, current_main, policy_closure, live_evidence):
         assert required in current_section
     assert "UNMERGED / UNSEALED" not in current_section
     assert current_section.index(historical_seal) < current_section.index(
         current_main
-    ) < current_section.index(late_follow_up) < current_section.index(live_evidence)
+    ) < current_section.index(policy_closure) < current_section.index(live_evidence)
     assert "## Historical superseded evidence" in text
