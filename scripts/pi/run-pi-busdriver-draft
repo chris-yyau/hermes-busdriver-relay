@@ -355,7 +355,7 @@ GIT_TIMEOUT = 30
 # The pinned Pi package entry point. Bound to config/trusted-runtime-manifest.json by
 # test_trusted_runtime_manifest, so it cannot drift from the reviewed runtime.
 TRUSTED_PI = Path("/Users/vfrvndtt/.local/bin/pi").resolve()
-TRUSTED_PI_TREE_SHA256 = "0f26848f78bf749a0a5a5a8c61da16d603b91d5862da211408af4385ab153ada"
+TRUSTED_PI_TREE_SHA256 = "b04fe90c89183de7fd330614f7dd3ae8c39507b7dd62cb86c8b0d101b768b030"
 TRUSTED_NODE = Path("/Users/vfrvndtt/.hermes/node/bin/node").resolve()
 TRUSTED_NODE_SHA256 = "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c"
 TRUSTED_EXECUTABLE_DIGESTS = {
@@ -1546,7 +1546,7 @@ def main() -> int:
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN") or "pi")
-    ap.add_argument("--model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"))
+    ap.add_argument("--model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"))
     ap.add_argument("--provider", default=os.environ.get("PI_BD_PROVIDER", ""))
     ap.add_argument("--scope-include", action="append")
     ap.add_argument("--scope-exclude", action="append")

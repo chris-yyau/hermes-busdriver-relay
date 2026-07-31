@@ -22,6 +22,8 @@ dispatch_allowed=false
 
 Historical fake-worker or real-model smoke proves adapter shape only. It does not prove enforceable process containment or least-privilege credential brokering.
 
+The target provider/model default is `cursor/auto`. This is route metadata for the blocked production surface and non-installed harnesses, not production enablement.
+
 ## Authority map
 
 ```text

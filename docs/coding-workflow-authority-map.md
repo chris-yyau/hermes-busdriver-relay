@@ -26,7 +26,7 @@ Workers produce draft evidence; Hermes routes and verifies evidence and may oper
 authority.canonical                       = ClaudeCode / Busdriver
 operator.router                           = Hermes
 operator.verifier                         = Hermes
-implementation.executor.current           = Pi only; route metadata; production dispatch blocked by agent_containment_and_credential_broker_unavailable
+implementation.executor.current           = Pi only; Cursor Auto target metadata; production dispatch blocked by agent_containment_and_credential_broker_unavailable
 implementation.fallback.current           = Codex coder metadata only; no production dispatcher; relay_role_dispatcher_unavailable
 implementation.non_executor.history       = OpenCode adapter proof retained for comparison only; never a current executor route
 review.pr_lead                            = Codex metadata; same-provider review requires a fresh independent-session contract
@@ -41,7 +41,7 @@ finalization.authority_path               = ClaudeCode / Busdriver
 Short form:
 
 ```text
-Pi is the sole executor route by user policy; production launch remains blocked until containment and credential brokering exist.
+Pi is the sole executor route by user policy and targets `cursor/auto`; production launch remains blocked until containment and credential brokering exist.
 Codex remains fallback coder metadata and PR lead; no relay-role entry dispatches it.
 OpenCode is non-executor historical/comparison evidence only and is absent from current implementation routes.
 Relay config cannot override `coding_agent=pi` or the fixed implementation-role metadata (`relay.impl.primary=pi`, `relay.impl.secondary=pi`, `relay.impl.fallback=codex`); any current route naming OpenCode is rejected.
@@ -57,12 +57,12 @@ ClaudeCode/Busdriver authorizes.
 Never phrase target-state workflow as already enabled production capability.
 
 ```text
-Pi lane       = sole executor route metadata; production dispatch is policy-blocked.
+Pi lane       = sole executor route metadata targeting `cursor/auto`; production dispatch is policy-blocked.
 Codex lane    = fallback coder and PR-lead metadata only; production relay-role dispatch is unavailable.
 OpenCode lane = non-executor historical/comparison evidence only; no current implementation route.
 ```
 
-A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, wrapper, contract tests, and fake-adapter smoke prove the non-installed adapter contract; they do not prove production dispatch.
+A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, the `cursor/auto` default, wrapper contracts, and fake-adapter smoke prove target routing only; they do not prove live Cursor dispatch.
 
 ## Trusted evidence
 

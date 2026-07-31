@@ -6,6 +6,8 @@ This directory contains the relay-owned Pi adapter. It is not Pi upstream source
 
 Pi is the sole current Busdriver-shaped executor route contract. It produces scoped draft changes only in non-installed test harnesses; every production agent/probe blocks immediately after argument parsing—before repository, HOME/state, credential, lock, prompt, gate, run-directory, or worker handling—with `agent_containment_and_credential_broker_unavailable`.
 
+Its target provider/model default is `cursor/auto`. The default does not bypass the production blocker or prove a live Cursor credential/extension path.
+
 ```text
 Pi result status = needs_busdriver_review | blocked
 commit/push/PR/merge/marker/deploy/release/publish/finalization authority = false

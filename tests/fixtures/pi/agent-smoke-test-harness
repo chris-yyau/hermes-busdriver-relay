@@ -63,7 +63,7 @@ def main() -> int:
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--agent", default="pi", choices=["pi", "opencode"])
     ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"))
-    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "openai-codex/gpt-5.4-mini"))
+    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"))
     ap.add_argument("--opencode-bin", default=os.environ.get("OPENCODE_BIN", "opencode"))
     ap.add_argument("--opencode-agent", default=os.environ.get("OPENCODE_BD_AGENT", "build"))
     ap.add_argument("--opencode-model", default=os.environ.get("OPENCODE_BD_MODEL", ""))
