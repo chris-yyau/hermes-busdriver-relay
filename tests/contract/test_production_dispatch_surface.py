@@ -68,7 +68,7 @@ APPROVED_FUNCTION_AST_SHA256 = {
     ("hermes-busdriver-relay-brief", "run"): "63e3c33120b00982240e831c20a66615bae3416fceedd5865eddec8a0932ff09",
     ("hermes-busdriver-smoke", "run"): "a64f01edf251e951c33df2a0845c17a272b34f06ca97618604476f431161a231",
     ("hermes-busdriver-status", "run"): "95369bb68edd800d3da3120ee2b72d71e58bd77d468f4a15c544cd33304864c0",
-    ("run-pi-busdriver-draft", "run"): "06f0fa5cce5635d2dbaf7f6a88ddc4e25cd19efa8938abfcc7405e140ba6f7a5",
+    ("run-pi-busdriver-draft", "run"): "003efee69eda3eb62066f313a385a3cdeeac5d9f28a0eaafc9db91d75e60262f",
 }
 # The identical installed run_bounded implementation is approved at these paths.
 for _launcher_path in {

@@ -64,7 +64,7 @@ TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c
 #
 # No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = 'dcd34d84c8921d58707f0bfb48a55dda7884a6accab04df1186eaf40b02cfdc3'
+TRUSTED_PI_WRAPPER_SHA256 = '071c3b85ff1e32c8915665d4e3a811d2d5a799d83ab94abb7fff5bbb6c2586af'
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {

@@ -1,0 +1,33 @@
+#!/usr/bin/python3
+"""Test-only Cursor/auto candidate; production remains policy-blocked."""
+import json
+import os
+import runpy
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+PRODUCTION = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
+
+
+def option(flag: str, default: str) -> str:
+    values = []
+    for index, arg in enumerate(sys.argv[1:]):
+        if arg == flag:
+            values.append(sys.argv[index + 2] if index + 2 < len(sys.argv) else "")
+        elif arg.startswith(flag + "="):
+            values.append(arg.split("=", 1)[1])
+    return values[-1] if values else default
+
+
+if any(arg == "--pi-bin" or arg.startswith("--pi-bin=") for arg in sys.argv[1:]) or option("--provider", "cursor") != "cursor" or option("--model", "auto") != "auto":
+    print(json.dumps({"ok": False, "status": "blocked", "error": "cursor_candidate_route_locked"}, sort_keys=True))
+    raise SystemExit(2)
+
+os.environ.pop("PI_BD_PROVIDER", None)
+os.environ.pop("PI_BD_MODEL", None)
+os.environ.pop("PI_BIN", None)
+sys.argv += ["--provider", "cursor", "--model", "auto"]
+namespace = runpy.run_path(str(PRODUCTION))
+namespace["main"].__globals__["production_dispatch_blocker"] = lambda: None
+raise SystemExit(namespace["main"]())

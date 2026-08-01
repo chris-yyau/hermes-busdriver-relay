@@ -163,8 +163,9 @@ def test_the_policy_blocked_launcher_names_the_retained_anchor_not_the_repo_path
     """Future launch wiring names retained anchors, while production remains blocked before it."""
     text = PI_WRAPPER.read_text()
 
-    assert '"-e",\n        str(trusted_tools),' in text, "the launch still names an unretained path"
-    assert "str(TOOLS)" not in text.split("def main()")[1], "main() still names the repo-path adapter"
+    launch = text.split("def _run_in_directory", 1)[1]
+    assert "str(trusted_tools)" in launch, "the launch still names an unretained path"
+    assert "str(TOOLS)" not in launch, "the launch still names the repo-path adapter"
 
 
 # --- the closure: every retained byte is pinned, and every pin is manifested ---

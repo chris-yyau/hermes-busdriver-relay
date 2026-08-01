@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ PRODUCTION_AGENT_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
 AGENT_SMOKE = ROOT / "tests" / "fixtures" / "pi" / "agent-smoke-test-harness"
 PRODUCTION_AGENT_SMOKE = ROOT / "scripts" / "hermes-busdriver-agent-smoke"
 PI_WRAPPER = ROOT / "tests" / "fixtures" / "pi" / "run-pi-test-harness"
+CURSOR_CANDIDATE = ROOT / "tests" / "fixtures" / "pi" / "run-pi-cursor-candidate"
 PRODUCTION_PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
 PI_SCHEMA = ROOT / "adapters" / "pi" / "pi-result.schema.json"
 PI_TOOLS = ROOT / "adapters" / "pi" / "busdriver-tools.ts"
@@ -166,7 +168,7 @@ def fake_pi(path: Path) -> Path:
         "  'artifacts': [],\n"
         "  'event_log': [os.environ.get('PI_BD_EVENT_LOG', '')],\n"
         "  'summary': 'fake pi draft',\n"
-        "  'limitations': [],\n"
+        "  'limitations': [json.dumps(seen, sort_keys=True)],\n"
         "  'not_busdriver_native_claude_runtime': True,\n"
         "  'authority': {\n"
         "    'commit_allowed': False, 'push_allowed': False, 'pr_allowed': False,\n"
@@ -185,7 +187,7 @@ def fake_pi(path: Path) -> Path:
     return script
 
 
-def fake_pi_leaking(path: Path, secret: str) -> Path:
+def fake_pi_leaking(path: Path, secret: str | None) -> Path:
     """A worker that echoes a credential back through every channel the envelope quotes.
 
     The wrapper treats pi's stdout, stderr and result artifact as untrusted output, so each is a
@@ -197,6 +199,9 @@ def fake_pi_leaking(path: Path, secret: str) -> Path:
         "import json, os, sys\n"
         "from pathlib import Path\n"
         f"secret = {secret!r}\n"
+        "if secret is None:\n"
+        "    selected = json.loads((Path(os.environ['PI_CONFIG_DIR']) / 'auth.json').read_text())['cursor']\n"
+        "    secret = selected.get('access') or selected.get('key')\n"
         "repo = Path(os.environ['BD_REPO_ROOT'])\n"
         "(repo / 'src').mkdir(parents=True, exist_ok=True)\n"
         "(repo / 'src' / 'pi_smoke.txt').write_text('pi adapter smoke ok\\n')\n"
@@ -233,7 +238,8 @@ def fake_pi_leaking(path: Path, secret: str) -> Path:
         "  'deploy_allowed': False, 'release_allowed': False, 'publish_allowed': False\n"
         "}\n"
         "artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + '\\n')\n"
-        "Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool': 'fake-pi'}) + '\\n')\n"
+        "Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool': 'fake-pi', 'detail': secret}) + '\\n')\n"
+        "print('private_home=' + os.environ['HOME'])\n"
         "print('pi stdout: using ' + secret)\n"
         "print('pi stderr: rejected ' + secret, file=sys.stderr)\n"
     )
@@ -576,34 +582,240 @@ def test_pi_fixture_drives_fake_pi_contract_output(tmp_path: Path):
     assert (repo / "src" / "from_fixture.txt").read_text() == fixture_content
 
 
-def test_private_pi_config_copies_auth_without_user_packages(tmp_path: Path):
+def test_private_pi_config_keeps_only_selected_cursor_auth_without_refresh(tmp_path: Path):
     source = tmp_path / "source"
-    private = tmp_path / "private"
     source.mkdir()
-    (source / "auth.json").write_text('{"provider":"fake"}\n')
+    payload = {
+        "cursor": {
+            "type": "oauth",
+            "access": "candidate-access",
+            "refresh": "must-not-reach-child",
+            "expires": 9_999_999_999_999,
+            "cursorModels": [{"id": "auto"}],
+        },
+        "xai": {"type": "api_key", "key": "must-not-be-copied"},
+        "unknown": "must-not-be-copied",
+    }
+    (source / "auth.json").write_text(json.dumps(payload) + "\n")
     (source / "settings.json").write_text('{"packages":["npm:pi-subagents"]}\n')
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
 
-    ns["copy_private_pi_config"](source, private)
+    with ns["PrivatePiHome"]() as private:
+        secrets = ns["copy_private_pi_config"](source, private, "cursor", 60_000)
+        copied_auth = private.path / ".pi" / "agent" / "auth.json"
+        copied = json.loads(copied_auth.read_text())
+        assert copied == {"cursor": {key: value for key, value in payload["cursor"].items() if key != "refresh"}}
+        assert "candidate-access" in secrets
+        assert "must-not-reach-child" not in secrets
+        assert not (copied_auth.parent / "settings.json").exists()
+        assert copied_auth.stat().st_mode & 0o777 == 0o600
+        assert private.path.stat().st_mode & 0o777 == 0o700
 
-    assert (private / "auth.json").read_text() == '{"provider":"fake"}\n'
-    assert not (private / "settings.json").exists()
-    assert (private / "auth.json").stat().st_mode & 0o777 == 0o600
-    assert private.stat().st_mode & 0o777 == 0o700
+
+def test_private_pi_config_rejects_expiring_cursor_oauth_before_copy(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "auth.json").write_text(json.dumps({
+        "cursor": {"type": "oauth", "access": "access", "refresh": "refresh", "expires": 1},
+    }) + "\n")
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+
+    with ns["PrivatePiHome"]() as private:
+        with pytest.raises(RuntimeError, match="oauth_refresh_credential_broker_unavailable"):
+            ns["copy_private_pi_config"](source, private, "cursor", 60_000)
+        assert not (private.path / ".pi" / "agent" / "auth.json").exists()
 
 
 def test_private_pi_config_rejects_symlink_auth(tmp_path: Path):
     source = tmp_path / "source"
-    private = tmp_path / "private"
     source.mkdir()
     secret = tmp_path / "secret.json"
     secret.write_text('{"provider":"secret"}\n')
     (source / "auth.json").symlink_to(secret)
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
 
-    ns["copy_private_pi_config"](source, private)
+    with ns["PrivatePiHome"]() as private:
+        ns["copy_private_pi_config"](source, private)
+        assert not (private.path / ".pi" / "agent" / "auth.json").exists()
 
-    assert not (private / "auth.json").exists()
+
+def test_private_pi_home_scrubs_auth_renamed_outside(tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    outside = tmp_path / "renamed-auth.json"
+
+    with ns["PrivatePiHome"]() as private:
+        auth = private.path / ".pi" / "agent" / "auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text("credential bytes\n")
+        private.register(auth)
+        assert private.retain(auth) is True
+        auth.rename(outside)
+
+    assert outside.read_bytes() == b""
+
+
+def test_private_auth_copy_refuses_a_symlinked_intermediate_component(tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "auth.json").write_text('{"cursor":{"type":"api_key","key":"secret"}}\n')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises((OSError, RuntimeError)):
+        with ns["PrivatePiHome"]() as private:
+            (private.path / ".pi").symlink_to(outside, target_is_directory=True)
+            ns["copy_private_pi_config"](source, private, "cursor")
+
+    assert not (outside / "agent" / "auth.json").exists()
+
+
+def test_private_auth_inode_is_retained_before_publish_returns(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "auth.json").write_text('{"cursor":{"type":"api_key","key":"secret"}}\n')
+    outside = tmp_path / "linked-auth.json"
+    real_publish = ns["publish_file"]
+
+    with ns["PrivatePiHome"]() as private:
+        def publish_then_link(*args, **kwargs):
+            result = real_publish(*args, **kwargs)
+            if args[1] == "auth.json":
+                os.link(private.path / ".pi" / "agent" / "auth.json", outside)
+            return result
+
+        monkeypatch.setitem(ns["copy_regular_file_nofollow"].__globals__, "publish_file", publish_then_link)
+        ns["copy_private_pi_config"](source, private, "cursor")
+
+    assert outside.read_bytes() == b""
+
+
+def test_private_auth_inode_is_retained_before_destination_is_visible(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    outside = tmp_path / "linked-auth.json"
+    real_verify = ns["verify_published_file"]
+
+    def verify_then_link(dir_fd, name, data, mode, created):
+        real_verify(dir_fd, name, data, mode, created)
+        os.link(name, outside, src_dir_fd=dir_fd)
+
+    monkeypatch.setitem(ns["publish_file"].__globals__, "verify_published_file", verify_then_link)
+    with ns["PrivatePiHome"]() as private:
+        private.publish(private.path / ".pi" / "agent" / "auth.json", b"credential bytes\n")
+
+    assert outside.read_bytes() == b""
+
+
+def test_private_home_rejects_replacement_without_truncating_attacker_inode(tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    outside = tmp_path / "attacker-selected.txt"
+    outside.write_text("do not truncate\n")
+
+    with pytest.raises(SystemExit):
+        with ns["PrivatePiHome"]() as private:
+            evidence = private.path / "events.jsonl"
+            private.publish(evidence, b"original evidence\n")
+            evidence.unlink()
+            os.link(outside, evidence)
+
+    evidence.unlink()
+    private.__exit__(None, None, None)
+    assert outside.read_text() == "do not truncate\n"
+
+
+def test_private_home_rejects_replacement_between_check_and_removal(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    outside = tmp_path / "attacker-selected.txt"
+    outside.write_text("do not truncate\n")
+    real_remove = ns["_remove_private_contents"]
+
+    with pytest.raises(SystemExit):
+        with ns["PrivatePiHome"]() as private:
+            evidence = private.path / "events.jsonl"
+            private.publish(evidence, b"original evidence\n")
+
+            def swap_then_remove(*args, **kwargs):
+                evidence.unlink()
+                os.link(outside, evidence)
+                return real_remove(*args, **kwargs)
+
+            monkeypatch.setitem(ns["_cleanup_private_home"].__globals__, "_remove_private_contents", swap_then_remove)
+
+    monkeypatch.undo()
+    evidence.unlink()
+    private.__exit__(None, None, None)
+    assert outside.read_text() == "do not truncate\n"
+
+
+def test_private_raw_evidence_is_retained_before_the_worker_can_link_it(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("raw evidence retention\n")
+    event_link = tmp_path / "linked-events.jsonl"
+    artifact_link = tmp_path / "linked-result.json"
+    fake = tmp_path / "fake-pi-linking-evidence"
+    fake.write_text(
+        "#!/usr/bin/python3\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "event=Path(os.environ['PI_BD_EVENT_LOG'])\n"
+        "artifact=Path(os.environ['PI_BD_ARTIFACT_PATH'])\n"
+        "event.write_text('raw-event-secret\\n')\n"
+        "artifact.write_text('{\\\"raw\\\":\\\"artifact-secret\\\"}\\n')\n"
+        f"os.link(event, {str(event_link)!r})\n"
+        f"os.link(artifact, {str(artifact_link)!r})\n"
+    )
+    fake.chmod(0o700)
+
+    sh([
+        sys.executable, str(PI_WRAPPER), "--repo", str(repo), "--prompt-file", str(prompt),
+        "--run-dir", str(tmp_path / "run"), "--pi-bin", str(fake),
+        "--scope-include", "src/pi_smoke.txt",
+    ], check=False)
+
+    assert event_link.read_bytes() == b""
+    assert artifact_link.read_bytes() == b""
+
+
+def test_candidate_redacts_selected_auth_and_removes_private_home(tmp_path: Path):
+    secret = "ABCD"
+    home = tmp_path / "home"
+    auth = home / ".pi" / "agent" / "auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text(json.dumps({
+        "cursor": {"type": "api_key", "key": secret},
+        "xai": {"type": "api_key", "key": "not-selected"},
+    }) + "\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("candidate redaction\n")
+    run_dir = tmp_path / "run"
+
+    cp = sh([
+        sys.executable, str(PI_WRAPPER), "--repo", str(repo), "--prompt-file", str(prompt),
+        "--run-dir", str(run_dir), "--pi-bin", str(fake_pi_leaking(tmp_path, None)),
+        "--scope-include", "src/pi_smoke.txt",
+    ], env={**os.environ, "HOME": str(home)}, check=False)
+
+    data = json.loads(cp.stdout)
+    private_home = Path(next(
+        line.split("=", 1)[1]
+        for line in data["stdout_tail"].splitlines()
+        if line.startswith("private_home=")
+    ))
+    durable = [cp.stdout, *(
+        (run_dir / name).read_text()
+        for name in ("pi.stdout", "pi.stderr", "pi-result.json", "pi-events.jsonl", "pi-command.json")
+    )]
+    assert cp.returncode == 0 and data["status"] == "needs_busdriver_review"
+    assert all(secret not in text and "not-selected" not in text for text in durable)
+    assert any("[REDACTED]" in text for text in durable)
+    assert not private_home.exists()
 
 
 def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(monkeypatch, tmp_path: Path):
@@ -634,7 +846,190 @@ def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(monkeypatch, tm
     assert data["status"] == "blocked"
     assert data["error"] == "agent_containment_and_credential_broker_unavailable"
     assert not sentinel.exists()
-    assert not (run_dir / "pi-home" / ".pi" / "agent" / "auth.json").exists()
+    assert not run_dir.exists()
+
+
+@pytest.mark.parametrize("args", [["--provider", "openai"], ["--model", "grok"], ["--pi-bin", "untrusted-pi"]])
+def test_cursor_candidate_rejects_route_or_runtime_override(args: list[str], tmp_path: Path):
+    if args[0] == "--pi-bin":
+        args = [args[0], str(tmp_path / args[1])]
+    cp = sh([sys.executable, str(CURSOR_CANDIDATE), *args], check=False)
+
+    assert cp.returncode == 2
+    assert json.loads(cp.stdout)["error"] == "cursor_candidate_route_locked"
+
+
+@pytest.mark.parametrize("arg", ["--prov=openai", "--mod=grok"])
+def test_cursor_candidate_rejects_abbreviated_route_flags(arg: str, tmp_path: Path):
+    cp = sh([
+        sys.executable, str(CURSOR_CANDIDATE), arg,
+        "--repo", str(tmp_path / "repo"), "--prompt-file", str(tmp_path / "prompt"),
+        "--run-dir", str(tmp_path / "run"),
+    ], check=False)
+
+    assert cp.returncode == 2
+    assert "unrecognized arguments" in cp.stderr
+
+
+def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(tmp_path: Path):
+    candidate = tmp_path / "tests" / "fixtures" / "pi" / "run-pi-cursor-candidate"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(CURSOR_CANDIDATE.read_bytes())
+    production = tmp_path / "scripts" / "pi" / "run-pi-busdriver-draft"
+    production.parent.mkdir(parents=True)
+    production.write_text(
+        "import json, os, sys\n"
+        "def main():\n"
+        " print(json.dumps({'argv': sys.argv[1:], 'provider_env': os.environ.get('PI_BD_PROVIDER'), 'model_env': os.environ.get('PI_BD_MODEL'), 'pi_bin_env': os.environ.get('PI_BIN')}))\n"
+        " return 0\n"
+    )
+
+    cp = sh([
+        sys.executable, str(candidate), "--repo", "repo", "--prompt-file", "prompt",
+        "--run-dir", "run",
+    ], env={**os.environ, "PI_BD_PROVIDER": "xai", "PI_BD_MODEL": "xai/grok", "PI_BIN": "/tmp/other.js"})
+    data = json.loads(cp.stdout)
+
+    assert data["argv"][-4:] == ["--provider", "cursor", "--model", "auto"]
+    assert data["provider_env"] is None and data["model_env"] is None and data["pi_bin_env"] is None
+
+
+def test_cursor_candidate_is_excluded_from_production_surfaces():
+    assert "run-pi-cursor-candidate" not in PRODUCTION_PI_WRAPPER.read_text()
+    assert "run-pi-cursor-candidate" not in (ROOT / "scripts" / "hermes-busdriver-agent-draft").read_text()
+    assert "run-pi-cursor-candidate" not in TRUSTED_RUNTIME_MANIFEST.read_text()
+
+
+def test_auth_credential_values_excludes_metadata_but_keeps_short_nested_secrets():
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    values = ns["auth_credential_values"](json.dumps({
+        "cursor": {
+            "type": "oauth",
+            "access": "a1b2",
+            "cursorModels": [{"id": "auto"}],
+            "nested": {"api_key": ["k3y4"]},
+        },
+    }).encode())
+
+    assert {"a1b2", "k3y4"} <= set(values)
+    assert {"oauth", "auto"}.isdisjoint(values)
+
+
+@pytest.mark.parametrize(("route", "expected_error"), [
+    (["--model", "auto"], "selected_provider_required"),
+    (["--model", "/auto"], "provider_model_route_invalid"),
+    (["--model", "cursor/"], "provider_model_route_invalid"),
+    (["--model", "cursor//auto"], "provider_model_route_invalid"),
+    (["--provider", "cursor", "--model", ""], "model_route_invalid"),
+    (["--provider", "cursor", "--model", " auto"], "model_route_invalid"),
+    (["--provider", "/", "--model", "auto"], "provider_route_invalid"),
+    (["--provider", "openai", "--model", "xai/grok"], "provider_model_route_mismatch"),
+])
+def test_ambiguous_route_is_rejected_before_unscoped_auth_reaches_worker(
+    monkeypatch, tmp_path: Path, route: list[str], expected_error: str,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("draft\n")
+    home = tmp_path / "home"
+    config = home / ".pi" / "agent"
+    config.mkdir(parents=True)
+    (config / "auth.json").write_text(json.dumps({
+        "cursor": {"type": "api_key", "key": "curs"},
+        "other": {"type": "api_key", "key": "othr"},
+    }))
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    globals_ = ns["_run_in_directory"].__globals__
+
+    class RouteError(RuntimeError):
+        pass
+
+    class Private:
+        path = tmp_path / "private"
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def register(self, *_args): pass
+        def ensure_directory(self, *_args): pass
+        def publish(self, *_args): pass
+
+    def refuse(token, **_kwargs):
+        raise RouteError(token)
+
+    for name, value in {
+        "trusted_pi_executable": lambda _value: Path(sys.executable),
+        "trusted_node_executable": lambda: Path(sys.executable),
+        "trusted_git_executable": lambda: Path("/usr/bin/git"),
+        "trusted_pi_tools": lambda: tmp_path / "tools.ts",
+        "git_root": lambda *_args: repo,
+        "build_prompt": lambda *_args: "prompt",
+        "publish_file": lambda *_args, **_kwargs: None,
+        "PrivatePiHome": Private,
+        "copy_private_pi_config": lambda *_args, **_kwargs: pytest.fail("credentials staged before route rejection"),
+        "startup_failure": refuse,
+    }.items():
+        monkeypatch.setitem(globals_, name, value)
+    direct_run = tmp_path / "direct-run"
+    direct_run.mkdir()
+    direct_fd = os.open(direct_run, os.O_RDONLY)
+    try:
+        with pytest.raises(RouteError, match=expected_error):
+            ns["_run_in_directory"](SimpleNamespace(
+                pi_bin="pi", repo=str(repo), prompt_file=str(prompt),
+                scope_include=None, scope_exclude=None,
+                provider=route[1] if route[0] == "--provider" else "",
+                model=route[-1], timeout=1, pretty=False,
+            ), direct_run, direct_fd)
+    finally:
+        os.close(direct_fd)
+
+    cp = sh([
+        sys.executable, str(PI_WRAPPER),
+        "--repo", str(repo), "--prompt-file", str(prompt), "--run-dir", str(tmp_path / "run"),
+        "--pi-bin", str(fake_pi(tmp_path)), *route,
+    ], check=False, env=env)
+
+    assert cp.returncode == 2
+    assert json.loads(cp.stdout)["error"] == expected_error
+    assert not (repo / "src" / "pi_smoke.txt").exists()
+
+
+def test_pi_worker_output_limit_is_shared_across_stdout_and_stderr():
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    result = ns["run"]([
+        sys.executable, "-I", "-c",
+        "import sys; sys.stdout.write('o' * 600); sys.stderr.write('e' * 600)",
+    ], timeout=30, limit=1024)
+
+    assert result.returncode == 125
+    assert result.stdout == ""
+    assert result.stderr == "worker_output_too_large"
+
+
+def test_pi_wrapper_rejects_group_writable_run_directory(monkeypatch, capsys, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o770)
+    run_dir.chmod(0o770)
+    ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
+    ns["main"].__globals__["_run_in_directory"] = lambda *_args: pytest.fail("unsafe run directory accepted")
+    monkeypatch.setattr(sys, "argv", [
+        str(PRODUCTION_PI_WRAPPER),
+        "--repo", str(tmp_path / "repo"),
+        "--prompt-file", str(tmp_path / "prompt"),
+        "--run-dir", str(run_dir),
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        ns["main"]()
+
+    assert exc.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "run_directory_invalid"
 
 
 def test_production_pi_wrapper_blocks_before_path_resolution(monkeypatch, capsys, tmp_path: Path):
@@ -683,6 +1078,40 @@ def test_pi_package_tree_digest_v2_binds_symlink_type_and_target(tmp_path: Path)
 
     assert target_mutant != baseline
     assert type_mutant != baseline
+
+
+def test_cursor_extension_is_digest_pinned_and_retained(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    extension = tmp_path / "cursor-oauth"
+    extension.mkdir()
+    entry = extension / "index.ts"
+    entry.write_text("export default function cursor() {}\n")
+    digest, _ = canonical_pi_package_tree_digest_v2(extension)
+    globals_ = ns["trusted_cursor_extension"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_CURSOR_EXTENSION", extension)
+    monkeypatch.setitem(globals_, "TRUSTED_CURSOR_EXTENSION_TREE_SHA256", digest)
+
+    retained = ns["trusted_cursor_extension"]()
+    entry.write_text("throw new Error('swapped');\n")
+
+    assert retained.read_text() == "export default function cursor() {}\n"
+    assert extension not in retained.parents
+    assert stat.S_IMODE(retained.stat().st_mode) == 0o500
+
+
+def test_cursor_extension_tamper_fails_closed(monkeypatch, capsys, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    extension = tmp_path / "cursor-oauth"
+    extension.mkdir()
+    (extension / "index.ts").write_text("tampered\n")
+    globals_ = ns["trusted_cursor_extension"].__globals__
+    monkeypatch.setitem(globals_, "TRUSTED_CURSOR_EXTENSION", extension)
+    monkeypatch.setitem(globals_, "TRUSTED_CURSOR_EXTENSION_TREE_SHA256", "0" * 64)
+
+    with pytest.raises(SystemExit, match="2"):
+        ns["trusted_cursor_extension"]()
+
+    assert json.loads(capsys.readouterr().out)["error"] == "cursor_extension_integrity_failed"
 
 
 @pytest.mark.parametrize("target", ["/tmp/outside.js", "../../outside.js", "missing-inside.js"])
@@ -892,8 +1321,9 @@ def test_pi_child_receives_no_ambient_credentials(tmp_path: Path):
         "--run-dir", str(run_dir), "--pi-bin", str(fake), "--scope-include", "src/pi_smoke.txt",
     ], env=env)
 
-    assert json.loads(cp.stdout)["ok"] is True
-    assert json.loads((run_dir / "seen-env.json").read_text()) == {
+    data = json.loads(cp.stdout)
+    assert data["ok"] is True
+    assert json.loads(data["artifact"]["limitations"][0]) == {
         "AWS_SECRET_ACCESS_KEY": None,
         "CUSTOM_SECRET_TOKEN": None,
         "GITHUB_TOKEN": None,
@@ -1419,3 +1849,6 @@ def test_pinned_pi_anchor_is_bound_to_the_manifest():
     manifest = json.loads(TRUSTED_RUNTIME_MANIFEST.read_text())
 
     assert str(ns["TRUSTED_PI"]) == str(Path(manifest["executables"]["pi"]["path"]).resolve())
+    cursor = manifest["executables"]["cursor-oauth-extension-tree"]
+    assert str(ns["TRUSTED_CURSOR_EXTENSION"]) == cursor["path"]
+    assert ns["TRUSTED_CURSOR_EXTENSION_TREE_SHA256"] == cursor["sha256"]
