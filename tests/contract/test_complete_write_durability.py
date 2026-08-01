@@ -263,12 +263,7 @@ def _invoke_rename_writer(ns: dict, func_name: str, tmp_path: Path, payload: byt
     if func_name == "write_baseline_file":  # gate: (path, payload, mode=0o600)
         ns[func_name](tmp_path / "baseline.json", payload)
         return tmp_path / "baseline.json"
-    if func_name == "copy_regular_file_nofollow":  # pi: (source, target_dir, target_name)
-        source = tmp_path / "source.bin"
-        source.write_bytes(payload)
-        ns[func_name](source, tmp_path / "private", "artifact.bin")
-        return tmp_path / "private" / "artifact.bin"
-    if func_name == "publish_file":  # pi: (path, payload, mode=0o600)
+    if func_name == "publish_file":  # pi: (dir_fd, name, data, mode=0o600, retain=None)
         target = tmp_path / "artifact.bin"
         dir_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:

@@ -100,6 +100,14 @@ def test_policy_blocker_precedes_every_one_of_them(name: str):
 
     if name == "pi":
         assert blocker < first_call_index(fn, ("_run_in_directory",))
+        called = {
+            node.func.id
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert called.isdisjoint({*auth, *credentials, *dispatch}), (
+            f"{relative}: main() authenticates, stages credentials or launches instead of delegating"
+        )
     else:
         assert blocker < first_call_index(fn, auth)
         assert blocker < first_call_index(fn, credentials)

@@ -848,8 +848,10 @@ def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(monkeypatch, tm
     assert not run_dir.exists()
 
 
-@pytest.mark.parametrize("args", [["--provider", "openai"], ["--model", "grok"], ["--pi-bin", "/tmp/untrusted-pi"]])
-def test_cursor_candidate_rejects_route_or_runtime_override(args: list[str]):
+@pytest.mark.parametrize("args", [["--provider", "openai"], ["--model", "grok"], ["--pi-bin", "untrusted-pi"]])
+def test_cursor_candidate_rejects_route_or_runtime_override(args: list[str], tmp_path: Path):
+    if args[0] == "--pi-bin":
+        args = [args[0], str(tmp_path / args[1])]
     cp = sh([sys.executable, str(CURSOR_CANDIDATE), *args], check=False)
 
     assert cp.returncode == 2
@@ -857,10 +859,11 @@ def test_cursor_candidate_rejects_route_or_runtime_override(args: list[str]):
 
 
 @pytest.mark.parametrize("arg", ["--prov=openai", "--mod=grok"])
-def test_cursor_candidate_rejects_abbreviated_route_flags(arg: str):
+def test_cursor_candidate_rejects_abbreviated_route_flags(arg: str, tmp_path: Path):
     cp = sh([
         sys.executable, str(CURSOR_CANDIDATE), arg,
-        "--repo", "/tmp/repo", "--prompt-file", "/tmp/prompt", "--run-dir", "/tmp/run",
+        "--repo", str(tmp_path / "repo"), "--prompt-file", str(tmp_path / "prompt"),
+        "--run-dir", str(tmp_path / "run"),
     ], check=False)
 
     assert cp.returncode == 2
@@ -894,6 +897,42 @@ def test_cursor_candidate_is_excluded_from_production_surfaces():
     assert "run-pi-cursor-candidate" not in PRODUCTION_PI_WRAPPER.read_text()
     assert "run-pi-cursor-candidate" not in (ROOT / "scripts" / "hermes-busdriver-agent-draft").read_text()
     assert "run-pi-cursor-candidate" not in TRUSTED_RUNTIME_MANIFEST.read_text()
+
+
+def test_auth_credential_values_excludes_metadata_but_keeps_short_nested_secrets():
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    values = ns["auth_credential_values"](json.dumps({
+        "cursor": {
+            "type": "oauth",
+            "access": "a1b2",
+            "cursorModels": [{"id": "auto"}],
+            "nested": {"api_key": ["k3y4"]},
+        },
+    }).encode())
+
+    assert {"a1b2", "k3y4"} <= set(values)
+    assert {"oauth", "auto"}.isdisjoint(values)
+
+
+def test_pi_wrapper_rejects_group_writable_run_directory(monkeypatch, capsys, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o770)
+    run_dir.chmod(0o770)
+    ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
+    ns["main"].__globals__["_run_in_directory"] = lambda *_args: pytest.fail("unsafe run directory accepted")
+    monkeypatch.setattr(sys, "argv", [
+        str(PRODUCTION_PI_WRAPPER),
+        "--repo", str(tmp_path / "repo"),
+        "--prompt-file", str(tmp_path / "prompt"),
+        "--run-dir", str(run_dir),
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        ns["main"]()
+
+    assert exc.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "run_directory_invalid"
 
 
 def test_production_pi_wrapper_blocks_before_path_resolution(monkeypatch, capsys, tmp_path: Path):
