@@ -185,10 +185,18 @@ def test_active_agent_docs_reject_stale_production_dispatch_claims():
         "production agent-draft/Pi/OpenCode remains `policy_blocked`",
         "live OpenCode digest mismatch remains a separate trusted-runtime convergence item",
         "verify-only local verifiers",
+        # A doc may not call the canonical Cursor/auto route enabled while it is also
+        # expected-blocked. These are the exact promotion phrasings adjudicated
+        # PROMOTION_BLOCKED_FAIL_CLOSED (2026-08-02): the credential-broker conjunct of the
+        # blocker is implemented, the OS-enforced containment conjunct is not.
+        "Pi draft dispatch is enabled",
+        "locked direct Cursor/auto production draft CLI",
+        "The narrow production executor is the canonical branch",
+        "Live dispatch uses only",
     )
     for path in ACTIVE_AGENT_POLICY_DOCS:
         text = read(path)
-        assert "agent_containment_and_credential_broker_unavailable" in text, path
+        assert PRODUCTION_AGENT_BLOCKER in text, path
         for phrase in forbidden:
             assert phrase not in text, (path, phrase)
 

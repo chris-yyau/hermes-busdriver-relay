@@ -93,6 +93,7 @@ function broker(request: BrokerRequest): any {
     const value = process.env[key];
     if (value) env[key] = value;
   }
+  env.BD_BROKER_DENIED_IDENTITIES = process.env.PI_BD_DENIED_IDENTITIES || "";
   let raw: string;
   try {
     raw = execFileSync(python, ["-I", script], {
@@ -401,6 +402,7 @@ export default function(pi: ExtensionAPI) {
         // create/truncate/write and the after hash all happen under descriptors the broker proved
         // and holds. Both hashes are of the inode it wrote — not of whatever the name resolved to
         // by the time a second call got there.
+        log("write_intent", { toolName: "bd_write_draft", path: rel, operation_id });
         const written = broker({ op: "write", root: "repo", rel, content: params.content });
         const { before_hash, after_hash } = written;
         const audit = { toolName: "bd_write_draft", path: rel, operation_id, before_hash, after_hash, bytes: contentBytes };

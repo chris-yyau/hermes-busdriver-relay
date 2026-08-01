@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Production Busdriver draft parser and state-check dispatcher.
 
 Pattern:
@@ -33,7 +33,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
-TRUSTED_GATE_SHA256 = 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31'
+TRUSTED_GATE_SHA256 = '83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5'
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
@@ -64,7 +64,17 @@ TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c
 #
 # No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
 PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = '071c3b85ff1e32c8915665d4e3a811d2d5a799d83ab94abb7fff5bbb6c2586af'
+TRUSTED_PI_WRAPPER_SHA256 = '56e90a917a528b971be382d8a05a53b87ddf3f768c274726444eee6f8343b0ea'
+# The child wrapper resolves ROOT as parents[2] from scripts/pi/run-pi-busdriver-draft,
+# so the retained runtime must mirror those repo-relative paths — not a flat copy of the
+# wrapper alone. Dependency bytes are copied once through read_artifact_file(); the child
+# independently pins and privately retains each one before use.
+PI_WRAPPER_RELATIVE = PI_WRAPPER.relative_to(ROOT)
+PI_WRAPPER_DEPENDENCIES: tuple[tuple[str, int, str], ...] = (
+    ("adapters/pi/busdriver-tools.ts", 0o400, "pi-tools"),
+    ("adapters/pi/busdriver-fs-broker.py", 0o500, "fs-broker"),
+    ("adapters/pi/pi-result.schema.json", 0o400, "pi-result-schema"),
+)
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {
@@ -404,9 +414,9 @@ def run_bounded(
     return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
 
 
-def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None, limit: int = MAX_CAPTURED_BYTES) -> subprocess.CompletedProcess[str]:
     """The historical shape, now bounded. Overflow arrives as rc 125 with a fixed token."""
-    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout)
+    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout, limit=limit)
     if result.overflowed:
         return subprocess.CompletedProcess(cmd, 125, "", "helper_output_too_large")
     if result.timed_out:
@@ -984,7 +994,7 @@ def gate_preflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
     if args.allow_dirty:
         cmd.append("--allow-dirty")
     gate_env = private_helper_env(args.trusted_gate_path, {"HERMES_GATE_BASELINE_HMAC_KEY": args.baseline_auth_key})
-    cp = run(cmd, timeout=120, env=gate_env)
+    cp = run(cmd, timeout=120, env=gate_env, limit=MAX_HELPER_STDOUT_BYTES)
     data = helper_json(cp, {"ok": False})
     data["returncode"] = cp.returncode
     return data
@@ -999,7 +1009,7 @@ def gate_postflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
     for v in args.verifier or []:
         cmd += ["--verifier", v]
     gate_env = private_helper_env(args.trusted_gate_path, {"HERMES_GATE_BASELINE_HMAC_KEY": args.baseline_auth_key})
-    cp = run(cmd, timeout=args.postflight_timeout, env=gate_env)
+    cp = run(cmd, timeout=args.postflight_timeout, env=gate_env, limit=MAX_HELPER_STDOUT_BYTES)
     data = helper_json(cp, {"ok": False})
     data["returncode"] = cp.returncode
     return data
@@ -1050,7 +1060,9 @@ def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) ->
                 "agent": "pi",
                 "error": "pi_executable_override_rejected",
             }))
-        pi_bin = str(trusted_agent_executable("pi"))
+        # The candidate-lane selector is the literal name `pi`. The child wrapper independently
+        # validates and privately retains the pinned Pi package tree, so the parent forwards the
+        # name rather than its own single-file retained copy. Production never reaches here.
         cmd = [
             str(trusted_executable_path("python3")),
             "-I",
@@ -1062,7 +1074,7 @@ def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) ->
             "--run-dir",
             str(run_dir),
             "--pi-bin",
-            pi_bin,
+            "pi",
             "--model",
             args.pi_model,
             "--timeout",
@@ -1191,6 +1203,97 @@ def ensure_private_run_dir(run_dir: Path) -> None:
         raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "private_run_dir_integrity_failed"}))
 
 
+def _ensure_private_runtime_parent(root: Path, relative: Path) -> None:
+    """Create ``relative``'s parent chain under ``root`` as explicit 0700 directories.
+
+    ``Path.mkdir(parents=True, mode=...)`` ignores ``mode`` for implicit parents, so each
+    component is created and then chmod'd to 0700.
+    """
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        current.chmod(0o700)
+        st = current.lstat()
+        if (
+            current.is_symlink()
+            or not stat.S_ISDIR(st.st_mode)
+            or st.st_uid != os.getuid()
+            or stat.S_IMODE(st.st_mode) != 0o700
+        ):
+            raise SystemExit(json.dumps({
+                "schema": SCHEMA,
+                "ok": False,
+                "error": "private_trusted_wrapper_runtime_directory_integrity_failed",
+            }))
+
+
+def _read_wrapper_dependency(source: Path, dep_kind: str) -> bytes:
+    try:
+        data = read_artifact_file(source)
+    except ArtifactError as exc:
+        detail = {
+            "artifact_path_is_symlink": "symlink",
+            "artifact_not_a_regular_owned_file": "not_regular",
+            "artifact_too_large": "oversized",
+        }.get(str(exc), "unreadable")
+        raise SystemExit(json.dumps({
+            "schema": SCHEMA,
+            "ok": False,
+            "error": f"trusted_wrapper_dependency_metadata_invalid:{dep_kind}",
+            "detail": detail,
+        })) from exc
+    if data is None:
+        raise SystemExit(json.dumps({
+            "schema": SCHEMA,
+            "ok": False,
+            "error": f"trusted_wrapper_dependency_unavailable:{dep_kind}",
+            "detail": "FileNotFoundError",
+        }))
+    return data
+
+
+def _verify_retained_wrapper_file(path: Path, data: bytes, mode: int, dep_kind: str) -> None:
+    st = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(st.st_mode)
+        or st.st_uid != os.getuid()
+        or st.st_nlink != 1
+        or stat.S_IMODE(st.st_mode) != mode
+    ):
+        raise SystemExit(json.dumps({
+            "schema": SCHEMA,
+            "ok": False,
+            "error": f"private_trusted_wrapper_dependency_integrity_failed:{dep_kind}",
+        }))
+    retained = path.read_bytes()
+    if retained != data or hashlib.sha256(retained).hexdigest() != hashlib.sha256(data).hexdigest():
+        raise SystemExit(json.dumps({
+            "schema": SCHEMA,
+            "ok": False,
+            "error": f"private_trusted_wrapper_dependency_integrity_failed:{dep_kind}",
+        }))
+
+
+def _retain_wrapper_dependency(runtime_root: Path, relative: str, data: bytes, mode: int, dep_kind: str) -> None:
+    _ensure_private_runtime_parent(runtime_root, Path(relative))
+    private = runtime_root / relative
+    try:
+        write_private_runtime_file(private, data, mode=mode)
+    except OSError as exc:
+        raise SystemExit(json.dumps({
+            "schema": SCHEMA,
+            "ok": False,
+            "error": f"private_trusted_wrapper_dependency_unavailable:{dep_kind}",
+            "detail": type(exc).__name__,
+        })) from exc
+    _verify_retained_wrapper_file(private, data, mode, dep_kind)
+
+
 def materialize_trusted_wrapper(run_dir: Path, source: Path, expected_digest: str, kind: str) -> Path:
     """Authenticate a child wrapper's bytes, retain them, and return the path to RUN.
 
@@ -1199,28 +1302,24 @@ def materialize_trusted_wrapper(run_dir: Path, source: Path, expected_digest: st
     nobody had authenticated, while git, gh, pi, opencode, the gate and the lock all were. Pinning
     the pathname would not have been enough either: digesting a name and then executing that same
     name is two reads of one mutable file. The retained copy is what runs.
+
+    The child derives ROOT from ``Path(__file__).resolve().parents[2]``, so the retained runtime
+    must land at ``<runtime-root>/scripts/pi/run-pi-busdriver-draft`` with the three ``adapters/pi``
+    dependencies beside it — not a flat ``trusted-pi-wrapper-runtime/run-pi-busdriver-draft``.
     """
-    try:
-        data = source.read_bytes()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_wrapper_unavailable:{kind}", "detail": type(exc).__name__})) from exc
+    data = _read_wrapper_dependency(source, kind)
     if hashlib.sha256(data).hexdigest() != expected_digest:
         raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_wrapper_integrity_failed:{kind}"}))
     ensure_private_run_dir(run_dir)
-    private_dir = run_dir / f"trusted-{kind}-runtime"
-    private_dir.mkdir(mode=0o700)
-    private = private_dir / source.name
+    runtime_root = run_dir / f"trusted-{kind}-runtime"
+    runtime_root.mkdir(mode=0o700)
+    runtime_root.chmod(0o700)
+    private = runtime_root / PI_WRAPPER_RELATIVE
+    _ensure_private_runtime_parent(runtime_root, PI_WRAPPER_RELATIVE)
     write_private_runtime_file(private, data)
-    st = private.lstat()
-    if (
-        private.is_symlink()
-        or not stat.S_ISREG(st.st_mode)
-        or st.st_uid != os.getuid()
-        or st.st_nlink != 1
-        or stat.S_IMODE(st.st_mode) != 0o500
-        or hashlib.sha256(private.read_bytes()).hexdigest() != expected_digest
-    ):
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_wrapper_integrity_failed:{kind}"}))
+    _verify_retained_wrapper_file(private, data, 0o500, kind)
+    for relative, mode, dep_kind in PI_WRAPPER_DEPENDENCIES:
+        _retain_wrapper_dependency(runtime_root, relative, _read_wrapper_dependency(ROOT / relative, dep_kind), mode, dep_kind)
     return private
 
 
@@ -1348,13 +1447,26 @@ def allocate_run_dir(state: Path, agent: str) -> Path:
     return run_dir
 
 
-def production_dispatch_blocker() -> str:
+def production_dispatch_blocker(args: argparse.Namespace) -> str | None:
     """Return the non-overridable production dispatch blocker.
+
+    The canonical ``pi`` / ``cursor`` / ``auto`` tuple is blocked like every other route:
+    the credential-broker half of this token is implemented, the OS-enforced worker and
+    descendant containment half is not, and a conjunction is not cleared by one conjunct.
 
     Test harnesses may replace this function only after loading this file with
     ``runpy``. No production CLI flag or environment variable can clear it.
     """
     return "agent_containment_and_credential_broker_unavailable"
+
+
+class _StoreOnce(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        seen = f"_{self.dest}_seen"
+        if getattr(namespace, seen, False):
+            parser.error(f"{option_string} may only be specified once")
+        setattr(namespace, seen, True)
+        setattr(namespace, self.dest, values)
 
 
 def production_blocked_report(args: argparse.Namespace, blocker: str) -> dict[str, Any]:
@@ -1387,10 +1499,10 @@ def main() -> int:
     )
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
-    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
-    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"), help="Pi model for --agent pi.")
-    ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")
+    ap.add_argument("--agent", action=_StoreOnce, choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
+    ap.add_argument("--pi-bin", action=_StoreOnce, default="pi", help="Candidate-lane Pi selector for --agent pi; production is blocked.")
+    ap.add_argument("--pi-model", action=_StoreOnce, default="auto", help="Candidate-lane model selector for --agent pi; production is blocked.")
+    ap.add_argument("--pi-provider", action=_StoreOnce, default="cursor", help="Candidate-lane provider selector for --agent pi; production is blocked.")
 
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")
@@ -1406,7 +1518,7 @@ def main() -> int:
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
-    blocker = production_dispatch_blocker()
+    blocker = production_dispatch_blocker(args)
     if blocker:
         print(json.dumps(production_blocked_report(args, blocker), indent=2 if args.pretty else None, sort_keys=True))
         return 2

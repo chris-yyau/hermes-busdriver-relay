@@ -62,7 +62,7 @@ Codex lane    = fallback coder and PR-lead metadata only; production relay-role 
 OpenCode lane = non-executor historical/comparison evidence only; no current implementation route.
 ```
 
-A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, the `cursor/auto` default, wrapper contracts, and fake-adapter smoke prove target routing only; they do not prove live Cursor dispatch.
+A doc may show `hermes-busdriver-agent-draft --agent pi` only as an expected blocked production probe while `agent_containment_and_credential_broker_unavailable` is active. In-repo schema, the `cursor/auto` default, wrapper contracts, and fake-adapter smoke prove target routing only; they do not prove live Cursor dispatch. The locked `cursor/auto` candidate lane adds pinned adapter/runtime digests, private-runtime retention, least-privilege credential brokering, and write intent/audit reconciliation; that is candidate/test-lane hardening, not production containment. Production agent-draft and relay-role dispatch stay blocked until OS-enforced worker and descendant containment plus parent-held write/audit provenance exist, and a functional dogfood run is not containment proof.
 
 ## Trusted evidence
 

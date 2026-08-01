@@ -138,13 +138,14 @@ def fake_pi(path: Path) -> Path:
     script = path / "fake-pi"
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
+        "import hashlib, json, os, sys\n"
         "from pathlib import Path\n"
         "repo = Path(os.environ['BD_REPO_ROOT'])\n"
         "target = os.environ.get('FAKE_PI_TARGET', 'src/pi_smoke.txt')\n"
         "content = os.environ.get('FAKE_PI_CONTENT', 'pi adapter smoke ok\\n')\n"
         "(repo / target).parent.mkdir(parents=True, exist_ok=True)\n"
         "(repo / target).write_text(content)\n"
+        "after_hash = hashlib.sha256(content.encode()).hexdigest()\n"
         "artifact_path = Path(os.environ['PI_BD_ARTIFACT_PATH'])\n"
         "artifact_path.parent.mkdir(parents=True, exist_ok=True)\n"
         "seen = {key: os.environ.get(key) for key in ['GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'CUSTOM_SECRET_TOKEN', 'SSH_AUTH_SOCK', 'HERMES_GATE_BASELINE_HMAC_KEY']}\n"
@@ -180,7 +181,11 @@ def fake_pi(path: Path) -> Path:
         "  'deploy_allowed': False, 'release_allowed': False, 'publish_allowed': False\n"
         "}\n"
         "artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + '\\n')\n"
-        "Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool': 'fake-pi'}) + '\\n')\n"
+        "events = [\n"
+        "  {'kind': 'write_intent', 'toolName': 'bd_write_draft', 'path': target, 'operation_id': 'fake-op'},\n"
+        "  {'kind': 'write_audit', 'toolName': 'bd_write_draft', 'path': target, 'operation_id': 'fake-op', 'after_hash': after_hash},\n"
+        "]\n"
+        "Path(os.environ['PI_BD_EVENT_LOG']).write_text('\\n'.join(map(json.dumps, events)) + '\\n')\n"
         "print(json.dumps({'fake_pi': True, 'argv': sys.argv[1:], 'artifact': str(artifact_path)}))\n"
     )
     script.chmod(0o755)
@@ -196,7 +201,7 @@ def fake_pi_leaking(path: Path, secret: str | None) -> Path:
     script = path / "fake-pi-leaking"
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
+        "import hashlib, json, os, sys\n"
         "from pathlib import Path\n"
         f"secret = {secret!r}\n"
         "if secret is None:\n"
@@ -205,6 +210,7 @@ def fake_pi_leaking(path: Path, secret: str | None) -> Path:
         "repo = Path(os.environ['BD_REPO_ROOT'])\n"
         "(repo / 'src').mkdir(parents=True, exist_ok=True)\n"
         "(repo / 'src' / 'pi_smoke.txt').write_text('pi adapter smoke ok\\n')\n"
+        "after_hash = hashlib.sha256(b'pi adapter smoke ok\\n').hexdigest()\n"
         "artifact_path = Path(os.environ['PI_BD_ARTIFACT_PATH'])\n"
         "artifact_path.parent.mkdir(parents=True, exist_ok=True)\n"
         "artifact = {\n"
@@ -238,7 +244,12 @@ def fake_pi_leaking(path: Path, secret: str | None) -> Path:
         "  'deploy_allowed': False, 'release_allowed': False, 'publish_allowed': False\n"
         "}\n"
         "artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + '\\n')\n"
-        "Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool': 'fake-pi', 'detail': secret}) + '\\n')\n"
+        "events = [\n"
+        "  {'tool': 'fake-pi', 'detail': secret},\n"
+        "  {'kind': 'write_intent', 'toolName': 'bd_write_draft', 'path': 'src/pi_smoke.txt', 'operation_id': 'fake-op'},\n"
+        "  {'kind': 'write_audit', 'toolName': 'bd_write_draft', 'path': 'src/pi_smoke.txt', 'operation_id': 'fake-op', 'after_hash': after_hash},\n"
+        "]\n"
+        "Path(os.environ['PI_BD_EVENT_LOG']).write_text('\\n'.join(map(json.dumps, events)) + '\\n')\n"
         "print('private_home=' + os.environ['HOME'])\n"
         "print('pi stdout: using ' + secret)\n"
         "print('pi stderr: rejected ' + secret, file=sys.stderr)\n"
@@ -440,6 +451,7 @@ def test_busdriver_tools_expose_hardened_pi_tool_boundary():
         "argv-only",
         "before_hash",
         "after_hash",
+        "write_intent",
         "operation_id",
         "marker_write_allowed",
         "finalization_allowed",
@@ -601,12 +613,15 @@ def test_private_pi_config_keeps_only_selected_cursor_auth_without_refresh(tmp_p
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
 
     with ns["PrivatePiHome"]() as private:
-        secrets = ns["copy_private_pi_config"](source, private, "cursor", 60_000)
+        secrets, denied_identity = ns["copy_private_pi_config"](source, private, "cursor", 60_000)
         copied_auth = private.path / ".pi" / "agent" / "auth.json"
         copied = json.loads(copied_auth.read_text())
         assert copied == {"cursor": {key: value for key, value in payload["cursor"].items() if key != "refresh"}}
         assert "candidate-access" in secrets
-        assert "must-not-reach-child" not in secrets
+        assert "must-not-reach-child" in secrets
+        assert "must-not-be-copied" in secrets
+        source_stat = (source / "auth.json").stat()
+        assert denied_identity == f"{source_stat.st_dev}:{source_stat.st_ino}"
         assert not (copied_auth.parent / "settings.json").exists()
         assert copied_auth.stat().st_mode & 0o777 == 0o600
         assert private.path.stat().st_mode & 0o777 == 0o700
@@ -818,7 +833,171 @@ def test_candidate_redacts_selected_auth_and_removes_private_home(tmp_path: Path
     assert not private_home.exists()
 
 
-def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(monkeypatch, tmp_path: Path):
+def test_production_pi_wrapper_blocks_canonical_route_and_names_noncanonical_ones():
+    """The route lock is candidate-lane groundwork, never a production unlock.
+
+    Non-canonical routes are refused by name; the canonical `pi`/`cursor`/`auto` tuple
+    still returns the fixed production blocker. A conjunction blocker is not cleared by
+    delivering the credential-broker conjunct alone.
+    """
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    blocker = ns["production_dispatch_blocker"]
+
+    assert (
+        blocker(SimpleNamespace(pi_bin="pi", provider="cursor", model="auto"))
+        == "agent_containment_and_credential_broker_unavailable"
+    )
+    for args in (
+        SimpleNamespace(pi_bin="untrusted-pi", provider="cursor", model="auto"),
+        SimpleNamespace(pi_bin="pi", provider="openai", model="auto"),
+        SimpleNamespace(pi_bin="pi", provider="cursor", model="gpt-5"),
+        SimpleNamespace(pi_bin="pi", provider="cursor", model="cursor/auto"),
+    ):
+        assert blocker(args) == "cursor_production_route_locked"
+
+
+def test_production_agent_draft_blocks_the_canonical_cursor_auto_tuple():
+    blocker = runpy.run_path(str(PRODUCTION_AGENT_DRAFT))["production_dispatch_blocker"]
+
+    for args in (
+        SimpleNamespace(agent="pi", pi_bin="pi", pi_provider="cursor", pi_model="auto"),
+        SimpleNamespace(agent="noop", pi_bin="pi", pi_provider="cursor", pi_model="auto"),
+        SimpleNamespace(agent="pi", pi_bin="other", pi_provider="cursor", pi_model="auto"),
+        SimpleNamespace(agent="pi", pi_bin="pi", pi_provider="xai", pi_model="auto"),
+        SimpleNamespace(agent="pi", pi_bin="pi", pi_provider="cursor", pi_model="other"),
+    ):
+        assert blocker(args) == "agent_containment_and_credential_broker_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--agent", "pi"), ("--pi-bin", "pi"), ("--pi-provider", "cursor"), ("--pi-model", "auto")],
+)
+def test_production_agent_draft_rejects_duplicate_route_selectors_before_side_effects(
+    tmp_path: Path, flag: str, value: str
+):
+    state = tmp_path / "state"
+    cp = subprocess.run(
+        [
+            sys.executable,
+            str(PRODUCTION_AGENT_DRAFT),
+            "--plugin-root", str(tmp_path / "plugin"),
+            "--repo", str(tmp_path / "repo"),
+            flag, value, flag, value,
+            "--state-dir", str(state),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 2
+    assert "may only be specified once" in cp.stderr
+    assert not state.exists()
+
+
+@pytest.mark.parametrize(("flag", "value"), [
+    ("--provider", "cursor"),
+    ("--model", "auto"),
+    ("--pi-bin", "pi"),
+])
+def test_production_pi_wrapper_rejects_duplicate_route_selectors(flag: str, value: str, tmp_path: Path):
+    run_dir = tmp_path / "run"
+    cp = sh([
+        sys.executable, str(PRODUCTION_PI_WRAPPER),
+        "--repo", str(tmp_path / "repo"),
+        "--prompt-file", str(tmp_path / "prompt"),
+        "--run-dir", str(run_dir),
+        flag, value, flag, value,
+    ], check=False)
+
+    assert cp.returncode == 2
+    assert "may only be specified once" in cp.stderr
+    assert not run_dir.exists()
+
+
+def test_production_pi_wrapper_reconciles_claims_audits_and_final_hash(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    reconcile = ns["reconcile_write_audits"]
+    digest = "a" * 64
+    intent = {
+        "kind": "write_intent", "toolName": "bd_write_draft",
+        "path": "src/app.txt", "operation_id": "op-1",
+    }
+    audit = {**intent, "kind": "write_audit", "after_hash": digest}
+    events = "\n".join(map(json.dumps, (intent, audit)))
+    monkeypatch.setitem(reconcile.__globals__, "broker_file_hash", lambda *_args: digest)
+
+    assert reconcile(events, {"files_changed": ["src/app.txt"]}, tmp_path, Path("python"), Path("broker"), "") == []
+    assert reconcile(events, {"files_changed": []}, tmp_path, Path("python"), Path("broker"), "") == [
+        "files_changed_write_audit_mismatch"
+    ]
+    assert reconcile(json.dumps(intent), {"files_changed": []}, tmp_path, Path("python"), Path("broker"), "") == [
+        "write_audit_incomplete"
+    ]
+    monkeypatch.setitem(reconcile.__globals__, "broker_file_hash", lambda *_args: "b" * 64)
+    assert reconcile(events, {"files_changed": ["src/app.txt"]}, tmp_path, Path("python"), Path("broker"), "") == [
+        "write_audit_final_hash_mismatch:src/app.txt"
+    ]
+    assert "reconcile_write_audits(" in PRODUCTION_PI_WRAPPER.read_text()
+
+
+def test_production_pi_wrapper_authenticates_schema_before_worker(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    schema_path = tmp_path / "pi-result.schema.json"
+    schema_bytes = b'{"type":"object","required":["sentinel"]}\n'
+    schema_path.write_bytes(schema_bytes)
+    monkeypatch.setitem(ns["trusted_pi_result_schema"].__globals__, "PI_RESULT_SCHEMA_PATH", schema_path)
+    monkeypatch.setitem(
+        ns["trusted_pi_result_schema"].__globals__,
+        "TRUSTED_PI_RESULT_SCHEMA_SHA256",
+        hashlib.sha256(schema_bytes).hexdigest(),
+    )
+
+    schema = ns["trusted_pi_result_schema"]()
+    schema_path.write_text('{"type":"object"}\n')
+    errors = ns["validate_artifact"]({}, [], [], schema=schema)
+
+    assert any("sentinel" in error for error in errors)
+
+
+def test_production_pi_wrapper_authenticates_schema_before_credentials_or_worker():
+    source = PRODUCTION_PI_WRAPPER.read_text()
+    body = source.split("def _run_in_directory", 1)[1].split("\ndef main()", 1)[0]
+
+    schema = body.index("result_schema = trusted_pi_result_schema()")
+    credentials = body.index("auth_values, denied_identities = copy_private_pi_config(")
+    worker = body.index("cp = run(")
+
+    assert schema < credentials < worker
+
+
+def test_production_pi_wrapper_rejects_untrusted_schema_before_worker(monkeypatch, tmp_path: Path, capsys):
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    schema_path = tmp_path / "pi-result.schema.json"
+    schema_path.write_text('{"type":"object"}\n')
+    monkeypatch.setitem(ns["trusted_pi_result_schema"].__globals__, "PI_RESULT_SCHEMA_PATH", schema_path)
+    monkeypatch.setitem(ns["trusted_pi_result_schema"].__globals__, "TRUSTED_PI_RESULT_SCHEMA_SHA256", "0" * 64)
+
+    with pytest.raises(SystemExit) as exc:
+        ns["trusted_pi_result_schema"]()
+
+    assert exc.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "pi_result_schema_integrity_failed"
+
+
+@pytest.mark.parametrize(
+    ("route_argv", "expected"),
+    (
+        pytest.param([], "agent_containment_and_credential_broker_unavailable", id="canonical-defaults"),
+        pytest.param(["--pi-bin", "FAKE_PI"], "cursor_production_route_locked", id="noncanonical-runtime"),
+        pytest.param(["--provider", "openai"], "cursor_production_route_locked", id="noncanonical-provider"),
+    ),
+)
+def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(
+    monkeypatch, tmp_path: Path, route_argv: list[str], expected: str
+):
+    assert "/usr/bin/python3 -I scripts/pi/run-pi-busdriver-draft" in (ROOT / "adapters/pi/README.md").read_text()
     repo = tmp_path / "repo-production-blocked"
     repo.mkdir()
     init_repo(repo)
@@ -828,23 +1007,26 @@ def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(monkeypatch, tm
     sentinel = tmp_path / "pi-ran"
     fake = tmp_path / "fake-pi"
     fake.write_text(f"#!/bin/sh\ntouch {sentinel}\n")
-    fake.chmod(0o700)
+    fake.chmod(0o755)
     home = tmp_path / "home"
     auth = home / ".pi" / "agent" / "auth.json"
     auth.parent.mkdir(parents=True)
-    auth.write_text('{"secret":"must-not-copy"}\n')
+    auth.write_text(json.dumps({"cursor": {"access": "secret"}}))
     monkeypatch.setenv("HOME", str(home))
 
-    cp = sh([
+    # A non-canonical route is named by the lock; the canonical default tuple still hits the
+    # fixed production blocker. Neither reaches the run directory, the auth copy, or a worker.
+    argv = [str(fake) if value == "FAKE_PI" else value for value in route_argv]
+    cp = subprocess.run([
         sys.executable, str(PRODUCTION_PI_WRAPPER), "--repo", str(repo),
-        "--prompt-file", str(prompt), "--run-dir", str(run_dir), "--pi-bin", str(fake),
-    ], check=False)
+        "--prompt-file", str(prompt), "--run-dir", str(run_dir), *argv,
+    ], text=True, capture_output=True, check=False)
     data = json.loads(cp.stdout)
 
     assert cp.returncode == 2
     assert data["ok"] is False
     assert data["status"] == "blocked"
-    assert data["error"] == "agent_containment_and_credential_broker_unavailable"
+    assert data["error"] == expected
     assert not sentinel.exists()
     assert not run_dir.exists()
 
@@ -1016,7 +1198,7 @@ def test_pi_wrapper_rejects_group_writable_run_directory(monkeypatch, capsys, tm
     run_dir = tmp_path / "run"
     run_dir.mkdir(mode=0o770)
     run_dir.chmod(0o770)
-    ns["main"].__globals__["production_dispatch_blocker"] = lambda: None
+    ns["main"].__globals__["production_dispatch_blocker"] = lambda _args: None
     ns["main"].__globals__["_run_in_directory"] = lambda *_args: pytest.fail("unsafe run directory accepted")
     monkeypatch.setattr(sys, "argv", [
         str(PRODUCTION_PI_WRAPPER),
@@ -1032,7 +1214,7 @@ def test_pi_wrapper_rejects_group_writable_run_directory(monkeypatch, capsys, tm
     assert json.loads(capsys.readouterr().out)["error"] == "run_directory_invalid"
 
 
-def test_production_pi_wrapper_blocks_before_path_resolution(monkeypatch, capsys, tmp_path: Path):
+def test_production_pi_wrapper_rejects_noncanonical_route_before_path_resolution(monkeypatch, capsys, tmp_path: Path):
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
 
     def fail_which(_name):
@@ -1047,6 +1229,7 @@ def test_production_pi_wrapper_blocks_before_path_resolution(monkeypatch, capsys
             "--repo", str(tmp_path / "repo"),
             "--prompt-file", str(tmp_path / "prompt"),
             "--run-dir", str(tmp_path / "run"),
+            "--provider", "openai",
         ],
     )
 
@@ -1054,7 +1237,7 @@ def test_production_pi_wrapper_blocks_before_path_resolution(monkeypatch, capsys
         ns["main"]()
 
     assert exc.value.code == 2
-    assert json.loads(capsys.readouterr().out)["error"] == "agent_containment_and_credential_broker_unavailable"
+    assert json.loads(capsys.readouterr().out)["error"] == "cursor_production_route_locked"
 
 
 def test_pi_package_tree_digest_v2_binds_symlink_type_and_target(tmp_path: Path):
@@ -1332,15 +1515,18 @@ def test_pi_child_receives_no_ambient_credentials(tmp_path: Path):
     }
 
 
-def test_pi_route_defaults_to_cursor_auto_and_respects_environment():
+def test_pi_route_selector_defaults_are_the_candidate_cursor_auto_tuple():
     smoke_text = PRODUCTION_AGENT_SMOKE.read_text()
     draft_text = PRODUCTION_AGENT_DRAFT.read_text()
     wrapper_text = PRODUCTION_PI_WRAPPER.read_text()
 
     assert 'default=os.environ.get("PI_BIN", "pi")' in smoke_text
     assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in smoke_text
-    assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in draft_text
-    assert 'default=os.environ.get("PI_BD_MODEL", "cursor/auto")' in wrapper_text
+    assert 'ap.add_argument("--pi-model", action=_StoreOnce, default="auto"' in draft_text
+    assert 'ap.add_argument("--pi-provider", action=_StoreOnce, default="cursor"' in draft_text
+    assert 'ap.add_argument("--model", action=_StoreOnce, default="auto")' in wrapper_text
+    assert 'ap.add_argument("--provider", action=_StoreOnce, default="cursor")' in wrapper_text
+    assert 'ap.add_argument("--pi-bin", action=_StoreOnce, default="pi")' in wrapper_text
 
 
 def test_agent_draft_pi_forwards_scope_exclude_to_wrapper():

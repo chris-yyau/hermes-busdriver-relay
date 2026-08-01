@@ -137,9 +137,12 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         # straight onto node's `-e`. It defines every tool boundary in the run, so it is in the
         # closure like the broker beside it.
         ("run-pi-busdriver-draft", "TRUSTED_PI_TOOLS_SHA256", manifest["adapter_runtime"]["adapters/pi/busdriver-tools.ts"]),
+        # Artifact policy is read from authenticated bytes before the worker starts, so a scoped
+        # worker edit cannot weaken validation later in the same run.
+        ("run-pi-busdriver-draft", "TRUSTED_PI_RESULT_SCHEMA_SHA256", manifest["adapter_runtime"]["adapters/pi/pi-result.schema.json"]),
         # Agent-draft executes only the Pi child wrapper. OpenCode has no
         # production wrapper edge or executable pin.
-        ("hermes-busdriver-agent-draft", "TRUSTED_PI_WRAPPER_SHA256", entrypoints["scripts/pi/run-pi-busdriver-draft"]),
+        ("hermes-busdriver-agent-draft", "TRUSTED_PI_WRAPPER_SHA256", manifest["adapter_runtime"]["scripts/pi/run-pi-busdriver-draft"]),
         # --- embedded plugin-script pins ---
         # `plugin_scripts` is the union across consumers, so each consumer binds the rows it runs
         # rather than the whole section: the checker runs these four, status runs the resolver.
@@ -294,7 +297,6 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
         "scripts/check-required-checks.sh",
         "scripts/hermes-busdriver-deliver",
         "scripts/hermes-busdriver-relay-brief",
-        "scripts/pi/run-pi-busdriver-draft",
     }
     assert set(manifest["production_entrypoints"]) == expected_production_entrypoints
     for relative, digest in manifest["production_entrypoints"].items():

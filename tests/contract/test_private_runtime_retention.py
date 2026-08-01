@@ -188,7 +188,7 @@ def test_the_agent_draft_pins_the_wrapper_bytes_it_runs(tmp_path):
     ns = runpy.run_path(str(AGENT_DRAFT))
     manifest = json.loads(MANIFEST.read_text())
 
-    assert ns["TRUSTED_PI_WRAPPER_SHA256"] == manifest["production_entrypoints"]["scripts/pi/run-pi-busdriver-draft"]
+    assert ns["TRUSTED_PI_WRAPPER_SHA256"] == manifest["adapter_runtime"]["scripts/pi/run-pi-busdriver-draft"]
     assert ns["TRUSTED_PI_WRAPPER_SHA256"] == sha(PI_WRAPPER.read_bytes())
 
 
@@ -207,6 +207,47 @@ def test_a_retained_wrapper_creates_its_private_run_parent(tmp_path):
     assert stat.S_ISDIR(st.st_mode)
     assert stat.S_IMODE(st.st_mode) == 0o700
     assert st.st_uid == os.getuid()
+
+
+def test_materialized_pi_wrapper_uses_repo_relative_layout(tmp_path):
+    """The retained child runtime must mirror the child's ROOT = parents[2] layout."""
+    ns = runpy.run_path(str(AGENT_DRAFT))
+    run_dir = tmp_path / "run"
+
+    private = ns["materialize_trusted_wrapper"](
+        run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper"
+    )
+
+    assert private == run_dir / "trusted-pi-wrapper-runtime" / "scripts" / "pi" / "run-pi-busdriver-draft"
+    assert private.read_bytes() == PI_WRAPPER.read_bytes()
+    for relative, mode, _dep_kind in ns["PI_WRAPPER_DEPENDENCIES"]:
+        retained = run_dir / "trusted-pi-wrapper-runtime" / relative
+        assert retained.read_bytes() == (ROOT / relative).read_bytes()
+        st = retained.lstat()
+        assert stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and st.st_nlink == 1
+        assert stat.S_IMODE(st.st_mode) == mode
+        assert stat.S_IMODE(retained.parent.lstat().st_mode) == 0o700
+
+
+def test_materialized_pi_wrapper_refuses_missing_dependency(tmp_path, monkeypatch):
+    ns = runpy.run_path(str(AGENT_DRAFT))
+    run_dir = tmp_path / "run"
+    missing = ROOT / "adapters/pi/busdriver-tools.ts"
+    real_read = ns["read_artifact_file"]
+
+    def read_without_tools(path):
+        if path == missing:
+            return None
+        return real_read(path)
+
+    monkeypatch.setitem(ns["materialize_trusted_wrapper"].__globals__, "read_artifact_file", read_without_tools)
+
+    with pytest.raises(SystemExit) as excinfo:
+        ns["materialize_trusted_wrapper"](run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper")
+
+    payload = json.loads(str(excinfo.value.code))
+    assert payload["error"] == "trusted_wrapper_dependency_unavailable:pi-tools"
+    assert payload["detail"] == "FileNotFoundError"
 
 
 def test_a_group_or_other_readable_run_parent_is_refused(tmp_path):
@@ -290,7 +331,8 @@ def test_every_production_script_pins_the_trusted_interpreter():
     ]
 
     assert scripts, "no production python entrypoint was found at all"
-    offenders = [str(path.relative_to(ROOT)) for path in scripts if shebang(path) != trusted]
+    accepted = {trusted, trusted + b" -I"}
+    offenders = [str(path.relative_to(ROOT)) for path in scripts if shebang(path) not in accepted]
     assert offenders == [], f"these resolve their interpreter through PATH: {offenders}"
 
 

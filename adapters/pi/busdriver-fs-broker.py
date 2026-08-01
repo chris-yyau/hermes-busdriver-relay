@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import select
 import signal
 import stat
@@ -438,12 +439,29 @@ def fd_identity(st: os.stat_result) -> tuple:
     )
 
 
+DENIED_IDENTITIES_ENV = "BD_BROKER_DENIED_IDENTITIES"
+
+
+def denied_identities() -> set[tuple[int, int]]:
+    identities: set[tuple[int, int]] = set()
+    for value in os.environ.get(DENIED_IDENTITIES_ENV, "").split(","):
+        if not value:
+            continue
+        if not re.fullmatch(r"[0-9]+:[0-9]+", value):
+            raise fail("denied_identity_config_invalid")
+        device, inode = value.split(":", 1)
+        identities.add((int(device), int(inode)))
+    return identities
+
+
 def check_regular(st: os.stat_result, *, mutation: bool) -> None:
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
         raise fail("not_a_regular_owned_file")
-    # A hardlink is a second name for these bytes, so a mutation through this one is also a
-    # mutation through a path the containment never authorized. Reads tolerate it; writes do not.
-    if mutation and st.st_nlink != 1:
+    if (st.st_dev, st.st_ino) in denied_identities():
+        raise fail("credential_source_refused")
+    # A hardlink is a second name for bytes outside the authorized path. Reads can exfiltrate
+    # through it just as writes can mutate through it, so neither operation accepts one.
+    if st.st_nlink != 1:
         raise fail("hardlinked_target_refused")
 
 

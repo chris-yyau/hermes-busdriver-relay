@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Hermes-side Busdriver-equivalent state gate.
 
 Production uses this layer for state checks, but agent and verifier dispatch

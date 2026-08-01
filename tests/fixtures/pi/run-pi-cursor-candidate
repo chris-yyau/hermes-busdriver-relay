@@ -29,5 +29,5 @@ os.environ.pop("PI_BD_MODEL", None)
 os.environ.pop("PI_BIN", None)
 sys.argv += ["--provider", "cursor", "--model", "auto"]
 namespace = runpy.run_path(str(PRODUCTION))
-namespace["main"].__globals__["production_dispatch_blocker"] = lambda: None
+namespace["main"].__globals__["production_dispatch_blocker"] = lambda _args: None
 raise SystemExit(namespace["main"]())

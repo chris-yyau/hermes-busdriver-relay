@@ -19,9 +19,34 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DRAFT = ROOT / "tests" / "fixtures" / "pi" / "agent-draft-test-harness"
 PRODUCTION_DRAFT = ROOT / "scripts" / "hermes-busdriver-agent-draft"
+PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
 OPENCODE_FIXTURE_SOURCE = ROOT / "tests" / "fixtures" / "opencode" / "run-opencode-busdriver-draft"
 OPENCODE = ROOT / "tests" / "fixtures" / "opencode" / "run-opencode-test-harness"
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def assert_private_runtime_directory(path: Path) -> None:
+    st = path.lstat()
+    assert not path.is_symlink()
+    assert stat.S_ISDIR(st.st_mode)
+    assert st.st_uid == os.getuid()
+    assert stat.S_IMODE(st.st_mode) == 0o700
+
+
+def assert_retained_runtime_file(path: Path, expected: bytes, mode: int) -> None:
+    st = path.lstat()
+    retained = path.read_bytes()
+    assert not path.is_symlink()
+    assert stat.S_ISREG(st.st_mode)
+    assert st.st_uid == os.getuid()
+    assert st.st_nlink == 1
+    assert stat.S_IMODE(st.st_mode) == mode
+    assert retained == expected
+    assert sha(retained) == sha(expected)
 
 
 def test_pi_artifact_authority_requires_exact_strict_false_contract():
@@ -128,25 +153,134 @@ def test_agent_missing_gh_fails_closed_by_name():
     assert "trusted_root_owned_gh_unavailable" in str(excinfo.value)
 
 
-def test_agent_command_resolves_default_pi_to_manifest_path(tmp_path: Path):
+def test_agent_command_forwards_canonical_pi_selector_literal(tmp_path: Path):
+    """Candidate lane passes the literal `pi`, not the parent's private retained copy.
+
+    The child wrapper independently validates and privately retains the pinned Pi package
+    tree, so the parent forwards the name. Production never reaches this builder — see
+    test_production_agent_draft_blocks_the_canonical_cursor_auto_tuple.
+    """
     ns = runpy.run_path(str(PRODUCTION_DRAFT))
     args = argparse.Namespace(
         agent="pi",
         timeout=180,
         repo=str(tmp_path),
         pi_bin="pi",
-        pi_model="openai-codex/gpt-5.4-mini",
-        pi_provider="",
+        pi_model="auto",
+        pi_provider="cursor",
         scope_include=[],
         scope_exclude=[],
     )
 
     cmd = ns["agent_command"](args, tmp_path / "prompt.md", tmp_path / "run")
 
-    private_pi = Path(cmd[cmd.index("--pi-bin") + 1])
-    assert private_pi != ns["TRUSTED_PI"]
-    assert stat.S_IMODE(private_pi.stat().st_mode) == 0o500
-    assert hashlib.sha256(private_pi.read_bytes()).hexdigest() == ns["TRUSTED_EXECUTABLE_DIGESTS"]["pi"]
+    pi_bin_index = cmd.index("--pi-bin")
+    assert cmd[pi_bin_index + 1] == "pi"
+    assert not Path(cmd[pi_bin_index + 1]).is_absolute()
+
+
+def test_materialized_pi_wrapper_uses_repo_relative_layout(tmp_path: Path):
+    """The retained child runtime must mirror the child's ROOT = parents[2] layout."""
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    run_dir = tmp_path / "run"
+
+    private = ns["materialize_trusted_wrapper"](
+        run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper"
+    )
+    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
+
+    assert private == runtime_root / "scripts" / "pi" / "run-pi-busdriver-draft"
+    wrapper_bytes = PI_WRAPPER.read_bytes()
+    assert_retained_runtime_file(private, wrapper_bytes, 0o500)
+    for relative, mode, _dep_kind in ns["PI_WRAPPER_DEPENDENCIES"]:
+        retained = runtime_root / relative
+        expected = (ROOT / relative).read_bytes()
+        assert_retained_runtime_file(retained, expected, mode)
+        assert_private_runtime_directory(retained.parent)
+    for relative in ("scripts", "scripts/pi", "adapters", "adapters/pi"):
+        assert_private_runtime_directory(runtime_root / relative)
+
+
+def test_materialized_pi_wrapper_refuses_missing_dependency(tmp_path: Path, monkeypatch):
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    run_dir = tmp_path / "run"
+    missing = ROOT / "adapters/pi/busdriver-tools.ts"
+    real_read = ns["read_artifact_file"]
+
+    def read_without_tools(path):
+        if path == missing:
+            return None
+        return real_read(path)
+
+    monkeypatch.setitem(ns["materialize_trusted_wrapper"].__globals__, "read_artifact_file", read_without_tools)
+
+    with pytest.raises(SystemExit) as excinfo:
+        ns["materialize_trusted_wrapper"](run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper")
+
+    payload = json.loads(str(excinfo.value.code))
+    assert payload["error"] == "trusted_wrapper_dependency_unavailable:pi-tools"
+    assert payload["detail"] == "FileNotFoundError"
+
+
+def test_gate_preflight_accepts_helper_stdout_above_default_capture_limit(monkeypatch, tmp_path: Path):
+    """Gate JSON may exceed run()'s 64 KiB default but must stay within MAX_HELPER_STDOUT_BYTES."""
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    globals_ = ns["gate_preflight"].__globals__
+    captured: dict[str, int] = {}
+    payload_size = ns["MAX_CAPTURED_BYTES"] + 4096
+    gate_payload = {"ok": True, "decision": {"agent_implementation_draft_allowed": True}, "padding": "x" * payload_size}
+
+    def fake_run(cmd, cwd=None, env=None, timeout=None, limit=ns["MAX_CAPTURED_BYTES"]):
+        captured["limit"] = limit
+        stdout = json.dumps(gate_payload)
+        assert len(stdout) > ns["MAX_CAPTURED_BYTES"]
+        assert len(stdout) <= ns["MAX_HELPER_STDOUT_BYTES"]
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setitem(globals_, "run", fake_run)
+    args = argparse.Namespace(
+        trusted_gate_path=tmp_path / "gate",
+        plugin_root=str(tmp_path / "plugin"),
+        repo=str(tmp_path / "repo"),
+        scope_include=[],
+        scope_exclude=[],
+        allow_dirty=False,
+        baseline_auth_key="test-key",
+    )
+
+    data = ns["gate_preflight"](args, tmp_path / "baseline")
+
+    assert captured["limit"] == ns["MAX_HELPER_STDOUT_BYTES"]
+    assert data["ok"] is True
+    assert data["decision"]["agent_implementation_draft_allowed"] is True
+    assert data["returncode"] == 0
+
+
+def test_gate_postflight_refuses_helper_stdout_above_max_helper_stdout_bytes(monkeypatch, tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    globals_ = ns["gate_postflight"].__globals__
+    overflow = "x" * (ns["MAX_HELPER_STDOUT_BYTES"] + 1)
+
+    def fake_run(cmd, cwd=None, env=None, timeout=None, limit=ns["MAX_CAPTURED_BYTES"]):
+        stdout = json.dumps({"ok": True, "padding": overflow})
+        assert len(stdout) > ns["MAX_HELPER_STDOUT_BYTES"]
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setitem(globals_, "run", fake_run)
+    args = argparse.Namespace(
+        trusted_gate_path=tmp_path / "gate",
+        repo=str(tmp_path / "repo"),
+        scope_include=[],
+        scope_exclude=[],
+        verifier=[],
+        postflight_timeout=60,
+        baseline_auth_key="test-key",
+    )
+
+    data = ns["gate_postflight"](args, tmp_path / "baseline")
+
+    assert data["ok"] is False
+    assert data["reason"] == "helper_output_too_large"
 
 
 def test_production_agent_draft_rejects_opencode_executor(tmp_path: Path):
@@ -1482,7 +1616,7 @@ def test_production_losing_lock_creates_no_agent_inputs(monkeypatch, capsys, tmp
     state = tmp_path / "state-loser"
     plugin = fake_busdriver(tmp_path / "plugin-loser")
     globals_ = ns["main"].__globals__
-    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda: "")
+    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda _args: "")
     monkeypatch.setitem(globals_, "git_root", lambda _repo: repo)
     monkeypatch.setitem(globals_, "acquire_lock", lambda _args: {"acquired": False, "reason": "lock-active"})
     monkeypatch.setattr(sys, "argv", [
@@ -1584,7 +1718,7 @@ def test_lock_release_failure_is_the_same_blocked_stdout_and_final_report(monkey
     state = tmp_path / "state-release"
     plugin = fake_busdriver(tmp_path / "plugin-release")
     globals_ = ns["main"].__globals__
-    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda: "")
+    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda _args: "")
     monkeypatch.setitem(globals_, "git_root", lambda _repo: repo)
     monkeypatch.setitem(globals_, "materialize_trusted_lock", lambda _state: tmp_path / "trusted-lock")
     monkeypatch.setitem(globals_, "acquire_lock", lambda _args: {"acquired": True, "token": "token", "path": str(tmp_path / "lock")})
@@ -1658,7 +1792,7 @@ def test_final_report_write_failure_publishes_one_recoverable_blocked_envelope(m
     state = tmp_path / "state-artifact"
     plugin = fake_busdriver(tmp_path / "plugin-artifact")
     globals_ = ns["main"].__globals__
-    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda: "")
+    monkeypatch.setitem(globals_, "production_dispatch_blocker", lambda _args: "")
     monkeypatch.setitem(globals_, "git_root", lambda _repo: repo)
     monkeypatch.setitem(globals_, "materialize_trusted_lock", lambda _state: tmp_path / "trusted-lock")
     monkeypatch.setitem(globals_, "acquire_lock", lambda _args: {"acquired": True, "token": "token", "path": str(tmp_path / "lock")})

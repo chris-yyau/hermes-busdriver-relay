@@ -64,10 +64,11 @@ def test_current_status_records_merged_authority_chronology():
         "only as provenance and is not current main/top."
     )
     current_main = (
-        "Current main after squash-merged Pi-only policy PR #168 and "
-        "executor-retirement skill-source PR #169 is commit "
-        "`0853d513fb2c7fc35b143e0b71d669b788ffe0d6`, tree "
-        "`1422232f6635c9d60c8f83869dd2e64f5cfdf42e`"
+        "The sealed baseline is main commit "
+        "`f62cd73fd0ba668372e96f6cc18adb3334010a3a`, tree "
+        "`570268a7e16755091627783ecfd33b3d0f3d6515`, after PR #173 added the locked "
+        "Cursor candidate lane. The 2026-08-02 promotion attempt for that lane was "
+        "adjudicated `PROMOTION_BLOCKED_FAIL_CLOSED`"
     )
     policy_closure = (
         "PR #168 established the current Pi-only executor policy: Pi is the sole "

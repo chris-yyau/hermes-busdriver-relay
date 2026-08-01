@@ -447,7 +447,7 @@ TRUSTED_HELPER_PATHS = {
     "gate": GATE,
 }
 TRUSTED_HELPER_DIGESTS = {'finalization_readiness': '9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a',
- 'gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
+ 'gate': '83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5',
  'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
  'status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
 MAX_TRUSTED_HELPER_BYTES = 1024 * 1024

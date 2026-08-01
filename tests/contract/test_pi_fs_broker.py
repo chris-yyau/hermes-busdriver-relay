@@ -274,14 +274,33 @@ def test_an_absolute_rel_is_confined_to_the_root(repo: Path, outside: Path):
 # --- leaf identity: regular, owned, unshared, bounded ---
 
 
-def test_write_refuses_a_hardlinked_target(repo: Path, outside: Path):
-    """A hardlink is a second authorized name for these bytes; mutating through one is an escape."""
+def test_reads_and_writes_refuse_a_hardlinked_target(repo: Path, outside: Path):
+    """A hardlink can exfiltrate on read and mutate on write through an unauthorized name."""
     os.link(outside / "secret.txt", repo / "src" / "alias.txt")
 
+    read = call({"op": "read", "root": "repo", "rel": "src/alias.txt"}, repo=repo)
     out = call({"op": "write", "root": "repo", "rel": "src/alias.txt", "content": "PWNED\n"}, repo=repo)
 
+    assert read == {"ok": False, "error": "hardlinked_target_refused"}
     assert out == {"ok": False, "error": "hardlinked_target_refused"}
     assert (outside / "secret.txt").read_text() == "SENTINEL-UNTOUCHED\n"
+
+
+def test_credential_source_identity_is_refused_for_read_and_write(repo: Path):
+    target = repo / "src" / "app.txt"
+    st = target.stat()
+    env = {"BD_BROKER_DENIED_IDENTITIES": f"{st.st_dev}:{st.st_ino}"}
+
+    assert call({"op": "read", "root": "repo", "rel": "src/app.txt"}, repo=repo, env=env) == {
+        "ok": False,
+        "error": "credential_source_refused",
+    }
+    assert call(
+        {"op": "write", "root": "repo", "rel": "src/app.txt", "content": "PWNED\n"},
+        repo=repo,
+        env=env,
+    ) == {"ok": False, "error": "credential_source_refused"}
+    assert target.read_text() == "hello\n"
 
 
 def test_reads_and_writes_refuse_a_fifo(repo: Path):

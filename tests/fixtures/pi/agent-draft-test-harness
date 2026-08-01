@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix="hermes-agent-test-harness-") as td:
     if custom_cmd is not None:
         fake_pi = Path(td) / "fake-pi"
         fake_pi.write_text("""#!/usr/bin/env python3
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys
 from pathlib import Path
 repo = Path(os.environ['BD_REPO_ROOT'])
 command_env = os.environ.copy()
@@ -58,18 +58,26 @@ for row in status:
     if ' -> ' in value: value = value.split(' -> ', 1)[1]
     changed.append(value)
 artifact_path = Path(os.environ['PI_BD_ARTIFACT_PATH'])
+event_log_path = Path(os.environ['PI_BD_EVENT_LOG'])
 authority = {key: False for key in ['commit_allowed','push_allowed','pr_allowed','merge_allowed','marker_write_allowed','deploy_allowed','release_allowed','publish_allowed','finalization_allowed']}
 artifact = {
   'schema':'pi-busdriver-result/v0','worker':'pi','mode':'mutating_draft',
   'ok':cp.returncode == 0,'status':'needs_busdriver_review' if cp.returncode == 0 else 'blocked',
   'repo':str(repo),'branch':'','base_head':'','post_head':'','changed_files':changed,'files_changed':changed,
   'tests_run':[],'review_findings':[],'blockers':[] if cp.returncode == 0 else ['test_agent_command_failed'],
-  'blocked_actions':[],'artifacts':[],'event_log':[os.environ.get('PI_BD_EVENT_LOG','')],
+  'blocked_actions':[],'artifacts':[],'event_log':[str(event_log_path)],
   'summary':'test-only custom command','limitations':[],'not_busdriver_native_claude_runtime':True,
   'authority':authority, **authority,
 }
 artifact_path.write_text(json.dumps(artifact, sort_keys=True) + '\\n')
-Path(os.environ['PI_BD_EVENT_LOG']).write_text(json.dumps({'tool':'test-only-fake-pi','returncode':cp.returncode}) + '\\n')
+events = []
+for index, path in enumerate(changed):
+    operation_id = f'test-op-{index}'
+    intent = {'kind': 'write_intent', 'toolName': 'bd_write_draft', 'path': path, 'operation_id': operation_id}
+    after_hash = hashlib.sha256((repo / path).read_bytes()).hexdigest()
+    audit = {**intent, 'kind': 'write_audit', 'after_hash': after_hash}
+    events.extend([intent, audit])
+event_log_path.write_text('\\n'.join(json.dumps(event) for event in events) + ('\\n' if events else ''))
 sys.stdout.write(cp.stdout); sys.stderr.write(cp.stderr)
 raise SystemExit(cp.returncode)
 """)
@@ -80,7 +88,7 @@ raise SystemExit(cp.returncode)
     sys.argv = [sys.argv[0], *argv]
     ns = runpy.run_path(str(ROOT / "scripts" / "hermes-busdriver-agent-draft"))
     globals_ = ns["main"].__globals__
-    globals_["production_dispatch_blocker"] = lambda: ""
+    globals_["production_dispatch_blocker"] = lambda _args: ""
     # The fake Pi arrives through this global — see the --pi-bin note at the top of this file.
     if injected_pi is not None:
         production_trusted_agent_executable = globals_["trusted_agent_executable"]
@@ -116,6 +124,8 @@ raise SystemExit(cp.returncode)
         env["HERMES_TEST_REPO_ROOT"] = str(ROOT)
         if custom_cmd is not None:
             env["HERMES_TEST_AGENT_CMD"] = custom_cmd
+        if injected_pi is not None:
+            env["HERMES_TEST_PI_BIN"] = str(injected_pi)
         return env
 
     globals_["scrub_agent_startup_env"] = test_scrub_agent_startup_env
