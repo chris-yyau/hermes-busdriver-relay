@@ -201,6 +201,83 @@ def test_materialized_pi_wrapper_uses_repo_relative_layout(tmp_path: Path):
         assert_private_runtime_directory(runtime_root / relative)
 
 
+def test_wrapper_runtime_parent_symlink_does_not_chmod_target(tmp_path: Path):
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    run_dir = tmp_path / "run"
+    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
+    outside = tmp_path / "outside"
+    run_dir.mkdir(mode=0o700)
+    runtime_root.mkdir(mode=0o700)
+    outside.mkdir(mode=0o755)
+    outside.chmod(0o755)
+    (runtime_root / "scripts").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SystemExit):
+        ns["_ensure_private_runtime_parent"](runtime_root, ns["PI_WRAPPER_RELATIVE"])
+
+    assert stat.S_IMODE(outside.lstat().st_mode) == 0o755
+
+
+def test_wrapper_runtime_root_swap_does_not_chmod_or_write_target(tmp_path: Path, monkeypatch):
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    run_dir = tmp_path / "run"
+    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
+    displaced = tmp_path / "displaced-runtime"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    outside.chmod(0o755)
+    real_mkdir = Path.mkdir
+
+    def swap_runtime_root(path, *args, **kwargs):
+        result = real_mkdir(path, *args, **kwargs)
+        if path == runtime_root:
+            path.rename(displaced)
+            path.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", swap_runtime_root)
+
+    with pytest.raises(SystemExit):
+        ns["materialize_trusted_wrapper"](
+            run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper"
+        )
+
+    assert stat.S_IMODE(outside.lstat().st_mode) == 0o755
+    assert not (outside / "scripts").exists()
+
+
+def test_wrapper_dependency_root_swap_after_traversal_stays_on_parent_fd(tmp_path: Path, monkeypatch):
+    ns = runpy.run_path(str(PRODUCTION_DRAFT))
+    runtime_root = tmp_path / "runtime"
+    displaced = tmp_path / "displaced-runtime"
+    outside = tmp_path / "outside"
+    runtime_root.mkdir(mode=0o700)
+    outside.mkdir(mode=0o700)
+    (outside / "adapters/pi").mkdir(parents=True, mode=0o700)
+    relative = "adapters/pi/dependency"
+    real_write = ns["write_private_runtime_file"]
+    swapped = False
+
+    def swap_before_write(path, data, mode=0o500, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped:
+            runtime_root.rename(displaced)
+            runtime_root.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        if dir_fd is None:
+            return real_write(path, data, mode=mode)
+        return real_write(path, data, mode=mode, dir_fd=dir_fd)
+
+    monkeypatch.setitem(
+        ns["_retain_wrapper_dependency"].__globals__, "write_private_runtime_file", swap_before_write
+    )
+
+    ns["_retain_wrapper_dependency"](runtime_root, relative, b"reviewed\n", 0o600, "test")
+
+    assert not (outside / relative).exists()
+    assert (displaced / relative).read_bytes() == b"reviewed\n"
+
+
 def test_materialized_pi_wrapper_refuses_missing_dependency(tmp_path: Path, monkeypatch):
     ns = runpy.run_path(str(PRODUCTION_DRAFT))
     run_dir = tmp_path / "run"
