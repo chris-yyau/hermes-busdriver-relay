@@ -127,6 +127,7 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         # --- single embedded executable pins ---
         ("run-pi-busdriver-draft", "TRUSTED_NODE_SHA256", executables["node"]),
         ("run-pi-busdriver-draft", "TRUSTED_PI_TREE_SHA256", manifest["executables"]["pi-package-tree"]["sha256"]),
+        ("run-pi-busdriver-draft", "TRUSTED_CURSOR_EXTENSION_TREE_SHA256", manifest["executables"]["cursor-oauth-extension-tree"]["sha256"]),
         # v16-r30 B: the adapter has no openat(2), so its filesystem containment runs as brokered
         # Python. Both halves of that runtime — the interpreter and the broker bytes — are executed
         # on the adapter's behalf, so both are in the closure like any other executed byte.

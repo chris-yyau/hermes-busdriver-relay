@@ -40,12 +40,20 @@ WRAPPERS = {
 }
 
 
-def main_function(relative: str) -> ast.FunctionDef:
+def named_function(relative: str, name: str) -> ast.FunctionDef:
     tree = ast.parse((ROOT / relative).read_text())
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "main":
+        if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
-    raise AssertionError(f"{relative} has no main()")
+    raise AssertionError(f"{relative} has no {name}()")
+
+
+def main_function(relative: str) -> ast.FunctionDef:
+    return named_function(relative, "main")
+
+
+def dispatch_function(name: str, relative: str) -> ast.FunctionDef:
+    return named_function(relative, "_run_in_directory") if name == "pi" else main_function(relative)
 
 
 def first_call_index(fn: ast.FunctionDef, names: tuple[str, ...]) -> int:
@@ -65,7 +73,7 @@ def first_call_index(fn: ast.FunctionDef, names: tuple[str, ...]) -> int:
 def test_worker_is_authenticated_before_credentials_are_copied(name: str):
     """The digest check must precede handing the worker a HOME with live credentials in it."""
     relative, auth, credentials, _dispatch = WRAPPERS[name]
-    fn = main_function(relative)
+    fn = dispatch_function(name, relative)
 
     assert first_call_index(fn, auth) < first_call_index(fn, credentials), (
         f"{relative}: credentials are prepared before the worker executable is authenticated"
@@ -76,7 +84,7 @@ def test_worker_is_authenticated_before_credentials_are_copied(name: str):
 def test_worker_is_authenticated_before_it_is_launched(name: str):
     """The property that must survive the blocker being lifted."""
     relative, auth, _credentials, dispatch = WRAPPERS[name]
-    fn = main_function(relative)
+    fn = dispatch_function(name, relative)
 
     assert first_call_index(fn, auth) < first_call_index(fn, dispatch), (
         f"{relative}: the worker is launched before it is authenticated"
@@ -90,6 +98,9 @@ def test_policy_blocker_precedes_every_one_of_them(name: str):
     fn = main_function(relative)
     blocker = first_call_index(fn, ("production_dispatch_blocker",))
 
-    assert blocker < first_call_index(fn, auth)
-    assert blocker < first_call_index(fn, credentials)
-    assert blocker < first_call_index(fn, dispatch)
+    if name == "pi":
+        assert blocker < first_call_index(fn, ("_run_in_directory",))
+    else:
+        assert blocker < first_call_index(fn, auth)
+        assert blocker < first_call_index(fn, credentials)
+        assert blocker < first_call_index(fn, dispatch)

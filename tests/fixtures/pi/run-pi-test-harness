@@ -20,6 +20,7 @@ globals_ = ns["main"].__globals__
 globals_["production_dispatch_blocker"] = lambda: None
 globals_["trusted_pi_executable"] = lambda value: Path(value).expanduser().resolve()
 globals_["trusted_node_executable"] = lambda: Path(sys.executable).resolve()
+globals_["trusted_cursor_extension"] = lambda: None
 globals_["base_child_environment"] = lambda: {
     key: value for key, value in globals_["os"].environ.items()
     if key in {"TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "FAKE_PI_TARGET", "FAKE_PI_CONTENT", "HERMES_TEST_AGENT_CMD", "HERMES_AGENT_DRAFT_GUARD_BIN", "BUSDRIVER_PLUGIN_ROOT", "BUSDRIVER_STATE_DIR"}

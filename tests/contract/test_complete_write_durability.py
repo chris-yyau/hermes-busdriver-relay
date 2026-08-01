@@ -268,6 +268,14 @@ def _invoke_rename_writer(ns: dict, func_name: str, tmp_path: Path, payload: byt
         source.write_bytes(payload)
         ns[func_name](source, tmp_path / "private", "artifact.bin")
         return tmp_path / "private" / "artifact.bin"
+    if func_name == "publish_file":  # pi: (path, payload, mode=0o600)
+        target = tmp_path / "artifact.bin"
+        dir_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            ns[func_name](dir_fd, target.name, payload)
+        finally:
+            os.close(dir_fd)
+        return target
     if func_name == "write_artifact_bytes":  # deliver: (payload, dir_fd, tmp_name, name)
         dir_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -280,7 +288,7 @@ def _invoke_rename_writer(ns: dict, func_name: str, tmp_path: Path, payload: byt
 
 RENAME_WRITERS = [
     ("scripts/hermes-busdriver-gate", "write_baseline_file"),
-    ("scripts/pi/run-pi-busdriver-draft", "copy_regular_file_nofollow"),
+    ("scripts/pi/run-pi-busdriver-draft", "publish_file"),
     # The delivery result artifact. An INDEPENDENT writer, not a wrapper: the private-copy primitive
     # creates its final name with O_EXCL and never renames, and a result artifact must replace what
     # the previous run left. It is enumerated here because it restates the contract rather than
@@ -450,7 +458,7 @@ SANCTIONED_OS_WRITE_SITES = {
     ("scripts/hermes-busdriver-litmus-status", "write_private_authenticated"),
     # Atomic-replacement writers: same loop, then rename + parent fsync + reopen-revalidate.
     ("scripts/hermes-busdriver-gate", "write_baseline_file"),
-    ("scripts/pi/run-pi-busdriver-draft", "copy_regular_file_nofollow"),
+    ("scripts/pi/run-pi-busdriver-draft", "publish_file"),
     ("scripts/hermes-busdriver-deliver", "write_artifact_bytes"),
     # Not a file: the broker's own complete-write primitive, covered by test_pi_fs_broker.py.
     ("adapters/pi/busdriver-fs-broker.py", "write_all"),
@@ -498,7 +506,6 @@ HIGH_LEVEL_WRITE_ALLOWED_IN = {
     # `git`/`gh` shims that ARE executed moved to `write_private_runtime_file`, which is what
     # emptied the old denylist. Production dispatch here is fixed `policy_blocked` besides.
     ("scripts/hermes-busdriver-agent-draft", "main"),
-    ("scripts/pi/run-pi-busdriver-draft", "main"),
 }
 
 
