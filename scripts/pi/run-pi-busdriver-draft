@@ -51,19 +51,31 @@ class BoundedOutput:
         self.overflowed, self.timed_out = overflowed, timed_out
 
 
+class _SharedSeen(list):
+    __slots__ = ("budget",)
+
+    def __init__(self, budget):
+        super().__init__([0])
+        self.budget = budget
+
+
 def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: threading.Event) -> None:
-    """Drain one pipe while retaining at most *limit* bytes and signal overflow immediately."""
+    """Drain one pipe under the shared stdout+stderr byte budget."""
     try:
         fd = pipe.fileno()
         while True:
             chunk = os.read(fd, 65536)
             if not chunk:
                 break
-            seen[0] += len(chunk)
-            room = limit - len(kept)
+            total_seen, budget_lock = seen.budget
+            with budget_lock:
+                seen[0] += len(chunk)
+                room = limit - total_seen[0]
+                total_seen[0] += len(chunk)
+                exceeded = total_seen[0] > limit
             if room > 0:
                 kept += chunk[:room]
-            if seen[0] > limit:
+            if exceeded:
                 overflow.set()
                 break
     except (OSError, ValueError, AttributeError):
@@ -77,7 +89,8 @@ def _drain_bounded(pipe, limit: int, kept: bytearray, seen: list, overflow: thre
 
 def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
     out, err = bytearray(), bytearray()
-    out_seen, err_seen = [0], [0]
+    budget = ([0], threading.Lock())
+    out_seen, err_seen = _SharedSeen(budget), _SharedSeen(budget)
     overflow = threading.Event()
     threads = [
         threading.Thread(target=_drain_bounded, args=(stdout_pipe, limit, out, out_seen, overflow), daemon=True),
@@ -89,7 +102,7 @@ def _start_bounded_drains(stdout_pipe, stderr_pipe, limit: int):
 
 
 def _bounded_result(code: int, out, err, out_seen, err_seen, limit: int, timed_out: bool, text: bool) -> BoundedOutput:
-    if out_seen[0] > limit or err_seen[0] > limit:
+    if out_seen[0] + err_seen[0] > limit:
         return BoundedOutput(code, "" if text else b"", "" if text else b"", True, timed_out)
     if not text:
         return BoundedOutput(code, bytes(out), bytes(err), False, timed_out)
@@ -2090,7 +2103,25 @@ def _run_in_directory(args, run_dir: Path, run_dir_fd: int) -> int:
         private.publish(raw_event_log, b"")
         private.publish(raw_artifact_path, b"")
         source_config = Path.home() / ".pi" / "agent"
-        selected_provider = args.provider or (args.model.split("/", 1)[0] if "/" in args.model else None)
+        if not args.model or any(character.isspace() for character in args.model):
+            startup_failure("model_route_invalid")
+        if args.provider and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.provider):
+            startup_failure("provider_route_invalid")
+        model_provider, separator, model_name = args.model.partition("/")
+        if separator and (
+            not model_provider
+            or not model_name
+            or "/" in model_name
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_provider)
+        ):
+            startup_failure("provider_model_route_invalid")
+        if not separator:
+            model_provider = None
+        if args.provider and model_provider and args.provider != model_provider:
+            startup_failure("provider_model_route_mismatch")
+        selected_provider = args.provider or model_provider
+        if selected_provider is None:
+            startup_failure("selected_provider_required")
         trusted_provider_extension = trusted_cursor_extension() if selected_provider == "cursor" else None
         try:
             auth_values = copy_private_pi_config(

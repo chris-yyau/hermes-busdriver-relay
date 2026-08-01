@@ -10,6 +10,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -912,6 +913,102 @@ def test_auth_credential_values_excludes_metadata_but_keeps_short_nested_secrets
 
     assert {"a1b2", "k3y4"} <= set(values)
     assert {"oauth", "auto"}.isdisjoint(values)
+
+
+@pytest.mark.parametrize(("route", "expected_error"), [
+    (["--model", "auto"], "selected_provider_required"),
+    (["--model", "/auto"], "provider_model_route_invalid"),
+    (["--model", "cursor/"], "provider_model_route_invalid"),
+    (["--model", "cursor//auto"], "provider_model_route_invalid"),
+    (["--provider", "cursor", "--model", ""], "model_route_invalid"),
+    (["--provider", "cursor", "--model", " auto"], "model_route_invalid"),
+    (["--provider", "/", "--model", "auto"], "provider_route_invalid"),
+    (["--provider", "openai", "--model", "xai/grok"], "provider_model_route_mismatch"),
+])
+def test_ambiguous_route_is_rejected_before_unscoped_auth_reaches_worker(
+    monkeypatch, tmp_path: Path, route: list[str], expected_error: str,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("draft\n")
+    home = tmp_path / "home"
+    config = home / ".pi" / "agent"
+    config.mkdir(parents=True)
+    (config / "auth.json").write_text(json.dumps({
+        "cursor": {"type": "api_key", "key": "curs"},
+        "other": {"type": "api_key", "key": "othr"},
+    }))
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    globals_ = ns["_run_in_directory"].__globals__
+
+    class RouteError(RuntimeError):
+        pass
+
+    class Private:
+        path = tmp_path / "private"
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def register(self, *_args): pass
+        def ensure_directory(self, *_args): pass
+        def publish(self, *_args): pass
+
+    def refuse(token, **_kwargs):
+        raise RouteError(token)
+
+    for name, value in {
+        "trusted_pi_executable": lambda _value: Path(sys.executable),
+        "trusted_node_executable": lambda: Path(sys.executable),
+        "trusted_git_executable": lambda: Path("/usr/bin/git"),
+        "trusted_pi_tools": lambda: tmp_path / "tools.ts",
+        "git_root": lambda *_args: repo,
+        "build_prompt": lambda *_args: "prompt",
+        "publish_file": lambda *_args, **_kwargs: None,
+        "PrivatePiHome": Private,
+        "copy_private_pi_config": lambda *_args, **_kwargs: pytest.fail("credentials staged before route rejection"),
+        "startup_failure": refuse,
+    }.items():
+        monkeypatch.setitem(globals_, name, value)
+    direct_run = tmp_path / "direct-run"
+    direct_run.mkdir()
+    direct_fd = os.open(direct_run, os.O_RDONLY)
+    try:
+        with pytest.raises(RouteError, match=expected_error):
+            ns["_run_in_directory"](SimpleNamespace(
+                pi_bin="pi", repo=str(repo), prompt_file=str(prompt),
+                scope_include=None, scope_exclude=None,
+                provider=route[1] if route[0] == "--provider" else "",
+                model=route[-1], timeout=1, pretty=False,
+            ), direct_run, direct_fd)
+    finally:
+        os.close(direct_fd)
+
+    cp = sh([
+        sys.executable, str(PI_WRAPPER),
+        "--repo", str(repo), "--prompt-file", str(prompt), "--run-dir", str(tmp_path / "run"),
+        "--pi-bin", str(fake_pi(tmp_path)), *route,
+    ], check=False, env=env)
+
+    assert cp.returncode == 2
+    assert json.loads(cp.stdout)["error"] == expected_error
+    assert not (repo / "src" / "pi_smoke.txt").exists()
+
+
+def test_pi_worker_output_limit_is_shared_across_stdout_and_stderr():
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    result = ns["run"]([
+        sys.executable, "-I", "-c",
+        "import sys; sys.stdout.write('o' * 600); sys.stderr.write('e' * 600)",
+    ], timeout=30, limit=1024)
+
+    assert result.returncode == 125
+    assert result.stdout == ""
+    assert result.stderr == "worker_output_too_large"
 
 
 def test_pi_wrapper_rejects_group_writable_run_directory(monkeypatch, capsys, tmp_path: Path):
