@@ -1157,7 +1157,17 @@ def test_cursor_candidate_rejects_abbreviated_route_flags(arg: str, tmp_path: Pa
     assert "unrecognized arguments" in cp.stderr
 
 
-def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(tmp_path: Path):
+@pytest.mark.parametrize("explicit_route", [
+    [],
+    ["--provider", "cursor"],
+    ["--provider=cursor"],
+    ["--model", "auto"],
+    ["--model=auto"],
+    ["--provider", "cursor", "--model=auto"],
+])
+def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(
+    tmp_path: Path, explicit_route: list[str],
+):
     candidate = tmp_path / "tests" / "fixtures" / "pi" / "run-pi-cursor-candidate"
     candidate.parent.mkdir(parents=True)
     candidate.write_bytes(CURSOR_CANDIDATE.read_bytes())
@@ -1171,12 +1181,14 @@ def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(tmp_p
     )
 
     cp = sh([
-        sys.executable, str(candidate), "--repo", "repo", "--prompt-file", "prompt",
-        "--run-dir", "run",
+        sys.executable, str(candidate),
+        *explicit_route,
+        "--repo", "repo", "--prompt-file", "prompt", "--run-dir", "run",
     ], env={**os.environ, "PI_BD_PROVIDER": "xai", "PI_BD_MODEL": "xai/grok", "PI_BIN": "/tmp/other.js"})
     data = json.loads(cp.stdout)
 
-    assert data["argv"][-4:] == ["--provider", "cursor", "--model", "auto"]
+    assert data["argv"].count("--provider") + sum(arg.startswith("--provider=") for arg in data["argv"]) == 1
+    assert data["argv"].count("--model") + sum(arg.startswith("--model=") for arg in data["argv"]) == 1
     assert data["provider_env"] is None
     assert data["model_env"] is None
     assert data["pi_bin_env"] is None
