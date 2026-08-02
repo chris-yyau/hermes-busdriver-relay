@@ -955,7 +955,8 @@ def test_completed_write_with_failed_audit_is_truthful_and_reconciliation_blocks
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     event_log = run_dir / "events.jsonl"
     prefix, suffix = b'{"kind":"noise","padding":"', b'"}\n'
-    event_log.write_bytes(prefix + b"x" * (256 * 1024 - 400 - len(prefix) - len(suffix)) + suffix)
+    max_file_bytes = runpy.run_path(str(ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"))["MAX_FILE_BYTES"]
+    event_log.write_bytes(prefix + b"x" * (max_file_bytes - 400 - len(prefix) - len(suffix)) + suffix)
 
     source = PI_TOOLS.read_text()
     source = source.replace(

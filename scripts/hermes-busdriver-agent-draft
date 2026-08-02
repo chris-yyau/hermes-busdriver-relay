@@ -992,6 +992,8 @@ def write_private_runtime_file(
     # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
     # write-only one cannot be read (EBADF). Reopening the name to read it instead would resolve
     # the name a second time, which is the very thing the descriptor is here to avoid.
+    if dir_fd is not None and os.path.isabs(path):
+        raise OSError("private_runtime_absolute_path_with_dir_fd")
     fd = os.open(
         path,
         os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),

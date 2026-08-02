@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import cache
 
 # The adapter's MAX_BD_FILE_BYTES. Restated, not imported: this process is the enforcement point,
 # so a caller that forgets its own bound still cannot exceed this one.
@@ -442,7 +443,8 @@ def fd_identity(st: os.stat_result) -> tuple:
 DENIED_IDENTITIES_ENV = "BD_BROKER_DENIED_IDENTITIES"
 
 
-def denied_identities() -> set[tuple[int, int]]:
+@cache
+def denied_identities() -> frozenset[tuple[int, int]]:
     identities: set[tuple[int, int]] = set()
     for value in os.environ.get(DENIED_IDENTITIES_ENV, "").split(","):
         if not value:
@@ -451,7 +453,7 @@ def denied_identities() -> set[tuple[int, int]]:
             raise fail("denied_identity_config_invalid")
         device, inode = value.split(":", 1)
         identities.add((int(device), int(inode)))
-    return identities
+    return frozenset(identities)
 
 
 def check_regular(st: os.stat_result) -> None:
@@ -1427,6 +1429,7 @@ def main() -> int:
         response = {"ok": False, "error": "request_too_large"}
     else:
         try:
+            denied_identities()
             response = handle(raw)
         except BrokerError as exc:
             response = {"ok": False, "error": str(exc)}

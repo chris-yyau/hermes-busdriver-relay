@@ -191,6 +191,19 @@ def test_the_agent_draft_blocks_without_a_wrapper_execution_edge():
     assert manifest["adapter_runtime"]["scripts/pi/run-pi-busdriver-draft"] == sha(PI_WRAPPER.read_bytes())
 
 
+def test_private_runtime_write_rejects_absolute_path_with_dir_fd(tmp_path: Path):
+    ns = runpy.run_path(str(AGENT_DRAFT))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError, match="private_runtime_absolute_path_with_dir_fd"):
+            ns["write_private_runtime_file"](runtime / "tool", b"x", dir_fd=fd)
+    finally:
+        os.close(fd)
+    assert not (runtime / "tool").exists()
+
+
 def test_no_pinned_runtime_pins_itself():
     """A file whose own bytes contain its own digest cannot exist: writing the pin changes the
     digest the pin must equal. The graph has to stay a DAG."""
