@@ -452,6 +452,7 @@ def test_busdriver_tools_expose_hardened_pi_tool_boundary():
         "before_hash",
         "after_hash",
         "write_intent",
+        "write_audit_unreconciled",
         "operation_id",
         "marker_write_allowed",
         "finalization_allowed",
@@ -942,6 +943,108 @@ def test_production_pi_wrapper_reconciles_claims_audits_and_final_hash(monkeypat
     assert "reconcile_write_audits(" in PRODUCTION_PI_WRAPPER.read_text()
 
 
+def test_completed_write_with_failed_audit_is_truthful_and_reconciliation_blocks(tmp_path: Path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node unavailable")
+    assert node is not None
+    repo = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    (repo / "src").mkdir(parents=True)
+    run_dir.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    event_log = run_dir / "events.jsonl"
+    prefix, suffix = b'{"kind":"noise","padding":"', b'"}\n'
+    event_log.write_bytes(prefix + b"x" * (256 * 1024 - 400 - len(prefix) - len(suffix)) + suffix)
+
+    source = PI_TOOLS.read_text()
+    source = source.replace(
+        'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
+        "type ExtensionAPI = any;",
+    ).replace(
+        'import { Type } from "typebox";',
+        "const Type: any = new Proxy({}, { get: () => (..._args: any[]) => ({}) });",
+    ).replace("export default function(pi: ExtensionAPI) {", "function register(pi: ExtensionAPI) {", 1)
+    source += """
+const registered: Record<string, any> = {};
+register({ on() {}, registerTool(tool: any) { registered[tool.name] = tool; } } as any);
+const result = await registered.bd_write_draft.execute(
+  "call-1", { path: "src/app.txt", content: "changed\\n", operation_id: "op-audit-fail" }
+);
+console.log(JSON.stringify(result));
+"""
+    harness = tmp_path / "tools-regression.ts"
+    harness.write_text(source)
+    env = {
+        **os.environ,
+        "BD_REPO_ROOT": str(repo),
+        "BD_BROKER_PYTHON": "/usr/bin/python3",
+        "BD_BROKER_SCRIPT": str(ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"),
+        "BD_BROKER_ROOT_REPO": str(repo),
+        "BD_BROKER_ROOT_RUN": str(run_dir),
+        "PI_BD_EVENT_LOG": str(event_log),
+        "PI_BD_MODE": "draft",
+        "PI_BD_ALLOWED_WRITES": '["src/**"]',
+        "PI_BD_DENIED_WRITES": "[]",
+    }
+    cp = subprocess.run(
+        [node, "--experimental-transform-types", str(harness)],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 0, cp.stderr
+    result = json.loads(cp.stdout)
+    envelope = json.loads(result["content"][0]["text"])
+    details = result["details"]
+    expected_hash = hashlib.sha256(b"changed\n").hexdigest()
+    assert (repo / "src/app.txt").read_bytes() == b"changed\n"
+    assert envelope["ok"] is False
+    assert envelope["effect_completed"] is True
+    assert envelope["reconciliation_required"] is True
+    assert "denied" not in envelope
+    assert envelope["path"] == "src/app.txt"
+    assert envelope["operation_id"] == "op-audit-fail"
+    assert envelope["after_hash"] == expected_hash
+    assert "before_hash" in envelope
+    assert envelope["bytes"] == len(b"changed\n")
+    assert details["effect_completed"] is True
+    assert details["reconciliation_required"] is True
+    assert details["after_hash"] == expected_hash
+    assert "denied" not in details
+    records = [json.loads(line) for line in event_log.read_text().splitlines()]
+    assert any(record.get("kind") == "write_intent" for record in records)
+    assert not any(record.get("kind") == "write_audit" for record in records)
+    wrapper = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+    assert wrapper["reconcile_write_audits"](
+        event_log.read_text(),
+        {"files_changed": ["src/app.txt"]},
+        repo,
+        Path("python"),
+        Path("broker"),
+        "",
+    ) == ["write_audit_incomplete"]
+
+
+def test_broker_file_hash_accepts_a_legal_file_larger_than_helper_tail_budget(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    target = repo / "src" / "large.txt"
+    target.write_text("x" * (128 * 1024))
+    ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
+
+    assert ns["broker_file_hash"](
+        repo,
+        "src/large.txt",
+        Path(sys.executable),
+        ROOT / "adapters" / "pi" / "busdriver-fs-broker.py",
+        "",
+    ) == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
 def test_production_pi_wrapper_authenticates_schema_before_worker(monkeypatch, tmp_path: Path):
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
     schema_path = tmp_path / "pi-result.schema.json"
@@ -988,11 +1091,11 @@ def test_production_pi_wrapper_rejects_untrusted_schema_before_worker(monkeypatc
 
 @pytest.mark.parametrize(
     ("route_argv", "expected"),
-    (
+    [
         pytest.param([], "agent_containment_and_credential_broker_unavailable", id="canonical-defaults"),
         pytest.param(["--pi-bin", "FAKE_PI"], "cursor_production_route_locked", id="noncanonical-runtime"),
         pytest.param(["--provider", "openai"], "cursor_production_route_locked", id="noncanonical-provider"),
-    ),
+    ],
 )
 def test_production_pi_wrapper_blocks_before_launch_or_auth_copy(
     monkeypatch, tmp_path: Path, route_argv: list[str], expected: str
@@ -1073,7 +1176,9 @@ def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(tmp_p
     data = json.loads(cp.stdout)
 
     assert data["argv"][-4:] == ["--provider", "cursor", "--model", "auto"]
-    assert data["provider_env"] is None and data["model_env"] is None and data["pi_bin_env"] is None
+    assert data["provider_env"] is None
+    assert data["model_env"] is None
+    assert data["pi_bin_env"] is None
 
 
 def test_cursor_candidate_is_excluded_from_production_surfaces():
@@ -1124,6 +1229,8 @@ def test_ambiguous_route_is_rejected_before_unscoped_auth_reaches_worker(
     }))
     env = os.environ.copy()
     env["HOME"] = str(home)
+    if route == ["--model", "auto"]:
+        env["PI_BD_PROVIDER"] = ""
 
     ns = runpy.run_path(str(PRODUCTION_PI_WRAPPER))
     globals_ = ns["_run_in_directory"].__globals__
@@ -1529,13 +1636,12 @@ def test_pi_route_selector_defaults_are_the_candidate_cursor_auto_tuple():
     assert 'ap.add_argument("--pi-bin", action=_StoreOnce, default="pi")' in wrapper_text
 
 
-def test_agent_draft_pi_forwards_scope_exclude_to_wrapper():
+def test_production_agent_draft_blocks_before_pi_wrapper_dispatch():
     agent_text = PRODUCTION_AGENT_DRAFT.read_text()
     wrapper_text = PRODUCTION_PI_WRAPPER.read_text()
 
-    assert 'cmd += ["--scope-exclude", p]' in agent_text
-    assert '"--timeout",' in agent_text
-    assert "pi_timeout = max(1, args.timeout - 30)" in agent_text
+    assert "PI_PRODUCTION_BLOCKER" in agent_text
+    assert "run-pi-busdriver-draft" not in agent_text
     assert 'ap.add_argument("--scope-exclude", action="append")' in wrapper_text
     assert "PI_BD_DENIED_WRITES" in wrapper_text
     assert "file_outside_scope" in wrapper_text

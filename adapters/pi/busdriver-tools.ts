@@ -406,7 +406,25 @@ export default function(pi: ExtensionAPI) {
         const written = broker({ op: "write", root: "repo", rel, content: params.content });
         const { before_hash, after_hash } = written;
         const audit = { toolName: "bd_write_draft", path: rel, operation_id, before_hash, after_hash, bytes: contentBytes };
-        log("write_audit", audit);
+        try {
+          log("write_audit", audit);
+        } catch {
+          return {
+            content: asText(baseEnvelope("bd_write_draft", {
+              ok: false,
+              read_only: false,
+              reason: "write_audit_unreconciled",
+              effect_completed: true,
+              reconciliation_required: true,
+              operation_id,
+              path: rel,
+              before_hash,
+              after_hash,
+              bytes: contentBytes,
+            })),
+            details: { effect_completed: true, reconciliation_required: true, ...audit },
+          };
+        }
         return {
           content: asText(baseEnvelope("bd_write_draft", {
             ok: true,

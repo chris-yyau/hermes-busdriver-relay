@@ -115,11 +115,9 @@ def test_agent_trusted_git_is_the_root_owned_source_executed_in_place():
     assert st.st_uid == 0, "a same-UID adversary must not own the bytes that execute"
     assert not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
     assert not stat.S_ISLNK(st.st_mode), "the name that execs must not be a symlink"
-    # Read back through __globals__, never through `ns`: runpy.run_path returns a *copy* of the
-    # module namespace, so a rebind by the call above is invisible in `ns` and this assertion would
-    # hold no matter what the resolver did.
-    assert globals_["_TRUSTED_EXECUTABLE_RUNTIME"] is None, "a private runtime dir was created"
-    assert globals_["_TRUSTED_EXECUTABLE_PATHS"] == {}, "a private copy was retained"
+    assert "trusted_agent_executable" not in globals_
+    assert "_TRUSTED_EXECUTABLE_RUNTIME" not in globals_
+    assert "_TRUSTED_EXECUTABLE_PATHS" not in globals_
 
 
 def test_agent_draft_has_no_caller_selected_git_source():
@@ -153,150 +151,33 @@ def test_agent_missing_gh_fails_closed_by_name():
     assert "trusted_root_owned_gh_unavailable" in str(excinfo.value)
 
 
-def test_agent_command_forwards_canonical_pi_selector_literal(tmp_path: Path):
-    """Candidate lane passes the literal `pi`, not the parent's private retained copy.
-
-    The child wrapper independently validates and privately retains the pinned Pi package
-    tree, so the parent forwards the name. Production never reaches this builder — see
-    test_production_agent_draft_blocks_the_canonical_cursor_auto_tuple.
-    """
+def test_agent_command_pi_blocks_before_candidate_runtime(tmp_path: Path):
     ns = runpy.run_path(str(PRODUCTION_DRAFT))
     args = argparse.Namespace(
         agent="pi",
         timeout=180,
         repo=str(tmp_path),
-        pi_bin="pi",
-        pi_model="auto",
-        pi_provider="cursor",
-        scope_include=[],
+        pi_bin="/tmp/attacker-selected-pi",
+        pi_model="attacker-model",
+        pi_provider="attacker-provider",
+        scope_include=["attacker-scope"],
         scope_exclude=[],
     )
-
-    cmd = ns["agent_command"](args, tmp_path / "prompt.md", tmp_path / "run")
-
-    pi_bin_index = cmd.index("--pi-bin")
-    assert cmd[pi_bin_index + 1] == "pi"
-    assert not Path(cmd[pi_bin_index + 1]).is_absolute()
-
-
-def test_materialized_pi_wrapper_uses_repo_relative_layout(tmp_path: Path):
-    """The retained child runtime must mirror the child's ROOT = parents[2] layout."""
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
     run_dir = tmp_path / "run"
 
-    private = ns["materialize_trusted_wrapper"](
-        run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper"
-    )
-    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
+    cmd = ns["agent_command"](args, tmp_path / "prompt.md", run_dir)
+    result = ns["run_worker"](cmd, cwd=tmp_path, env=os.environ.copy(), timeout=5)
 
-    assert private == runtime_root / "scripts" / "pi" / "run-pi-busdriver-draft"
-    wrapper_bytes = PI_WRAPPER.read_bytes()
-    assert_retained_runtime_file(private, wrapper_bytes, 0o500)
-    for relative, mode, _dep_kind in ns["PI_WRAPPER_DEPENDENCIES"]:
-        retained = runtime_root / relative
-        expected = (ROOT / relative).read_bytes()
-        assert_retained_runtime_file(retained, expected, mode)
-        assert_private_runtime_directory(retained.parent)
-    for relative in ("scripts", "scripts/pi", "adapters", "adapters/pi"):
-        assert_private_runtime_directory(runtime_root / relative)
-
-
-def test_wrapper_runtime_parent_symlink_does_not_chmod_target(tmp_path: Path):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    run_dir = tmp_path / "run"
-    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
-    outside = tmp_path / "outside"
-    run_dir.mkdir(mode=0o700)
-    runtime_root.mkdir(mode=0o700)
-    outside.mkdir(mode=0o755)
-    outside.chmod(0o755)
-    (runtime_root / "scripts").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(SystemExit):
-        ns["_ensure_private_runtime_parent"](runtime_root, ns["PI_WRAPPER_RELATIVE"])
-
-    assert stat.S_IMODE(outside.lstat().st_mode) == 0o755
-
-
-def test_wrapper_runtime_root_swap_does_not_chmod_or_write_target(tmp_path: Path, monkeypatch):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    run_dir = tmp_path / "run"
-    runtime_root = run_dir / "trusted-pi-wrapper-runtime"
-    displaced = tmp_path / "displaced-runtime"
-    outside = tmp_path / "outside"
-    outside.mkdir(mode=0o755)
-    outside.chmod(0o755)
-    real_mkdir = Path.mkdir
-
-    def swap_runtime_root(path, *args, **kwargs):
-        result = real_mkdir(path, *args, **kwargs)
-        if path == runtime_root:
-            path.rename(displaced)
-            path.symlink_to(outside, target_is_directory=True)
-        return result
-
-    monkeypatch.setattr(Path, "mkdir", swap_runtime_root)
-
-    with pytest.raises(SystemExit):
-        ns["materialize_trusted_wrapper"](
-            run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper"
-        )
-
-    assert stat.S_IMODE(outside.lstat().st_mode) == 0o755
-    assert not (outside / "scripts").exists()
-
-
-def test_wrapper_dependency_root_swap_after_traversal_stays_on_parent_fd(tmp_path: Path, monkeypatch):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    runtime_root = tmp_path / "runtime"
-    displaced = tmp_path / "displaced-runtime"
-    outside = tmp_path / "outside"
-    runtime_root.mkdir(mode=0o700)
-    outside.mkdir(mode=0o700)
-    (outside / "adapters/pi").mkdir(parents=True, mode=0o700)
-    relative = "adapters/pi/dependency"
-    real_write = ns["write_private_runtime_file"]
-    swapped = False
-
-    def swap_before_write(path, data, mode=0o500, *, dir_fd=None):
-        nonlocal swapped
-        if not swapped:
-            runtime_root.rename(displaced)
-            runtime_root.symlink_to(outside, target_is_directory=True)
-            swapped = True
-        if dir_fd is None:
-            return real_write(path, data, mode=mode)
-        return real_write(path, data, mode=mode, dir_fd=dir_fd)
-
-    monkeypatch.setitem(
-        ns["_retain_wrapper_dependency"].__globals__, "write_private_runtime_file", swap_before_write
-    )
-
-    ns["_retain_wrapper_dependency"](runtime_root, relative, b"reviewed\n", 0o600, "test")
-
-    assert not (outside / relative).exists()
-    assert (displaced / relative).read_bytes() == b"reviewed\n"
-
-
-def test_materialized_pi_wrapper_refuses_missing_dependency(tmp_path: Path, monkeypatch):
-    ns = runpy.run_path(str(PRODUCTION_DRAFT))
-    run_dir = tmp_path / "run"
-    missing = ROOT / "adapters/pi/busdriver-tools.ts"
-    real_read = ns["read_artifact_file"]
-
-    def read_without_tools(path):
-        if path == missing:
-            return None
-        return real_read(path)
-
-    monkeypatch.setitem(ns["materialize_trusted_wrapper"].__globals__, "read_artifact_file", read_without_tools)
-
-    with pytest.raises(SystemExit) as excinfo:
-        ns["materialize_trusted_wrapper"](run_dir, PI_WRAPPER, ns["TRUSTED_PI_WRAPPER_SHA256"], "pi-wrapper")
-
-    payload = json.loads(str(excinfo.value.code))
-    assert payload["error"] == "trusted_wrapper_dependency_unavailable:pi-tools"
-    assert payload["detail"] == "FileNotFoundError"
+    assert cmd == [
+        str(ns["trusted_executable_path"]("python3")),
+        "-I",
+        "-c",
+        ns["PI_BLOCKED_BOOTSTRAP"],
+    ]
+    assert result.returncode == 2
+    assert result.stderr.strip() == ns["PI_PRODUCTION_BLOCKER"]
+    assert not run_dir.exists()
+    assert "attacker" not in " ".join(cmd)
 
 
 def test_gate_preflight_accepts_helper_stdout_above_default_capture_limit(monkeypatch, tmp_path: Path):
@@ -788,6 +669,43 @@ def test_agent_cmd_without_agent_uses_test_harness_pi_and_requires_artifact(tmp_
     assert data["pi_artifact"]["authority"]["finalization_allowed"] is False
     assert (repo / "src" / "app.txt").read_text() == "implicit-custom\n"
 
+
+@pytest.mark.parametrize(
+    ("agent_command", "expected_kind"),
+    [
+        ("rm src/app.txt", "missing"),
+        ("rm src/app.txt && mkdir src/app.txt", "directory"),
+    ],
+)
+def test_custom_agent_non_regular_change_fails_closed_without_fixture_traceback(
+    tmp_path: Path, agent_command: str, expected_kind: str
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    plugin = fake_busdriver(tmp_path)
+
+    cp, data = run_draft(
+        "--plugin-root", str(plugin),
+        "--repo", str(repo),
+        "--state-dir", str(tmp_path / "state"),
+        "--agent", "custom",
+        "--agent-cmd", agent_command,
+        "--prompt", "delete src/app.txt",
+        "--scope-include", "src/**",
+        check=False,
+    )
+
+    assert cp.returncode != 0
+    assert data["status"] == "blocked"
+    assert "test_agent_changed_non_regular_path" in data["pi_artifact"]["blockers"]
+    assert "Traceback" not in cp.stderr
+    assert "Traceback" not in json.dumps(data)
+    events = [json.loads(line) for line in Path(data["pi_artifact"]["event_log"][0]).read_text().splitlines()]
+    assert any(event["kind"] == "write_intent" for event in events)
+    assert not any(event["kind"] == "write_audit" for event in events)
+    changed = repo / "src" / "app.txt"
+    assert changed.is_dir() if expected_kind == "directory" else not changed.exists()
 
 
 def test_agent_draft_blocks_git_commit_via_path_guard(tmp_path: Path):

@@ -109,6 +109,6 @@ Until then, Pi remains non-programmatic regardless of adapter quality. OpenCode 
 
 ### Candidate-lane state (2026-08-02)
 
-The locked `cursor/auto` candidate lane delivers requirement 2 to a reviewed standard — enumerated child environment, private `HOME`, single-provider auth projection with the refresh token stripped, refusal of refreshable credentials, and descriptor-bound scrub-on-exit — plus pinned adapter/runtime digests and private-runtime retention of the child wrapper and its dependencies.
+The locked `cursor/auto` candidate lane delivers requirement 2 to a reviewed standard — enumerated child environment, private `HOME`, single-provider auth projection with the refresh token stripped, refusal of refreshable credentials, and descriptor-bound scrub-on-exit — plus pinned adapter/runtime digests. Its source-separated harness executes the repository wrapper fixture directly; the wrapper authenticates and privately retains its runtime dependencies.
 
 Requirements 1 and 4 are not delivered. The worker launch has no `sandbox-exec`, `setrlimit`, or network restriction, and the write reconciliation reads evidence from inside the worker's own writable `$HOME`. `agent_containment_and_credential_broker_unavailable` is a conjunction and is not cleared by satisfying one conjunct, so the 2026-08-02 promotion attempt for this lane was adjudicated `PROMOTION_BLOCKED_FAIL_CLOSED` and the hardening is retained as candidate/test-lane groundwork only. A successful functional dogfood exercises the cooperative path and is not containment proof.

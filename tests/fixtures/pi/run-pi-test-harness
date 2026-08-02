@@ -3,15 +3,13 @@
 
 This file is not installed or referenced by production entrypoints.
 """
-from pathlib import Path
 import os
 import runpy
 import sys
+from pathlib import Path
 
-# agent-draft now authenticates and privately RETAINS the wrapper it launches, so the copy that
-# runs sits in a private run dir with no repo above it — `parents[3]` finds the state dir. The
-# agent-draft harness passes the root it loaded this fixture from. Tests that invoke this file
-# in place still resolve it relatively, so the fallback is the normal path, not a fixup.
+# The test-only agent-draft harness supplies this wrapper directly and names its source root in
+# HERMES_TEST_REPO_ROOT. Standalone fixture tests retain the normal relative fallback.
 ROOT = Path(os.environ["HERMES_TEST_REPO_ROOT"]).resolve() if os.environ.get(
     "HERMES_TEST_REPO_ROOT"
 ) else Path(__file__).resolve().parents[3]
@@ -32,7 +30,7 @@ globals_["base_child_environment"] = lambda: {
     if key in {"TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "TERM", "NO_COLOR", "FAKE_PI_TARGET", "FAKE_PI_CONTENT", "HERMES_TEST_AGENT_CMD", "HERMES_TEST_PI_BIN", "HERMES_AGENT_DRAFT_GUARD_BIN", "BUSDRIVER_PLUGIN_ROOT", "BUSDRIVER_STATE_DIR"}
 }
 if not any(arg == "--provider" or arg.startswith("--provider=") for arg in sys.argv[1:]):
-    sys.argv += ["--provider", os.environ.get("PI_BD_PROVIDER", "")]
+    sys.argv += ["--provider", os.environ.get("PI_BD_PROVIDER", "cursor")]
 if not any(arg == "--model" or arg.startswith("--model=") for arg in sys.argv[1:]):
     sys.argv += ["--model", os.environ.get("PI_BD_MODEL", "cursor/auto")]
 raise SystemExit(ns["main"]())

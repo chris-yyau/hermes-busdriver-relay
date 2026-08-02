@@ -20,11 +20,9 @@ import re
 import select
 import shlex
 import secrets
-import signal
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -39,7 +37,6 @@ TRUSTED_EXECUTABLE_DIGESTS = {
     # inode). A supply-chain pin, not an identity check — the path is the identity.
     "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
-    "pi": "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca",
     "bash": "7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea",
     "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
@@ -51,29 +48,11 @@ TRUSTED_EXECUTABLE_SOURCES = {
     "bash": Path("/bin/bash"),
     "python3": Path("/usr/bin/python3"),
 }
-# Pi is not in TRUSTED_EXECUTABLE_SOURCES: it lives under $HOME, whose ancestry
-# this UID can write, so it cannot satisfy the root-owned contract. Production
-# never reaches trusted_agent_executable() while the containment blocker is set.
-TRUSTED_PI = Path("/Users/vfrvndtt/.local/bin/pi").resolve()
-_TRUSTED_EXECUTABLE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
-_TRUSTED_EXECUTABLE_PATHS: dict[str, Path] = {}
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
-# The Pi child wrapper is pinned and privately retained like every other
-# executed byte; OpenCode has no production executor or wrapper edge.
-#
-# No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
-PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = '56e90a917a528b971be382d8a05a53b87ddf3f768c274726444eee6f8343b0ea'
-# The child wrapper resolves ROOT as parents[2] from scripts/pi/run-pi-busdriver-draft,
-# so the retained runtime must mirror those repo-relative paths — not a flat copy of the
-# wrapper alone. Dependency bytes are copied once through read_artifact_file(); the child
-# independently pins and privately retains each one before use.
-PI_WRAPPER_RELATIVE = PI_WRAPPER.relative_to(ROOT)
-PI_WRAPPER_DEPENDENCIES: tuple[tuple[str, int, str], ...] = (
-    ("adapters/pi/busdriver-tools.ts", 0o400, "pi-tools"),
-    ("adapters/pi/busdriver-fs-broker.py", 0o500, "fs-broker"),
-    ("adapters/pi/pi-result.schema.json", 0o400, "pi-result-schema"),
+PI_PRODUCTION_BLOCKER = "agent_containment_and_credential_broker_unavailable"
+PI_BLOCKED_BOOTSTRAP = (
+    f"import sys; sys.stderr.write({(PI_PRODUCTION_BLOCKER + chr(10))!r}); raise SystemExit(2)"
 )
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
@@ -635,13 +614,8 @@ def trusted_executable_path(name: str) -> Path:
     """The only production entry point for the SYSTEM tools. Takes a name; the path is not
     negotiable.
 
-    git and gh part company from pi here, and the split is not stylistic. git and gh
-    have fixed root-owned sources, so they are validated and executed in place. Pi exists only under
-    $HOME — user-writable ancestry, which this contract refuses and no walk can fix, because there is
-    no root-owned Pi to point at. That is not a gap this function should
-    paper over: it is the same fact that makes agent dispatch `policy_blocked` by
-    `agent_containment_and_credential_broker_unavailable` in the first place. Pi keeps the private
-    -copy resolver, in trusted_agent_executable(), which production never reaches.
+    Only fixed root-owned sources belong here. Pi exists under user-writable ancestry and production
+    blocks before resolving, authenticating, or launching it.
 
     Revalidated on every call rather than cached: the contract is "validated immediately before
     dispatch", and a cache is a promise about the past.
@@ -650,66 +624,6 @@ def trusted_executable_path(name: str) -> Path:
     if source is None:
         raise _trusted_source_refusal(name, "unsupported")
     return _validated_root_owned_source(source, name)
-
-
-def trusted_agent_executable(name: str) -> Path:
-    """The Pi resolver. Unreachable in production — see trusted_executable_path().
-
-    Kept as-is deliberately. A private authenticated copy is the strongest thing available for a
-    binary whose only source is user-writable, and it is NOT strong enough: macOS has no fexecve,
-    so the kernel re-resolves the copy's pathname at exec time and a same-UID adversary can rename
-    it first. That is precisely why this lane is policy_blocked rather than shipped.
-    """
-    global _TRUSTED_EXECUTABLE_RUNTIME
-    trusted = {
-        "pi": TRUSTED_PI,
-    }
-    source = trusted.get(name)
-    if source is None:
-        raise ValueError(f"unsupported trusted executable:{name}")
-    cached = _TRUSTED_EXECUTABLE_PATHS.get(name)
-    if cached is not None:
-        try:
-            parent_st = cached.parent.lstat()
-            st = cached.lstat()
-            data = cached.read_bytes()
-        except OSError as exc:
-            raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-        if (
-            cached.is_symlink()
-            or cached.parent.is_symlink()
-            or not stat.S_ISDIR(parent_st.st_mode)
-            or parent_st.st_uid != os.getuid()
-            or stat.S_IMODE(parent_st.st_mode) != 0o700
-            or not stat.S_ISREG(st.st_mode)
-            or st.st_uid != os.getuid()
-            or st.st_nlink != 1
-            or stat.S_IMODE(st.st_mode) != 0o500
-            or hashlib.sha256(data).hexdigest() != TRUSTED_EXECUTABLE_DIGESTS[name]
-        ):
-            raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_integrity_failed:{name}"}))
-        return cached
-    try:
-        data = source.read_bytes()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-    if hashlib.sha256(data).hexdigest() != TRUSTED_EXECUTABLE_DIGESTS[name]:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_executable_integrity_failed:{name}"}))
-    if _TRUSTED_EXECUTABLE_RUNTIME is None:
-        _TRUSTED_EXECUTABLE_RUNTIME = tempfile.TemporaryDirectory(prefix="hermes-agent-trusted-bin-")
-        Path(_TRUSTED_EXECUTABLE_RUNTIME.name).chmod(0o700)
-    private = Path(_TRUSTED_EXECUTABLE_RUNTIME.name) / name
-    try:
-        # write_private_runtime_file(), not a bare os.write(): `os.write` is permitted to write
-        # fewer bytes than it was given, and a single call therefore truncates SILENTLY. The
-        # result is a private executable that is a prefix of the reviewed one — which then fails
-        # its own digest check, so the failure mode was a confusing refusal rather than a breach.
-        # It is still the same defect the broker's write_all() fixes, in the same shape.
-        write_private_runtime_file(private, data)
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-    _TRUSTED_EXECUTABLE_PATHS[name] = private
-    return trusted_agent_executable(name)
 
 
 def git_root(repo: Path) -> Path:
@@ -1043,57 +957,25 @@ def release_lock(args: argparse.Namespace, token: str, lock_path: str) -> dict[s
 
 def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) -> list[str]:
     if args.agent == "pi":
-        pi_timeout = max(1, args.timeout - 30) if args.timeout > 30 else max(1, args.timeout - 1)
-        # The historical OpenCode fixture also refuses this. --pi-bin took any
-        # value and forwarded it RAW to the wrapper, so the flag (and its PI_BIN environment
-        # default) named the program this launcher ran — with a private HOME and live provider
-        # credentials mounted. "Production is blocked before it gets here" is not the argument: an
-        # affordance that exists in the production parser is one a later caller can reach, and the
-        # value came from argv, which is the definition of caller-selected. The doubles the
-        # contract tests need are injected by tests/fixtures/pi/agent-draft-test-harness, which is
-        # source-separated, never installed, and overrides trusted_agent_executable() via runpy.
-        if args.pi_bin not in {"pi", str(TRUSTED_PI)}:
-            raise SystemExit(json.dumps({
-                "schema": SCHEMA,
-                "ok": False,
-                "status": "blocked",
-                "agent": "pi",
-                "error": "pi_executable_override_rejected",
-            }))
-        # The candidate-lane selector is the literal name `pi`. The child wrapper independently
-        # validates and privately retains the pinned Pi package tree, so the parent forwards the
-        # name rather than its own single-file retained copy. Production never reaches here.
-        cmd = [
+        # Production has no same-UID-safe containment or credential broker yet. Block in this
+        # root-pinned parent before resolving any candidate wrapper, package, credential, or path.
+        return [
             str(trusted_executable_path("python3")),
             "-I",
-            str(materialize_trusted_wrapper(run_dir, PI_WRAPPER, TRUSTED_PI_WRAPPER_SHA256, "pi-wrapper")),
-            "--repo",
-            args.repo,
-            "--prompt-file",
-            str(prompt_path),
-            "--run-dir",
-            str(run_dir),
-            "--pi-bin",
-            "pi",
-            "--model",
-            args.pi_model,
-            "--timeout",
-            str(pi_timeout),
+            "-c",
+            PI_BLOCKED_BOOTSTRAP,
         ]
-        if args.pi_provider:
-            cmd += ["--provider", args.pi_provider]
-        for p in args.scope_include or []:
-            cmd += ["--scope-include", p]
-        for p in args.scope_exclude or []:
-            cmd += ["--scope-exclude", p]
-        return cmd
     if args.agent == "noop":
         return [str(trusted_executable_path("bash")), "--noprofile", "--norc", "-c", "echo HERMES_AGENT_DRAFT_NOOP"]
     raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"unsupported_agent:{args.agent}"}))
 
 
 def write_private_runtime_file(
-    path: str | Path, data: bytes, mode: int = 0o500, *, dir_fd: int | None = None
+    path: str | Path,
+    data: bytes,
+    mode: int = 0o500,
+    *,
+    dir_fd: int | None = None,
 ) -> None:
     """Write the bytes, then prove the file at `path` still holds exactly them.
 
@@ -1185,142 +1067,6 @@ def materialize_helper_runtime(runtime_root: Path, helper_name: str, helper_byte
     helper = scripts / helper_name
     write_private_runtime_file(helper, helper_bytes)
     return helper
-
-
-def ensure_private_run_dir(run_dir: Path) -> None:
-    """Create and validate the private directory a retained child runtime lands in.
-
-    `allocate_run_dir` builds this 0700 on the production path, but a retained wrapper is only as
-    private as the directory holding it, so the helper checks rather than assumes: an existing
-    entry that is a symlink, not a directory, not ours, or group/other-accessible fails closed.
-    Only `run_dir` itself is created — never its parents, which would put the private root
-    somewhere nobody authorized.
-    """
-    try:
-        run_dir.mkdir(mode=0o700, exist_ok=True)
-        st = run_dir.lstat()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "private_run_dir_unavailable", "detail": type(exc).__name__})) from exc
-    if (
-        run_dir.is_symlink()
-        or not stat.S_ISDIR(st.st_mode)
-        or st.st_uid != os.getuid()
-        or stat.S_IMODE(st.st_mode) & 0o077
-    ):
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "private_run_dir_integrity_failed"}))
-
-
-def _open_private_runtime_directory(path: str | Path, *, dir_fd: int | None = None) -> int:
-    """Open, validate, and normalize one private directory without following its name."""
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=dir_fd)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-            raise RuntimeError("private_runtime_directory_invalid")
-        os.fchmod(fd, 0o700)
-        st = os.fstat(fd)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
-            raise RuntimeError("private_runtime_directory_invalid")
-        return fd
-    except Exception:
-        os.close(fd)
-        raise
-
-
-def _ensure_private_runtime_parent(root: Path, relative: Path) -> int:
-    """Create ``relative``'s 0700 parent chain and return its retained parent descriptor."""
-    dir_fd = -1
-    try:
-        dir_fd = _open_private_runtime_directory(root)
-        for part in relative.parts[:-1]:
-            try:
-                os.mkdir(part, mode=0o700, dir_fd=dir_fd)
-            except FileExistsError:
-                pass
-            next_fd = _open_private_runtime_directory(part, dir_fd=dir_fd)
-            previous_fd = dir_fd
-            dir_fd = next_fd
-            os.close(previous_fd)
-    except (OSError, RuntimeError) as exc:
-        if dir_fd >= 0:
-            os.close(dir_fd)
-        raise SystemExit(json.dumps({
-            "schema": SCHEMA,
-            "ok": False,
-            "error": "private_trusted_wrapper_runtime_directory_integrity_failed",
-        })) from exc
-    return dir_fd
-
-
-def _read_wrapper_dependency(source: Path, dep_kind: str) -> bytes:
-    try:
-        data = read_artifact_file(source)
-    except ArtifactError as exc:
-        detail = {
-            "artifact_path_is_symlink": "symlink",
-            "artifact_not_a_regular_owned_file": "not_regular",
-            "artifact_too_large": "oversized",
-        }.get(str(exc), "unreadable")
-        raise SystemExit(json.dumps({
-            "schema": SCHEMA,
-            "ok": False,
-            "error": f"trusted_wrapper_dependency_metadata_invalid:{dep_kind}",
-            "detail": detail,
-        })) from exc
-    if data is None:
-        raise SystemExit(json.dumps({
-            "schema": SCHEMA,
-            "ok": False,
-            "error": f"trusted_wrapper_dependency_unavailable:{dep_kind}",
-            "detail": "FileNotFoundError",
-        }))
-    return data
-
-
-def _retain_wrapper_dependency(runtime_root: Path, relative: str, data: bytes, mode: int, dep_kind: str) -> None:
-    relative_path = Path(relative)
-    parent_fd = _ensure_private_runtime_parent(runtime_root, relative_path)
-    try:
-        write_private_runtime_file(relative_path.name, data, mode=mode, dir_fd=parent_fd)
-    except OSError as exc:
-        raise SystemExit(json.dumps({
-            "schema": SCHEMA,
-            "ok": False,
-            "error": f"private_trusted_wrapper_dependency_unavailable:{dep_kind}",
-            "detail": type(exc).__name__,
-        })) from exc
-    finally:
-        os.close(parent_fd)
-
-
-def materialize_trusted_wrapper(run_dir: Path, source: Path, expected_digest: str, kind: str) -> Path:
-    """Authenticate a child wrapper's bytes, retain them, and return the path to RUN.
-
-    ``str(PI_WRAPPER)`` on the launch argv was a repo pathname resolved by python at exec time —
-    so the process that holds the entire draft containment was the one executable in the launch
-    nobody had authenticated, while git, gh, pi, opencode, the gate and the lock all were. Pinning
-    the pathname would not have been enough either: digesting a name and then executing that same
-    name is two reads of one mutable file. The retained copy is what runs.
-
-    The child derives ROOT from ``Path(__file__).resolve().parents[2]``, so the retained runtime
-    must land at ``<runtime-root>/scripts/pi/run-pi-busdriver-draft`` with the three ``adapters/pi``
-    dependencies beside it — not a flat ``trusted-pi-wrapper-runtime/run-pi-busdriver-draft``.
-    """
-    data = _read_wrapper_dependency(source, kind)
-    if hashlib.sha256(data).hexdigest() != expected_digest:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_wrapper_integrity_failed:{kind}"}))
-    ensure_private_run_dir(run_dir)
-    runtime_root = run_dir / f"trusted-{kind}-runtime"
-    runtime_root.mkdir(mode=0o700)
-    private = runtime_root / PI_WRAPPER_RELATIVE
-    parent_fd = _ensure_private_runtime_parent(runtime_root, PI_WRAPPER_RELATIVE)
-    try:
-        write_private_runtime_file(PI_WRAPPER_RELATIVE.name, data, dir_fd=parent_fd)
-    finally:
-        os.close(parent_fd)
-    for relative, mode, dep_kind in PI_WRAPPER_DEPENDENCIES:
-        _retain_wrapper_dependency(runtime_root, relative, _read_wrapper_dependency(ROOT / relative, dep_kind), mode, dep_kind)
-    return private
 
 
 def materialize_trusted_gate(run_dir: Path) -> Path:

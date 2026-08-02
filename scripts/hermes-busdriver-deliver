@@ -385,7 +385,7 @@ TRUSTED_PR_GRIND_CHECK_SHA256 = 'e68251118772df8752c38fb958748cd5751a8a822d549b6
 TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
 LOCK_SOURCE = ROOT / "scripts" / "hermes-busdriver-lock"
 TRUSTED_DELIVERY_STATUS_RUNTIME_DIGESTS = {'scripts/hermes-busdriver-agent-balance-plan': 'cb97a034066370a01b388f56c5b253c19c8ae545269986f63037d4a461e2109b',
- 'scripts/hermes-busdriver-agent-draft': '70b759b4b35a0f502c68b7bd5798dd2ebe4e1eb751e2d1a755c93032f649fc6c',
+ 'scripts/hermes-busdriver-agent-draft': 'bb23997a7c7c28d414cd2d3fc36cb9f632c059bd01b1239b14fac03638fa26c7',
  'scripts/hermes-busdriver-agent-smoke': '63b49a1f668c37be4650f9328822263462bfae4784d39d4099ddbd47a9c50ac2',
  'scripts/hermes-busdriver-delivery-status': '7129487c5c96ee33d751b994738d59ab6802708c52d9e2421c6f0ccc3f18093a',
  'scripts/hermes-busdriver-finalization-contract-status': 'fca49c884f185fe0ad070fba545e3a4d50dce4cb977344f1300d14e7a48d41bc',

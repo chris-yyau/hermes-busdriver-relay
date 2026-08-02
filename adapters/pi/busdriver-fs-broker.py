@@ -454,7 +454,7 @@ def denied_identities() -> set[tuple[int, int]]:
     return identities
 
 
-def check_regular(st: os.stat_result, *, mutation: bool) -> None:
+def check_regular(st: os.stat_result) -> None:
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
         raise fail("not_a_regular_owned_file")
     if (st.st_dev, st.st_ino) in denied_identities():
@@ -490,7 +490,7 @@ def read_leaf(parent_fd: int, name: str, max_bytes: int) -> bytes:
         raise fail("unreadable")
     try:
         st = os.fstat(fd)
-        check_regular(st, mutation=False)
+        check_regular(st)
         if st.st_size > max_bytes:
             raise fail("size_limit")
         data = read_fd(fd, max_bytes)
@@ -571,7 +571,7 @@ def open_leaf_for_mutation(parent_fd: int, name: str, append: bool):
             raise fail("directory_sync_failed")
         created = True
     try:
-        check_regular(os.fstat(fd), mutation=True)
+        check_regular(os.fstat(fd))
     except BaseException:
         os.close(fd)
         raise
@@ -712,7 +712,7 @@ def op_append(request, root: Root):
             # Re-stat INSIDE the lock: the size read at open time is a size from before we had any
             # right to act on it.
             opened = os.fstat(fd)
-            check_regular(opened, mutation=True)
+            check_regular(opened)
             # `len(content) <= MAX_FILE_BYTES` bounds one REQUEST. The event log is appended to once
             # per tool call, so a per-request bound is a rate, not a bound — the file it builds was
             # bounded by nothing. This bounds the target: an already-oversized file and one that

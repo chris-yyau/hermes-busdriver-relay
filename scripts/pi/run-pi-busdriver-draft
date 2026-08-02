@@ -40,6 +40,8 @@ from typing import Any, NoReturn
 MAX_CAPTURED_BYTES = 64 * 1024
 # Pi JSON events can exceed helper tails; bound the whole turn separately.
 MAX_PI_WORKER_OUTPUT_BYTES = 8 * 1024 * 1024
+# A legal 256 KiB broker file can JSON-escape to six times its byte size.
+MAX_BROKER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class BoundedOutput:
@@ -353,7 +355,7 @@ TOOLS = ROOT / "adapters" / "pi" / "busdriver-tools.ts"
 # The adapter node loads and runs. It sat on a user-writable repo path that was handed straight to
 # node's `-e` — never digested, never retained — so the file that DEFINED every tool boundary in
 # the run was the one file in the launch nobody authenticated.
-TRUSTED_PI_TOOLS_SHA256 = '2d570fff856b5953eb590db1847a54c48502eb756aac3d7cc454d1428de1004d'
+TRUSTED_PI_TOOLS_SHA256 = '0532812014bb01365636e1c94c5049e4e406541f2bb3dd6323381003986df17e'
 PI_RESULT_SCHEMA_PATH = ROOT / "adapters" / "pi" / "pi-result.schema.json"
 TRUSTED_PI_RESULT_SCHEMA_SHA256 = '630f4c6912bf9cc90d2af15f358e210c313dd6aea43aa64ee512780c07cdc9a1'
 SCHEMA = "hermes-pi-busdriver-draft/v0"
@@ -395,7 +397,7 @@ TRUSTED_EXECUTABLE_SOURCES = {
 # being the candidate's to choose.
 MAX_PACKAGE_ENTRY_BYTES = 256 * 1024 * 1024
 FS_BROKER = ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"
-TRUSTED_FS_BROKER_SHA256 = 'c62765729613744125eb2efe7ae7d61e91c77919114b4460c3e8045a72f83372'
+TRUSTED_FS_BROKER_SHA256 = '5f8cea7dd5655500d58210a0eb49f3e92d8b27370b85b012cf378f9b07483553'
 # The adapter's filesystem broker needs openat(2), which Node does not expose, so it runs under a
 # Python the adapter never chooses: this path is pinned here, not resolved from PATH or argv.
 TRUSTED_BROKER_PYTHON = Path("/usr/bin/python3")
@@ -865,6 +867,7 @@ def broker_file_hash(
                 "BD_BROKER_DENIED_IDENTITIES": denied_identities,
             },
             timeout=5,
+            limit=MAX_BROKER_RESPONSE_BYTES,
             stdin_bytes=json.dumps({"op": "read", "root": "repo", "rel": rel}).encode(),
         )
     except subprocess.TimeoutExpired:
