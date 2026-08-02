@@ -162,7 +162,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
     """Bound output, deadline, descendants, drain and reap for a new-session child."""
     exit_watch = None
     threads = []
-    stdin_thread = None
+    stdin_fd = None
+    stdin_view = memoryview(stdin_bytes) if stdin_bytes is not None else memoryview(b"")
+    stdin_offset = 0
     try:
         try:
             exit_watch = _bounded_exit_watch(process)
@@ -187,29 +189,47 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
             process.stdout, process.stderr, limit
         )
 
-        if process.stdin is not None:
-            def feed_stdin() -> None:
-                try:
-                    if stdin_bytes is not None:
-                        process.stdin.write(stdin_bytes)
-                        process.stdin.flush()
-                except (OSError, BrokenPipeError, ValueError):
-                    pass
-                finally:
-                    try:
-                        process.stdin.close()
-                    except (OSError, ValueError, AttributeError):
-                        pass
-            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
-            stdin_thread.start()
-
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         timed_out = False
         killed = False
         observed_exit = False
         watch_error = None
+        if process.stdin is not None:
+            try:
+                stdin_fd = process.stdin.fileno()
+                os.set_blocking(stdin_fd, False)
+            except (OSError, ValueError, AttributeError) as exc:
+                watch_error = f"stdin_setup_failed:{type(exc).__name__}"
+                _kill_bounded_group(process)
+                killed = True
+            if stdin_fd is not None and not stdin_view:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+                stdin_fd = None
         try:
-            while True:
+            while watch_error is None:
+                if stdin_fd is not None:
+                    try:
+                        written = os.write(stdin_fd, stdin_view[stdin_offset:])
+                        if written <= 0:
+                            watch_error = "stdin_write_failed"
+                            _kill_bounded_group(process)
+                            killed = True
+                            break
+                        stdin_offset += written
+                        if stdin_offset == len(stdin_view):
+                            process.stdin.close()
+                            stdin_fd = None
+                    except BlockingIOError:
+                        pass
+                    except (BrokenPipeError, OSError, ValueError):
+                        try:
+                            process.stdin.close()
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        stdin_fd = None
                 if overflow.is_set():
                     _kill_bounded_group(process)
                     killed = True
@@ -231,6 +251,13 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 time.sleep(0.01)
         finally:
             exit_watch.close()
+
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+        stdin_fd = None
 
         # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
         # cannot be reused until every possible process-group signal below has finished.
@@ -289,11 +316,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
         for thread in threads:
             try:
                 thread.join(timeout=0.1)
-            except BaseException:
-                pass
-        if stdin_thread is not None:
-            try:
-                stdin_thread.join(timeout=0.1)
             except BaseException:
                 pass
         raise
@@ -446,10 +468,10 @@ TRUSTED_HELPER_PATHS = {
     "finalization_readiness": FINALIZATION_READINESS,
     "gate": GATE,
 }
-TRUSTED_HELPER_DIGESTS = {'finalization_readiness': '9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a',
- 'gate': 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31',
+TRUSTED_HELPER_DIGESTS = {'finalization_readiness': 'dfc3d4a8f7f9cb68e84186d415c557626859a6a200b3bba3d6e655480eeac461',
+ 'gate': '24dccb1953f3c8b2d8ae2ed5eb0ba00795098bba812c5394cd7407800a2e3f26',
  'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
- 'status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
+ 'status': '2b87cc31801b2920d2066447cf21392272985c46e11852cfa6c934211110ec6b'}
 MAX_TRUSTED_HELPER_BYTES = 1024 * 1024
 TRUSTED_HELPER_STDIN_LOADER = (
     "import sys\n"

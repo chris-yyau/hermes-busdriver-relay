@@ -274,14 +274,73 @@ def test_an_absolute_rel_is_confined_to_the_root(repo: Path, outside: Path):
 # --- leaf identity: regular, owned, unshared, bounded ---
 
 
-def test_write_refuses_a_hardlinked_target(repo: Path, outside: Path):
-    """A hardlink is a second authorized name for these bytes; mutating through one is an escape."""
+def test_reads_and_writes_refuse_a_hardlinked_target(repo: Path, outside: Path):
+    """A hardlink can exfiltrate on read and mutate on write through an unauthorized name."""
     os.link(outside / "secret.txt", repo / "src" / "alias.txt")
 
+    read = call({"op": "read", "root": "repo", "rel": "src/alias.txt"}, repo=repo)
     out = call({"op": "write", "root": "repo", "rel": "src/alias.txt", "content": "PWNED\n"}, repo=repo)
 
+    assert read == {"ok": False, "error": "hardlinked_target_refused"}
     assert out == {"ok": False, "error": "hardlinked_target_refused"}
     assert (outside / "secret.txt").read_text() == "SENTINEL-UNTOUCHED\n"
+
+
+def test_credential_source_identity_is_refused_for_read_and_write(repo: Path):
+    target = repo / "src" / "app.txt"
+    st = target.stat()
+    env = {"BD_BROKER_DENIED_IDENTITIES": f"{st.st_dev}:{st.st_ino}"}
+
+    assert call({"op": "read", "root": "repo", "rel": "src/app.txt"}, repo=repo, env=env) == {
+        "ok": False,
+        "error": "credential_source_refused",
+    }
+    assert call(
+        {"op": "write", "root": "repo", "rel": "src/app.txt", "content": "PWNED\n"},
+        repo=repo,
+        env=env,
+    ) == {"ok": False, "error": "credential_source_refused"}
+    assert target.read_text() == "hello\n"
+
+
+@pytest.mark.parametrize("verb", ["diff", "diff_stat"])
+def test_credential_source_identity_is_refused_for_content_producing_git(
+    repo: Path, tmp_path: Path, verb: str
+):
+    git_repo(repo)
+    target = repo / "src" / "app.txt"
+    credential = tmp_path / "auth.json"
+    secret = '{"refresh":"never-cross-git"}\n'
+    credential.write_text(secret)
+    target.unlink()
+    os.link(credential, target)
+    st = credential.stat()
+
+    response = call(
+        {"op": "git", "root": "repo", "verb": verb, "rel": ""},
+        repo=repo,
+        env={"BD_BROKER_DENIED_IDENTITIES": f"{st.st_dev}:{st.st_ino}"},
+    )
+
+    assert response == {"ok": False, "error": "credential_source_refused"}
+    assert secret.strip() not in json.dumps(response)
+
+
+@pytest.mark.parametrize("configured", ["malformed", ",", "1:2,", ",1:2", "1:2,,3:4"])
+def test_malformed_denied_identity_fails_broker_startup_closed(repo: Path, configured: str):
+    assert call(
+        {"op": "read", "root": "repo", "rel": "src/app.txt"},
+        repo=repo,
+        env={"BD_BROKER_DENIED_IDENTITIES": configured},
+    ) == {"ok": False, "error": "denied_identity_config_invalid"}
+
+
+def test_oversized_denied_identity_fails_broker_startup_closed(repo: Path):
+    assert call(
+        {"op": "read", "root": "repo", "rel": "src/app.txt"},
+        repo=repo,
+        env={"BD_BROKER_DENIED_IDENTITIES": f"{'9' * 5000}:1"},
+    ) == {"ok": False, "error": "denied_identity_config_invalid"}
 
 
 def test_reads_and_writes_refuse_a_fifo(repo: Path):

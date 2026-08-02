@@ -27,7 +27,10 @@ if any(arg == "--pi-bin" or arg.startswith("--pi-bin=") for arg in sys.argv[1:])
 os.environ.pop("PI_BD_PROVIDER", None)
 os.environ.pop("PI_BD_MODEL", None)
 os.environ.pop("PI_BIN", None)
-sys.argv += ["--provider", "cursor", "--model", "auto"]
+if not any(arg == "--provider" or arg.startswith("--provider=") for arg in sys.argv[1:]):
+    sys.argv += ["--provider", "cursor"]
+if not any(arg == "--model" or arg.startswith("--model=") for arg in sys.argv[1:]):
+    sys.argv += ["--model", "auto"]
 namespace = runpy.run_path(str(PRODUCTION))
-namespace["main"].__globals__["production_dispatch_blocker"] = lambda: None
+namespace["main"].__globals__["production_dispatch_blocker"] = lambda _args: None
 raise SystemExit(namespace["main"]())

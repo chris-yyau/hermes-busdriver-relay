@@ -50,7 +50,7 @@ REQUIRED_CHECKS_SHELL_DISPATCHES = {
 }
 APPROVED_FUNCTION_AST_SHA256 = {
     ("busdriver-fs-broker.py", "run_git"): "59a8ac34abb76572fd8d3750a502c2f950f56539d7d8fb4c4bdaeb5f1a25039b",
-    ("hermes-busdriver-agent-draft", "run"): "cfb09c09a6cb56640eab0d21ab5f88423a4e66e5c968131ffecfb947d5e12449",
+    ("hermes-busdriver-agent-draft", "run"): "e092be71c8ee0ecd1bb8d33381223a3a678fe3f7b646793e5862fb3d996dfc18",
     ("hermes-busdriver-agent-draft", "run_worker"): "9dba875e2efc13aa99edc6945fc9a577f267112fbf26266362ecb7a66cca88ed",
     ("hermes-busdriver-deliver", "_bounded_run"): "aebd23fe977a27286ddc5756375923211a4556ca61fb826c01a96ab35772372e",
     ("hermes-busdriver-deliver", "git_observation_raw"): "57c1c431bea91baa611f8dfccf32b069acc08b902ff2522e2fc21cefab3845fb",
@@ -68,7 +68,7 @@ APPROVED_FUNCTION_AST_SHA256 = {
     ("hermes-busdriver-relay-brief", "run"): "63e3c33120b00982240e831c20a66615bae3416fceedd5865eddec8a0932ff09",
     ("hermes-busdriver-smoke", "run"): "a64f01edf251e951c33df2a0845c17a272b34f06ca97618604476f431161a231",
     ("hermes-busdriver-status", "run"): "95369bb68edd800d3da3120ee2b72d71e58bd77d468f4a15c544cd33304864c0",
-    ("run-pi-busdriver-draft", "run"): "003efee69eda3eb62066f313a385a3cdeeac5d9f28a0eaafc9db91d75e60262f",
+    ("run-pi-busdriver-draft", "run"): "f276d71befa06e6f4628b73b8aa51189fd7cfc95b0bb83312b99fa7a5604ab6e",
 }
 # The identical installed run_bounded implementation is approved at these paths.
 for _launcher_path in {

@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import select
 import signal
 import stat
@@ -40,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import cache
 
 # The adapter's MAX_BD_FILE_BYTES. Restated, not imported: this process is the enforcement point,
 # so a caller that forgets its own bound still cannot exceed this one.
@@ -155,6 +157,7 @@ GIT_VERBS = {
     "diff_stat": (False, ("diff", "--no-ext-diff", "--no-textconv", "--stat")),
     "log": (False, ("log", "--oneline")),
 }
+GIT_CONTENT_VERBS = frozenset({"diff", "diff_stat"})
 
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
@@ -438,12 +441,40 @@ def fd_identity(st: os.stat_result) -> tuple:
     )
 
 
-def check_regular(st: os.stat_result, *, mutation: bool) -> None:
+DENIED_IDENTITIES_ENV = "BD_BROKER_DENIED_IDENTITIES"
+MAX_IDENTITY_COMPONENT = (1 << 64) - 1
+
+
+@cache
+def denied_identities() -> frozenset[tuple[int, int]]:
+    identities: set[tuple[int, int]] = set()
+    configured = os.environ.get(DENIED_IDENTITIES_ENV, "")
+    if not configured:
+        return frozenset()
+    for value in configured.split(","):
+        if not re.fullmatch(r"[0-9]+:[0-9]+", value):
+            raise fail("denied_identity_config_invalid")
+        device, inode = value.split(":", 1)
+        if len(device) > 20 or len(inode) > 20:
+            raise fail("denied_identity_config_invalid")
+        try:
+            identity = (int(device), int(inode))
+        except ValueError as exc:
+            raise fail("denied_identity_config_invalid") from exc
+        if any(component > MAX_IDENTITY_COMPONENT for component in identity):
+            raise fail("denied_identity_config_invalid")
+        identities.add(identity)
+    return frozenset(identities)
+
+
+def check_regular(st: os.stat_result) -> None:
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
         raise fail("not_a_regular_owned_file")
-    # A hardlink is a second name for these bytes, so a mutation through this one is also a
-    # mutation through a path the containment never authorized. Reads tolerate it; writes do not.
-    if mutation and st.st_nlink != 1:
+    if (st.st_dev, st.st_ino) in denied_identities():
+        raise fail("credential_source_refused")
+    # A hardlink is a second name for bytes outside the authorized path. Reads can exfiltrate
+    # through it just as writes can mutate through it, so neither operation accepts one.
+    if st.st_nlink != 1:
         raise fail("hardlinked_target_refused")
 
 
@@ -472,7 +503,7 @@ def read_leaf(parent_fd: int, name: str, max_bytes: int) -> bytes:
         raise fail("unreadable")
     try:
         st = os.fstat(fd)
-        check_regular(st, mutation=False)
+        check_regular(st)
         if st.st_size > max_bytes:
             raise fail("size_limit")
         data = read_fd(fd, max_bytes)
@@ -553,7 +584,7 @@ def open_leaf_for_mutation(parent_fd: int, name: str, append: bool):
             raise fail("directory_sync_failed")
         created = True
     try:
-        check_regular(os.fstat(fd), mutation=True)
+        check_regular(os.fstat(fd))
     except BaseException:
         os.close(fd)
         raise
@@ -694,7 +725,7 @@ def op_append(request, root: Root):
             # Re-stat INSIDE the lock: the size read at open time is a size from before we had any
             # right to act on it.
             opened = os.fstat(fd)
-            check_regular(opened, mutation=True)
+            check_regular(opened)
             # `len(content) <= MAX_FILE_BYTES` bounds one REQUEST. The event log is appended to once
             # per tool call, so a per-request bound is a rate, not a bound — the file it builds was
             # bounded by nothing. This bounds the target: an already-oversized file and one that
@@ -1324,6 +1355,12 @@ def op_git(request, root: Root):
     entry = GIT_VERBS.get(request["verb"])
     if entry is None:
         raise fail("git_verb_rejected")
+    # Git opens worktree files itself, outside the broker's descriptor-bound regular-file check.
+    # Pre-scanning paths cannot fix that under the same-UID threat model: a denied inode can be
+    # hardlinked into the tree after the scan and before Git opens it. Refuse observations that
+    # return file content (or content-derived statistics) whenever a denied identity exists.
+    if request["verb"] in GIT_CONTENT_VERBS and denied_identities():
+        raise fail("credential_source_refused")
     needs_rel, _template = entry
     rel = request["rel"]
     if needs_rel:
@@ -1409,6 +1446,7 @@ def main() -> int:
         response = {"ok": False, "error": "request_too_large"}
     else:
         try:
+            denied_identities()
             response = handle(raw)
         except BrokerError as exc:
             response = {"ok": False, "error": str(exc)}

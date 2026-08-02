@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Production Busdriver draft parser and state-check dispatcher.
 
 Pattern:
@@ -20,11 +20,9 @@ import re
 import select
 import shlex
 import secrets
-import signal
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -33,13 +31,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
-TRUSTED_GATE_SHA256 = 'fb0022b2a7d89bea0f405e9e26fbcd26151fda82c9c9cd4733399f381df44d31'
+TRUSTED_GATE_SHA256 = '24dccb1953f3c8b2d8ae2ed5eb0ba00795098bba812c5394cd7407800a2e3f26'
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
     "git": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
     "gh": "02d2d4a85241c6a8c0b77ebb1ec76fc723caf7fb128e00915b306b968847cba1",
-    "pi": "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca",
     "bash": "7369f3f45b8aa2af43cff2f103cc7ebccdaea98a6d7979e5466da7d152f258ea",
     "python3": "ffdb53736fc808e793863887f2dba66c49d68f6aa0b43db5caa0fd8b1ec11aef",
 }
@@ -51,20 +48,12 @@ TRUSTED_EXECUTABLE_SOURCES = {
     "bash": Path("/bin/bash"),
     "python3": Path("/usr/bin/python3"),
 }
-# Pi is not in TRUSTED_EXECUTABLE_SOURCES: it lives under $HOME, whose ancestry
-# this UID can write, so it cannot satisfy the root-owned contract. Production
-# never reaches trusted_agent_executable() while the containment blocker is set.
-TRUSTED_PI = Path("/Users/vfrvndtt/.local/bin/pi").resolve()
-_TRUSTED_EXECUTABLE_RUNTIME: tempfile.TemporaryDirectory[str] | None = None
-_TRUSTED_EXECUTABLE_PATHS: dict[str, Path] = {}
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
-# The Pi child wrapper is pinned and privately retained like every other
-# executed byte; OpenCode has no production executor or wrapper edge.
-#
-# No cycle: the Pi wrapper does not pin agent-draft, so the graph stays a DAG.
-PI_WRAPPER = ROOT / "scripts" / "pi" / "run-pi-busdriver-draft"
-TRUSTED_PI_WRAPPER_SHA256 = '071c3b85ff1e32c8915665d4e3a811d2d5a799d83ab94abb7fff5bbb6c2586af'
+TRUSTED_LOCK_SHA256 = '0327fc00b4b6d8e4e898b0452389a6c452f326468df03e124e2ad51ddd829b0f'
+PI_PRODUCTION_BLOCKER = "agent_containment_and_credential_broker_unavailable"
+PI_BLOCKED_BOOTSTRAP = (
+    f"import sys; sys.stderr.write({(PI_PRODUCTION_BLOCKER + chr(10))!r}); raise SystemExit(2)"
+)
 
 SCHEMA = "hermes-busdriver-agent-draft/v0"
 AUTHORITY_FALSE = {
@@ -242,7 +231,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
     """Bound output, deadline, descendants, drain and reap for a new-session child."""
     exit_watch = None
     threads = []
-    stdin_thread = None
+    stdin_fd = None
+    stdin_view = memoryview(stdin_bytes) if stdin_bytes is not None else memoryview(b"")
+    stdin_offset = 0
     try:
         try:
             exit_watch = _bounded_exit_watch(process)
@@ -267,29 +258,47 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
             process.stdout, process.stderr, limit
         )
 
-        if process.stdin is not None:
-            def feed_stdin() -> None:
-                try:
-                    if stdin_bytes is not None:
-                        process.stdin.write(stdin_bytes)
-                        process.stdin.flush()
-                except (OSError, BrokenPipeError, ValueError):
-                    pass
-                finally:
-                    try:
-                        process.stdin.close()
-                    except (OSError, ValueError, AttributeError):
-                        pass
-            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
-            stdin_thread.start()
-
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         timed_out = False
         killed = False
         observed_exit = False
         watch_error = None
+        if process.stdin is not None:
+            try:
+                stdin_fd = process.stdin.fileno()
+                os.set_blocking(stdin_fd, False)
+            except (OSError, ValueError, AttributeError) as exc:
+                watch_error = f"stdin_setup_failed:{type(exc).__name__}"
+                _kill_bounded_group(process)
+                killed = True
+            if stdin_fd is not None and not stdin_view:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+                stdin_fd = None
         try:
-            while True:
+            while watch_error is None:
+                if stdin_fd is not None:
+                    try:
+                        written = os.write(stdin_fd, stdin_view[stdin_offset:])
+                        if written <= 0:
+                            watch_error = "stdin_write_failed"
+                            _kill_bounded_group(process)
+                            killed = True
+                            break
+                        stdin_offset += written
+                        if stdin_offset == len(stdin_view):
+                            process.stdin.close()
+                            stdin_fd = None
+                    except BlockingIOError:
+                        pass
+                    except (BrokenPipeError, OSError, ValueError):
+                        try:
+                            process.stdin.close()
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        stdin_fd = None
                 if overflow.is_set():
                     _kill_bounded_group(process)
                     killed = True
@@ -311,6 +320,13 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 time.sleep(0.01)
         finally:
             exit_watch.close()
+
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+        stdin_fd = None
 
         # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
         # cannot be reused until every possible process-group signal below has finished.
@@ -371,11 +387,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 thread.join(timeout=0.1)
             except BaseException:
                 pass
-        if stdin_thread is not None:
-            try:
-                stdin_thread.join(timeout=0.1)
-            except BaseException:
-                pass
         raise
 
 def run_bounded(
@@ -404,9 +415,9 @@ def run_bounded(
     return _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text)
 
 
-def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int | None = None, limit: int = MAX_CAPTURED_BYTES) -> subprocess.CompletedProcess[str]:
     """The historical shape, now bounded. Overflow arrives as rc 125 with a fixed token."""
-    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout)
+    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout, limit=limit)
     if result.overflowed:
         return subprocess.CompletedProcess(cmd, 125, "", "helper_output_too_large")
     if result.timed_out:
@@ -625,13 +636,8 @@ def trusted_executable_path(name: str) -> Path:
     """The only production entry point for the SYSTEM tools. Takes a name; the path is not
     negotiable.
 
-    git and gh part company from pi here, and the split is not stylistic. git and gh
-    have fixed root-owned sources, so they are validated and executed in place. Pi exists only under
-    $HOME — user-writable ancestry, which this contract refuses and no walk can fix, because there is
-    no root-owned Pi to point at. That is not a gap this function should
-    paper over: it is the same fact that makes agent dispatch `policy_blocked` by
-    `agent_containment_and_credential_broker_unavailable` in the first place. Pi keeps the private
-    -copy resolver, in trusted_agent_executable(), which production never reaches.
+    Only fixed root-owned sources belong here. Pi exists under user-writable ancestry and production
+    blocks before resolving, authenticating, or launching it.
 
     Revalidated on every call rather than cached: the contract is "validated immediately before
     dispatch", and a cache is a promise about the past.
@@ -640,66 +646,6 @@ def trusted_executable_path(name: str) -> Path:
     if source is None:
         raise _trusted_source_refusal(name, "unsupported")
     return _validated_root_owned_source(source, name)
-
-
-def trusted_agent_executable(name: str) -> Path:
-    """The Pi resolver. Unreachable in production — see trusted_executable_path().
-
-    Kept as-is deliberately. A private authenticated copy is the strongest thing available for a
-    binary whose only source is user-writable, and it is NOT strong enough: macOS has no fexecve,
-    so the kernel re-resolves the copy's pathname at exec time and a same-UID adversary can rename
-    it first. That is precisely why this lane is policy_blocked rather than shipped.
-    """
-    global _TRUSTED_EXECUTABLE_RUNTIME
-    trusted = {
-        "pi": TRUSTED_PI,
-    }
-    source = trusted.get(name)
-    if source is None:
-        raise ValueError(f"unsupported trusted executable:{name}")
-    cached = _TRUSTED_EXECUTABLE_PATHS.get(name)
-    if cached is not None:
-        try:
-            parent_st = cached.parent.lstat()
-            st = cached.lstat()
-            data = cached.read_bytes()
-        except OSError as exc:
-            raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-        if (
-            cached.is_symlink()
-            or cached.parent.is_symlink()
-            or not stat.S_ISDIR(parent_st.st_mode)
-            or parent_st.st_uid != os.getuid()
-            or stat.S_IMODE(parent_st.st_mode) != 0o700
-            or not stat.S_ISREG(st.st_mode)
-            or st.st_uid != os.getuid()
-            or st.st_nlink != 1
-            or stat.S_IMODE(st.st_mode) != 0o500
-            or hashlib.sha256(data).hexdigest() != TRUSTED_EXECUTABLE_DIGESTS[name]
-        ):
-            raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_integrity_failed:{name}"}))
-        return cached
-    try:
-        data = source.read_bytes()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-    if hashlib.sha256(data).hexdigest() != TRUSTED_EXECUTABLE_DIGESTS[name]:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_executable_integrity_failed:{name}"}))
-    if _TRUSTED_EXECUTABLE_RUNTIME is None:
-        _TRUSTED_EXECUTABLE_RUNTIME = tempfile.TemporaryDirectory(prefix="hermes-agent-trusted-bin-")
-        Path(_TRUSTED_EXECUTABLE_RUNTIME.name).chmod(0o700)
-    private = Path(_TRUSTED_EXECUTABLE_RUNTIME.name) / name
-    try:
-        # write_private_runtime_file(), not a bare os.write(): `os.write` is permitted to write
-        # fewer bytes than it was given, and a single call therefore truncates SILENTLY. The
-        # result is a private executable that is a prefix of the reviewed one — which then fails
-        # its own digest check, so the failure mode was a confusing refusal rather than a breach.
-        # It is still the same defect the broker's write_all() fixes, in the same shape.
-        write_private_runtime_file(private, data)
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_executable_unavailable:{name}", "detail": type(exc).__name__})) from exc
-    _TRUSTED_EXECUTABLE_PATHS[name] = private
-    return trusted_agent_executable(name)
 
 
 def git_root(repo: Path) -> Path:
@@ -984,7 +930,7 @@ def gate_preflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
     if args.allow_dirty:
         cmd.append("--allow-dirty")
     gate_env = private_helper_env(args.trusted_gate_path, {"HERMES_GATE_BASELINE_HMAC_KEY": args.baseline_auth_key})
-    cp = run(cmd, timeout=120, env=gate_env)
+    cp = run(cmd, timeout=120, env=gate_env, limit=MAX_HELPER_STDOUT_BYTES)
     data = helper_json(cp, {"ok": False})
     data["returncode"] = cp.returncode
     return data
@@ -999,7 +945,7 @@ def gate_postflight(args: argparse.Namespace, baseline: Path) -> dict[str, Any]:
     for v in args.verifier or []:
         cmd += ["--verifier", v]
     gate_env = private_helper_env(args.trusted_gate_path, {"HERMES_GATE_BASELINE_HMAC_KEY": args.baseline_auth_key})
-    cp = run(cmd, timeout=args.postflight_timeout, env=gate_env)
+    cp = run(cmd, timeout=args.postflight_timeout, env=gate_env, limit=MAX_HELPER_STDOUT_BYTES)
     data = helper_json(cp, {"ok": False})
     data["returncode"] = cp.returncode
     return data
@@ -1033,54 +979,26 @@ def release_lock(args: argparse.Namespace, token: str, lock_path: str) -> dict[s
 
 def agent_command(args: argparse.Namespace, prompt_path: Path, run_dir: Path) -> list[str]:
     if args.agent == "pi":
-        pi_timeout = max(1, args.timeout - 30) if args.timeout > 30 else max(1, args.timeout - 1)
-        # The historical OpenCode fixture also refuses this. --pi-bin took any
-        # value and forwarded it RAW to the wrapper, so the flag (and its PI_BIN environment
-        # default) named the program this launcher ran — with a private HOME and live provider
-        # credentials mounted. "Production is blocked before it gets here" is not the argument: an
-        # affordance that exists in the production parser is one a later caller can reach, and the
-        # value came from argv, which is the definition of caller-selected. The doubles the
-        # contract tests need are injected by tests/fixtures/pi/agent-draft-test-harness, which is
-        # source-separated, never installed, and overrides trusted_agent_executable() via runpy.
-        if args.pi_bin not in {"pi", str(TRUSTED_PI)}:
-            raise SystemExit(json.dumps({
-                "schema": SCHEMA,
-                "ok": False,
-                "status": "blocked",
-                "agent": "pi",
-                "error": "pi_executable_override_rejected",
-            }))
-        pi_bin = str(trusted_agent_executable("pi"))
-        cmd = [
+        # Production has no same-UID-safe containment or credential broker yet. Block in this
+        # root-pinned parent before resolving any candidate wrapper, package, credential, or path.
+        return [
             str(trusted_executable_path("python3")),
             "-I",
-            str(materialize_trusted_wrapper(run_dir, PI_WRAPPER, TRUSTED_PI_WRAPPER_SHA256, "pi-wrapper")),
-            "--repo",
-            args.repo,
-            "--prompt-file",
-            str(prompt_path),
-            "--run-dir",
-            str(run_dir),
-            "--pi-bin",
-            pi_bin,
-            "--model",
-            args.pi_model,
-            "--timeout",
-            str(pi_timeout),
+            "-c",
+            PI_BLOCKED_BOOTSTRAP,
         ]
-        if args.pi_provider:
-            cmd += ["--provider", args.pi_provider]
-        for p in args.scope_include or []:
-            cmd += ["--scope-include", p]
-        for p in args.scope_exclude or []:
-            cmd += ["--scope-exclude", p]
-        return cmd
     if args.agent == "noop":
         return [str(trusted_executable_path("bash")), "--noprofile", "--norc", "-c", "echo HERMES_AGENT_DRAFT_NOOP"]
     raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"unsupported_agent:{args.agent}"}))
 
 
-def write_private_runtime_file(path: Path, data: bytes, mode: int = 0o500) -> None:
+def write_private_runtime_file(
+    path: str | Path,
+    data: bytes,
+    mode: int = 0o500,
+    *,
+    dir_fd: int | None = None,
+) -> None:
     """Write the bytes, then prove the file at `path` still holds exactly them.
 
     Three separate claims hide behind a write that reports success. `os.write` may accept fewer
@@ -1096,7 +1014,18 @@ def write_private_runtime_file(path: Path, data: bytes, mode: int = 0o500) -> No
     # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
     # write-only one cannot be read (EBADF). Reopening the name to read it instead would resolve
     # the name a second time, which is the very thing the descriptor is here to avoid.
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    if dir_fd is not None:
+        raw_path = os.fspath(path)
+        if os.path.isabs(raw_path):
+            raise OSError("private_runtime_absolute_path_with_dir_fd")
+        if raw_path in {"", ".", ".."} or os.path.basename(raw_path) != raw_path:
+            raise OSError("private_runtime_relative_path_invalid")
+    fd = os.open(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        mode,
+        dir_fd=dir_fd,
+    )
     # The inode THIS call created. The failure path deletes only this one — never a replacement.
     created = os.fstat(fd)
     try:
@@ -1132,8 +1061,8 @@ def write_private_runtime_file(path: Path, data: bytes, mode: int = 0o500) -> No
             offset += len(chunk)
         if digest.hexdigest() != hashlib.sha256(data).hexdigest():
             raise OSError("private_runtime_integrity_failed")
-        landed = os.lstat(path)
-        if (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
+        landed = os.lstat(path, dir_fd=dir_fd)
+        if landed.st_nlink != 1 or (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
             # The digest proved OUR inode is intact; this proves `path` still reaches it. A rename
             # over the name publishes someone else's bytes under the name the caller will execute.
             raise OSError("private_runtime_integrity_failed")
@@ -1142,9 +1071,9 @@ def write_private_runtime_file(path: Path, data: bytes, mode: int = 0o500) -> No
         # the name may belong to something else — the case the identity check above fails on — and
         # deleting THAT is a second bug wearing the first one's cleanup.
         try:
-            landed = os.lstat(path)
+            landed = os.lstat(path, dir_fd=dir_fd)
             if (landed.st_dev, landed.st_ino) == (created.st_dev, created.st_ino):
-                os.unlink(path)
+                os.unlink(path, dir_fd=dir_fd)
         except OSError:
             pass
         raise
@@ -1166,62 +1095,6 @@ def materialize_helper_runtime(runtime_root: Path, helper_name: str, helper_byte
     helper = scripts / helper_name
     write_private_runtime_file(helper, helper_bytes)
     return helper
-
-
-def ensure_private_run_dir(run_dir: Path) -> None:
-    """Create and validate the private directory a retained child runtime lands in.
-
-    `allocate_run_dir` builds this 0700 on the production path, but a retained wrapper is only as
-    private as the directory holding it, so the helper checks rather than assumes: an existing
-    entry that is a symlink, not a directory, not ours, or group/other-accessible fails closed.
-    Only `run_dir` itself is created — never its parents, which would put the private root
-    somewhere nobody authorized.
-    """
-    try:
-        run_dir.mkdir(mode=0o700, exist_ok=True)
-        st = run_dir.lstat()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "private_run_dir_unavailable", "detail": type(exc).__name__})) from exc
-    if (
-        run_dir.is_symlink()
-        or not stat.S_ISDIR(st.st_mode)
-        or st.st_uid != os.getuid()
-        or stat.S_IMODE(st.st_mode) & 0o077
-    ):
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": "private_run_dir_integrity_failed"}))
-
-
-def materialize_trusted_wrapper(run_dir: Path, source: Path, expected_digest: str, kind: str) -> Path:
-    """Authenticate a child wrapper's bytes, retain them, and return the path to RUN.
-
-    ``str(PI_WRAPPER)`` on the launch argv was a repo pathname resolved by python at exec time —
-    so the process that holds the entire draft containment was the one executable in the launch
-    nobody had authenticated, while git, gh, pi, opencode, the gate and the lock all were. Pinning
-    the pathname would not have been enough either: digesting a name and then executing that same
-    name is two reads of one mutable file. The retained copy is what runs.
-    """
-    try:
-        data = source.read_bytes()
-    except OSError as exc:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_wrapper_unavailable:{kind}", "detail": type(exc).__name__})) from exc
-    if hashlib.sha256(data).hexdigest() != expected_digest:
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"trusted_wrapper_integrity_failed:{kind}"}))
-    ensure_private_run_dir(run_dir)
-    private_dir = run_dir / f"trusted-{kind}-runtime"
-    private_dir.mkdir(mode=0o700)
-    private = private_dir / source.name
-    write_private_runtime_file(private, data)
-    st = private.lstat()
-    if (
-        private.is_symlink()
-        or not stat.S_ISREG(st.st_mode)
-        or st.st_uid != os.getuid()
-        or st.st_nlink != 1
-        or stat.S_IMODE(st.st_mode) != 0o500
-        or hashlib.sha256(private.read_bytes()).hexdigest() != expected_digest
-    ):
-        raise SystemExit(json.dumps({"schema": SCHEMA, "ok": False, "error": f"private_trusted_wrapper_integrity_failed:{kind}"}))
-    return private
 
 
 def materialize_trusted_gate(run_dir: Path) -> Path:
@@ -1348,13 +1221,26 @@ def allocate_run_dir(state: Path, agent: str) -> Path:
     return run_dir
 
 
-def production_dispatch_blocker() -> str:
+def production_dispatch_blocker(args: argparse.Namespace) -> str | None:
     """Return the non-overridable production dispatch blocker.
+
+    The canonical ``pi`` / ``cursor`` / ``auto`` tuple is blocked like every other route:
+    the credential-broker half of this token is implemented, the OS-enforced worker and
+    descendant containment half is not, and a conjunction is not cleared by one conjunct.
 
     Test harnesses may replace this function only after loading this file with
     ``runpy``. No production CLI flag or environment variable can clear it.
     """
     return "agent_containment_and_credential_broker_unavailable"
+
+
+class _StoreOnce(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        seen = f"_{self.dest}_seen"
+        if getattr(namespace, seen, False):
+            parser.error(f"{option_string} may only be specified once")
+        setattr(namespace, seen, True)
+        setattr(namespace, self.dest, values)
 
 
 def production_blocked_report(args: argparse.Namespace, blocker: str) -> dict[str, Any]:
@@ -1387,10 +1273,10 @@ def main() -> int:
     )
     ap.add_argument("--plugin-root", required=True)
     ap.add_argument("--repo", required=True)
-    ap.add_argument("--agent", choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
-    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"), help="Pi executable for --agent pi.")
-    ap.add_argument("--pi-model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"), help="Pi model for --agent pi.")
-    ap.add_argument("--pi-provider", default=os.environ.get("PI_BD_PROVIDER", ""), help="Optional Pi provider for --agent pi.")
+    ap.add_argument("--agent", action=_StoreOnce, choices=["pi", "noop"], default="noop", help="Safe default is noop; Pi is the only executor probe.")
+    ap.add_argument("--pi-bin", action=_StoreOnce, default="pi", help="Candidate-lane Pi selector for --agent pi; production is blocked.")
+    ap.add_argument("--pi-model", action=_StoreOnce, default="auto", help="Candidate-lane model selector for --agent pi; production is blocked.")
+    ap.add_argument("--pi-provider", action=_StoreOnce, default="cursor", help="Candidate-lane provider selector for --agent pi; production is blocked.")
 
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")
@@ -1406,7 +1292,7 @@ def main() -> int:
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
-    blocker = production_dispatch_blocker()
+    blocker = production_dispatch_blocker(args)
     if blocker:
         print(json.dumps(production_blocked_report(args, blocker), indent=2 if args.pretty else None, sort_keys=True))
         return 2

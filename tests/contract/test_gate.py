@@ -1063,3 +1063,32 @@ def test_production_gate_git_dispatches_the_validated_root_owned_source(monkeypa
     assert Path(captured["cmd"][3]) == ns["TRUSTED_EXECUTABLE_SOURCES"]["git-real"]
     assert "--ignore-submodules=none" in captured["cmd"]
     assert "--untracked-files=all" in captured["cmd"]
+
+
+@pytest.mark.parametrize("phase", ("preflight", "postflight"))
+def test_gate_has_no_caller_selectable_dispatch_profile_unlock(tmp_path: Path, phase: str):
+    """A standalone caller must not be able to author the gate's authority envelope.
+
+    `hermes-busdriver-gate` is a mode-0755 CLI, so a value-based `--dispatch-profile`
+    switch would be forgeable by anyone able to run it. The parser rejects the flag and
+    the decision stays blocked unconditionally.
+    """
+    gate = runpy.run_path(str(PRODUCTION_GATE))
+
+    assert gate["decision"](True, phase)["agent_implementation_draft_allowed"] is False
+    assert gate["agent_dispatch_blocker"]() == "agent_containment_and_credential_broker_unavailable"
+    assert "dispatch-profile" not in PRODUCTION_GATE.read_text()
+
+    # Every required argument for the phase is supplied, so argparse reaches the unrecognized
+    # flag instead of bailing earlier on a missing one — otherwise this asserts nothing.
+    required = ["--plugin-root", str(tmp_path)] if phase == "preflight" else []
+    cp = subprocess.run(
+        [sys.executable, str(PRODUCTION_GATE), phase, "--repo", str(tmp_path), *required,
+         "--dispatch-profile", "pi-cursor-auto"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert cp.returncode == 2
+    assert "unrecognized arguments: --dispatch-profile" in cp.stderr

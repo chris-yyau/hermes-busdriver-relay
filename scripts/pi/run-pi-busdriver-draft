@@ -2,8 +2,9 @@
 """Production Pi draft parser with fail-closed dispatch.
 
 Production dispatch is blocked until trusted OS containment and parent-held
-credential brokering exist. A non-installed runpy fixture exercises the
-Busdriver-shaped adapter contract without exposing a CLI or environment bypass.
+credential brokering exist. Non-canonical provider, model, and runtime routes are
+refused earlier by name. A non-installed runpy fixture exercises the locked
+Cursor/auto candidate lane without exposing a CLI or environment bypass.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from typing import Any, NoReturn
 MAX_CAPTURED_BYTES = 64 * 1024
 # Pi JSON events can exceed helper tails; bound the whole turn separately.
 MAX_PI_WORKER_OUTPUT_BYTES = 8 * 1024 * 1024
+# A legal 256 KiB broker file can JSON-escape to six times its byte size.
+MAX_BROKER_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class BoundedOutput:
@@ -183,7 +186,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
     """Bound output, deadline, descendants, drain and reap for a new-session child."""
     exit_watch = None
     threads = []
-    stdin_thread = None
+    stdin_fd = None
+    stdin_view = memoryview(stdin_bytes) if stdin_bytes is not None else memoryview(b"")
+    stdin_offset = 0
     try:
         try:
             exit_watch = _bounded_exit_watch(process)
@@ -208,29 +213,47 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
             process.stdout, process.stderr, limit
         )
 
-        if process.stdin is not None:
-            def feed_stdin() -> None:
-                try:
-                    if stdin_bytes is not None:
-                        process.stdin.write(stdin_bytes)
-                        process.stdin.flush()
-                except (OSError, BrokenPipeError, ValueError):
-                    pass
-                finally:
-                    try:
-                        process.stdin.close()
-                    except (OSError, ValueError, AttributeError):
-                        pass
-            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
-            stdin_thread.start()
-
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         timed_out = False
         killed = False
         observed_exit = False
         watch_error = None
+        if process.stdin is not None:
+            try:
+                stdin_fd = process.stdin.fileno()
+                os.set_blocking(stdin_fd, False)
+            except (OSError, ValueError, AttributeError) as exc:
+                watch_error = f"stdin_setup_failed:{type(exc).__name__}"
+                _kill_bounded_group(process)
+                killed = True
+            if stdin_fd is not None and not stdin_view:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+                stdin_fd = None
         try:
-            while True:
+            while watch_error is None:
+                if stdin_fd is not None:
+                    try:
+                        written = os.write(stdin_fd, stdin_view[stdin_offset:])
+                        if written <= 0:
+                            watch_error = "stdin_write_failed"
+                            _kill_bounded_group(process)
+                            killed = True
+                            break
+                        stdin_offset += written
+                        if stdin_offset == len(stdin_view):
+                            process.stdin.close()
+                            stdin_fd = None
+                    except BlockingIOError:
+                        pass
+                    except (BrokenPipeError, OSError, ValueError):
+                        try:
+                            process.stdin.close()
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        stdin_fd = None
                 if overflow.is_set():
                     _kill_bounded_group(process)
                     killed = True
@@ -252,6 +275,13 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 time.sleep(0.01)
         finally:
             exit_watch.close()
+
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+        stdin_fd = None
 
         # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
         # cannot be reused until every possible process-group signal below has finished.
@@ -312,11 +342,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 thread.join(timeout=0.1)
             except BaseException:
                 pass
-        if stdin_thread is not None:
-            try:
-                stdin_thread.join(timeout=0.1)
-            except BaseException:
-                pass
         raise
 
 def run_bounded(
@@ -352,8 +377,9 @@ TOOLS = ROOT / "adapters" / "pi" / "busdriver-tools.ts"
 # The adapter node loads and runs. It sat on a user-writable repo path that was handed straight to
 # node's `-e` — never digested, never retained — so the file that DEFINED every tool boundary in
 # the run was the one file in the launch nobody authenticated.
-TRUSTED_PI_TOOLS_SHA256 = 'f89686da24c47e758038472f96b79f5073b67817d70862f8ec208d9ff133462b'
+TRUSTED_PI_TOOLS_SHA256 = '0532812014bb01365636e1c94c5049e4e406541f2bb3dd6323381003986df17e'
 PI_RESULT_SCHEMA_PATH = ROOT / "adapters" / "pi" / "pi-result.schema.json"
+TRUSTED_PI_RESULT_SCHEMA_SHA256 = '630f4c6912bf9cc90d2af15f358e210c313dd6aea43aa64ee512780c07cdc9a1'
 SCHEMA = "hermes-pi-busdriver-draft/v0"
 PI_RESULT_SCHEMA = "pi-busdriver-result/v0"
 AUTHORITY_FALSE_FIELDS = [
@@ -393,7 +419,7 @@ TRUSTED_EXECUTABLE_SOURCES = {
 # being the candidate's to choose.
 MAX_PACKAGE_ENTRY_BYTES = 256 * 1024 * 1024
 FS_BROKER = ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"
-TRUSTED_FS_BROKER_SHA256 = 'c86497a55433389933dd6c2b54c62f8826f79aba6fd1e922b41ca988764e82a1'
+TRUSTED_FS_BROKER_SHA256 = '69dadefbc1169e46c6df4e71ccb147a55a77b4ec80540532f3a3c7471baf87f7'
 # The adapter's filesystem broker needs openat(2), which Node does not expose, so it runs under a
 # Python the adapter never chooses: this path is pinned here, not resolved from PATH or argv.
 TRUSTED_BROKER_PYTHON = Path("/usr/bin/python3")
@@ -409,6 +435,7 @@ def authority_false_payload() -> dict[str, bool]:
 def run(
     cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None,
     timeout: int | None = None, limit: int = MAX_CAPTURED_BYTES,
+    stdin_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Every child of this wrapper, bounded at the pipe — including the untrusted pi worker.
 
@@ -417,7 +444,7 @@ def run(
     never what got read. Overflow is rc 125 with a fixed token, which the callers already treat as
     a worker failure.
     """
-    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout, limit=limit)
+    result = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout, limit=limit, stdin_bytes=stdin_bytes)
     if result.overflowed:
         return subprocess.CompletedProcess(cmd, 125, "", "worker_output_too_large")
     if result.timed_out:
@@ -805,15 +832,17 @@ def validate_json_schema(data: Any, schema: dict[str, Any], path: str = "$.") ->
     return errors
 
 
-def validate_artifact(data: Any, scope_include: list[str] | None = None, scope_exclude: list[str] | None = None) -> list[str]:
+def validate_artifact(
+    data: Any,
+    scope_include: list[str] | None = None,
+    scope_exclude: list[str] | None = None,
+    *,
+    schema: dict[str, Any],
+) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["artifact_not_object"]
-    try:
-        schema = json.loads(PI_RESULT_SCHEMA_PATH.read_text())
-        errors.extend(f"schema_validation:{err}" for err in validate_json_schema(data, schema))
-    except Exception as exc:  # pragma: no cover - defensive fail closed
-        errors.append(f"schema_validation_unavailable:{exc}")
+    errors.extend(f"schema_validation:{err}" for err in validate_json_schema(data, schema))
     if data.get("schema") != PI_RESULT_SCHEMA:
         errors.append("schema_mismatch")
     if data.get("status") not in {"needs_busdriver_review", "blocked"}:
@@ -847,6 +876,87 @@ def artifact_blockers(data: Any) -> list[str]:
     if isinstance(data, dict) and data.get("status") == "blocked":
         return ["artifact_status_blocked"]
     return []
+
+
+def broker_file_hash(
+    repo: Path, rel: str, broker_python: Path, broker_script: Path, denied_identities: str
+) -> str | None:
+    try:
+        cp = run(
+            [str(broker_python), "-I", str(broker_script)],
+            env={
+                "BD_BROKER_ROOT_REPO": str(repo.resolve()),
+                "BD_BROKER_DENIED_IDENTITIES": denied_identities,
+            },
+            timeout=5,
+            limit=MAX_BROKER_RESPONSE_BYTES,
+            stdin_bytes=json.dumps({"op": "read", "root": "repo", "rel": rel}).encode(),
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if cp.returncode != 0:
+        return None
+    try:
+        response = json.loads(cp.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    content = response.get("content") if isinstance(response, dict) and response.get("ok") is True else None
+    return hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
+
+
+def reconcile_write_audits(
+    event_text: str,
+    artifact: Any,
+    repo: Path,
+    broker_python: Path,
+    broker_script: Path,
+    denied_identities: str,
+) -> list[str]:
+    audits: dict[str, str] = {}
+    pending: dict[tuple[str, str], int] = {}
+    for line in event_text.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return ["event_log_invalid"]
+        if not isinstance(event, dict) or event.get("kind") not in {"write_intent", "write_audit"}:
+            continue
+        path, operation_id = event.get("path"), event.get("operation_id")
+        if (
+            event.get("toolName") != "bd_write_draft"
+            or not isinstance(path, str)
+            or not isinstance(operation_id, str)
+            or not operation_id
+        ):
+            return ["write_audit_invalid"]
+        key = (path, operation_id)
+        if event["kind"] == "write_intent":
+            pending[key] = pending.get(key, 0) + 1
+            continue
+        after_hash = event.get("after_hash")
+        if (
+            not pending.get(key)
+            or not isinstance(after_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", after_hash) is None
+        ):
+            return ["write_audit_invalid"]
+        pending[key] -= 1
+        audits[path] = after_hash
+    if any(pending.values()):
+        return ["write_audit_incomplete"]
+
+    claimed = artifact.get("files_changed") if isinstance(artifact, dict) else None
+    if (
+        not isinstance(claimed, list)
+        or not all(isinstance(path, str) for path in claimed)
+        or set(claimed) != set(audits)
+    ):
+        return ["files_changed_write_audit_mismatch"]
+    return [
+        f"write_audit_final_hash_mismatch:{path}"
+        for path, expected in audits.items()
+        if broker_file_hash(repo, path, broker_python, broker_script, denied_identities) != expected
+    ]
 
 
 def build_prompt(prompt_file: Path) -> str:
@@ -1402,6 +1512,23 @@ def trusted_pi_tools() -> Path:
     return privately_retain(TOOLS, TRUSTED_PI_TOOLS_SHA256, "pi_tools", mode=0o400)
 
 
+def trusted_pi_result_schema() -> dict[str, Any]:
+    """Authenticate once and parse before the worker can mutate checkout paths."""
+    try:
+        data = read_package_entry_nofollow(PI_RESULT_SCHEMA_PATH)
+    except OSError as exc:
+        startup_failure("pi_result_schema_integrity_unavailable", detail=type(exc).__name__)
+    if hashlib.sha256(data).hexdigest() != TRUSTED_PI_RESULT_SCHEMA_SHA256:
+        startup_failure("pi_result_schema_integrity_failed")
+    try:
+        schema = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        startup_failure("pi_result_schema_invalid")
+    if not isinstance(schema, dict):
+        startup_failure("pi_result_schema_invalid")
+    return schema
+
+
 def trusted_broker_python() -> Path:
     """Authenticate the interpreter the broker runs under, and return the path to execute.
 
@@ -1526,7 +1653,7 @@ def publish_file(dir_fd: int, name: str, data: bytes, mode: int = 0o600, retain=
 
 def copy_regular_file_nofollow(
     source: Path, private: "PrivatePiHome", target: Path, validate=None, transform=None
-) -> bytes | None:
+) -> tuple[bytes, bytes, str] | None:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise RuntimeError("nofollow_unavailable")
@@ -1557,18 +1684,21 @@ def copy_regular_file_nofollow(
             if total > MAX_PRIVATE_AUTH_BYTES:
                 raise RuntimeError("private_auth_file_too_large")
             chunks.append(chunk)
+        if total != source_stat.st_size or _identity(os.fstat(source_fd)) != _identity(source_stat):
+            raise RuntimeError("private_auth_source_identity_changed")
     finally:
         os.close(source_fd)
 
     # Held whole: the write loop consumes its memoryview, and the closing digest needs the bytes
     # the source was actually read as — the same ones, not a second read of a file that may differ.
-    data = b"".join(chunks)
+    raw = b"".join(chunks)
     if validate is not None:
-        validate(data)
+        validate(raw)
+    data = raw
     if transform is not None:
         data = transform(data)
     private.publish(target, data)
-    return data
+    return raw, data, f"{source_stat.st_dev}:{source_stat.st_ino}"
 
 
 CREDENTIAL_FIELD_PATTERN = re.compile(
@@ -1638,15 +1768,19 @@ def copy_private_pi_config(
     private: "PrivatePiHome",
     provider: str | None = None,
     minimum_validity_ms: int = 0,
-) -> tuple[str, ...]:
-    data = copy_regular_file_nofollow(
+) -> tuple[tuple[str, ...], str]:
+    copied = copy_regular_file_nofollow(
         source_config / "auth.json",
         private,
         private.path / ".pi" / "agent" / "auth.json",
         lambda raw: reject_refreshable_provider_auth(raw, provider, minimum_validity_ms),
         lambda raw: selected_provider_auth_bytes(raw, provider),
     )
-    return auth_credential_values(data)
+    if copied is None:
+        return (), ""
+    raw, selected, identity = copied
+    values = set(auth_credential_values(raw)) | set(auth_credential_values(selected))
+    return tuple(sorted(values, key=len, reverse=True)), identity
 
 
 def _open_private_parent(root_fd: int, parts: tuple[str, ...]) -> int:
@@ -1999,14 +2133,27 @@ def base_child_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key in allowed}
 
 
-def production_dispatch_blocker() -> str | None:
+def production_dispatch_blocker(args: argparse.Namespace) -> str | None:
     """Return the production-only policy blocker.
 
-    A non-installed contract fixture may replace this function after loading
-    the module with runpy. No production CLI option or environment variable
-    can disable it.
+    The route lock is candidate-lane groundwork, not a production unlock: a non-canonical
+    route is refused by name, and the canonical Cursor/auto route still returns the fixed
+    production blocker. A non-installed contract fixture may replace this function after
+    loading the module with runpy. No production CLI option or environment variable can
+    disable it.
     """
+    if (args.pi_bin, args.provider, args.model) != ("pi", "cursor", "auto"):
+        return "cursor_production_route_locked"
     return "agent_containment_and_credential_broker_unavailable"
+
+
+class _StoreOnce(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        seen = getattr(namespace, "_single_use_options", set())
+        if self.dest in seen:
+            parser.error(f"{option_string} may only be specified once")
+        setattr(namespace, "_single_use_options", seen | {self.dest})
+        setattr(namespace, self.dest, values)
 
 
 def main() -> int:
@@ -2023,16 +2170,16 @@ def main() -> int:
     ap.add_argument("--repo", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--pi-bin", default=os.environ.get("PI_BIN") or "pi")
-    ap.add_argument("--model", default=os.environ.get("PI_BD_MODEL", "cursor/auto"))
-    ap.add_argument("--provider", default=os.environ.get("PI_BD_PROVIDER", ""))
+    ap.add_argument("--pi-bin", action=_StoreOnce, default="pi")
+    ap.add_argument("--model", action=_StoreOnce, default="auto")
+    ap.add_argument("--provider", action=_StoreOnce, default="cursor")
     ap.add_argument("--scope-include", action="append")
     ap.add_argument("--scope-exclude", action="append")
     ap.add_argument("--timeout", type=int, default=1200)
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
-    if blocker := production_dispatch_blocker():
+    if blocker := production_dispatch_blocker(args):
         startup_failure(blocker)
 
     run_dir = Path(args.run_dir).expanduser().resolve()
@@ -2062,6 +2209,9 @@ def _run_in_directory(args, run_dir: Path, run_dir_fd: int) -> int:
     trusted_node = trusted_node_executable()
     trusted_git = trusted_git_executable()
     trusted_tools = trusted_pi_tools()
+    broker_python = trusted_broker_python()
+    broker_script = trusted_fs_broker()
+    result_schema = trusted_pi_result_schema()
     repo = git_root(Path(args.repo).expanduser(), trusted_git)
     prompt_file = Path(args.prompt_file).expanduser().resolve()
     event_log = run_dir / "pi-events.jsonl"
@@ -2124,7 +2274,7 @@ def _run_in_directory(args, run_dir: Path, run_dir_fd: int) -> int:
             startup_failure("selected_provider_required")
         trusted_provider_extension = trusted_cursor_extension() if selected_provider == "cursor" else None
         try:
-            auth_values = copy_private_pi_config(
+            auth_values, denied_identities = copy_private_pi_config(
                 source_config,
                 private,
                 selected_provider,
@@ -2150,10 +2300,11 @@ def _run_in_directory(args, run_dir: Path, run_dir_fd: int) -> int:
                 "PI_BD_EVENT_LOG": str(raw_event_log),
                 "PI_BD_ARTIFACT_PATH": str(raw_artifact_path),
                 "HERMES_BASE_HEAD": git_value(repo, trusted_git, "rev-parse", "HEAD"),
-                "BD_BROKER_PYTHON": str(trusted_broker_python()),
-                "BD_BROKER_SCRIPT": str(trusted_fs_broker()),
+                "BD_BROKER_PYTHON": str(broker_python),
+                "BD_BROKER_SCRIPT": str(broker_script),
                 "BD_BROKER_ROOT_REPO": str(repo.resolve()),
                 "BD_BROKER_ROOT_RUN": str(private.path.resolve()),
+                "PI_BD_DENIED_IDENTITIES": denied_identities,
             }
         )
 
@@ -2203,30 +2354,40 @@ def _run_in_directory(args, run_dir: Path, run_dir_fd: int) -> int:
 
         stdout_tail = tail(cp.stdout, extra_values=auth_values)
         stderr_tail = tail(cp.stderr, extra_values=auth_values)
+        event_errors: list[str] = []
+        try:
+            event_bytes = read_artifact_file(raw_event_log) or b""
+            raw_event_text = event_bytes.decode("utf-8")
+            event_text = redact_text_with_values(raw_event_text, auth_values)
+        except (ArtifactError, UnicodeDecodeError):
+            raw_event_text = ""
+            event_errors = ["event_log_unreadable"]
         try:
             artifact_bytes = read_artifact_file(raw_artifact_path)
             if not artifact_bytes:
-                artifact_errors = ["artifact_missing"]
+                artifact_errors = event_errors + ["artifact_missing"]
             else:
                 artifact = json.loads(artifact_bytes.decode("utf-8"))
-                artifact_errors = validate_artifact(artifact, scope, denied_scope)
+                artifact_errors = event_errors + validate_artifact(artifact, scope, denied_scope, schema=result_schema)
+                if not event_errors:
+                    artifact_errors.extend(
+                        reconcile_write_audits(
+                            raw_event_text,
+                            artifact,
+                            repo,
+                            broker_python,
+                            broker_script,
+                            denied_identities,
+                        )
+                    )
                 artifact_blocker_reasons = artifact_blockers(artifact)
                 artifact = redact_value(artifact, auth_values)
                 if isinstance(artifact, dict):
                     artifact["event_log"] = [str(event_log)]
         except ArtifactError as exc:
-            artifact_errors = [str(exc)]
+            artifact_errors = event_errors + [str(exc)]
         except Exception as exc:  # pragma: no cover - defensive fail closed
-            artifact_errors = [redact_text_with_values(f"artifact_parse_error:{exc}", auth_values)]
-
-        try:
-            event_bytes = read_artifact_file(raw_event_log)
-            if event_bytes is None:
-                event_text = ""
-            else:
-                event_text = redact_text_with_values(event_bytes.decode("utf-8", errors="replace"), auth_values)
-        except ArtifactError:
-            artifact_errors.append("event_log_unreadable")
+            artifact_errors = event_errors + [redact_text_with_values(f"artifact_parse_error:{exc}", auth_values)]
         artifact_errors = [
             bounded_redacted_tail(error, TAIL_LIMIT, auth_values)
             for error in artifact_errors

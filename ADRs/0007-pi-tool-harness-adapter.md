@@ -79,7 +79,7 @@ Any worker self-report containing `done`, `complete`, `ready_to_merge`, or `merg
 
 `bd_bash` is argv-only and allowlist-only. It exposes no shell strings, shell expansion, arbitrary `bash -c`, default network commands, finalization commands, or marker writes.
 
-`bd_write_draft` writes only inside the repository and declared scope. It blocks `.git/**`, `.claude/**`, `.opencode/**`, trusted marker paths, and symlink escapes, and records normalized path, operation ID, `before_hash`, and `after_hash`.
+`bd_write_draft` writes only inside the repository and declared scope. It blocks `.git/**`, `.claude/**`, `.opencode/**`, trusted marker paths, hardlinks, the opened credential-source inode, and symlink escapes, and records a pre-write intent plus normalized path, operation ID, `before_hash`, and `after_hash`. The candidate lane requires every intent to have an audit, reconciles audited paths against `files_changed`, and re-hashes final bytes through the descriptor-bound broker. That reconciliation reads the worker's own writable `$HOME`, so it is self-attested provenance, not parent-held provenance.
 
 ## Failure modes
 
@@ -98,11 +98,17 @@ Production fails earlier with `agent_containment_and_credential_broker_unavailab
 
 Adapter tests and smoke evidence are necessary but not sufficient. Production dispatch remains disabled until an independently reviewed design also proves:
 
-1. enforceable containment for the worker and every descendant;
+1. enforceable OS-level containment for the worker and every descendant;
 2. explicit, least-privilege credential brokering with no ambient-secret inheritance;
 3. filesystem and network side-effect policy;
-4. teardown and reconciliation under timeout and races;
+4. teardown and reconciliation under timeout and races, with write/audit provenance held by the parent rather than read back from the worker's writable `$HOME`;
 5. no fixture, environment, or caller-command bypass;
 6. status/docs/skill metadata updated atomically from false only after all proofs pass.
 
 Until then, Pi remains non-programmatic regardless of adapter quality. OpenCode is not an executor route.
+
+### Candidate-lane state (2026-08-02)
+
+The locked `cursor/auto` candidate lane delivers requirement 2 to a reviewed standard — enumerated child environment, private `HOME`, single-provider auth projection with the refresh token stripped, refusal of refreshable credentials, and descriptor-bound scrub-on-exit — plus pinned adapter/runtime digests. Its source-separated harness executes the repository wrapper fixture directly; the wrapper authenticates and privately retains its runtime dependencies.
+
+Requirements 1 and 4 are not delivered. The worker launch has no `sandbox-exec`, `setrlimit`, or network restriction, and the write reconciliation reads evidence from inside the worker's own writable `$HOME`. `agent_containment_and_credential_broker_unavailable` is a conjunction and is not cleared by satisfying one conjunct, so the 2026-08-02 promotion attempt for this lane was adjudicated `PROMOTION_BLOCKED_FAIL_CLOSED` and the hardening is retained as candidate/test-lane groundwork only. A successful functional dogfood exercises the cooperative path and is not containment proof.

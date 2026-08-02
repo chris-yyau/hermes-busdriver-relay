@@ -18,8 +18,6 @@ import json
 import os
 import runpy
 import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -72,7 +70,8 @@ def test_a_retained_file_is_private_unshared_and_ours(wrapper, private_runtime, 
     retained = wrapper["privately_retain"](source, sha(b"broker\n"), "fs_broker")
     st = retained.lstat()
 
-    assert stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+    assert stat.S_ISREG(st.st_mode)
+    assert st.st_uid == os.getuid()
     assert st.st_nlink == 1, "a hardlink is a second name that can rewrite what we are about to run"
     assert stat.S_IMODE(st.st_mode) == 0o500
     assert stat.S_IMODE(retained.parent.lstat().st_mode) == 0o700
@@ -159,8 +158,8 @@ def test_an_anchor_swapped_after_the_digest_cannot_reach_the_child(wrapper, priv
     assert retained.read_bytes() == b"reviewed\n", "the attacker's bytes reached the retained runtime"
 
 
-def test_the_policy_blocked_launcher_names_the_retained_anchor_not_the_repo_path(wrapper):
-    """Future launch wiring names retained anchors, while production remains blocked before it."""
+def test_candidate_wrapper_names_the_retained_adapter_not_the_repo_path():
+    """The test-only wrapper retains its adapter; production never reaches this wrapper."""
     text = PI_WRAPPER.read_text()
 
     launch = text.split("def _run_in_directory", 1)[1]
@@ -182,72 +181,69 @@ def test_every_repo_byte_the_pi_wrapper_executes_is_pinned(wrapper):
     assert wrapper["TRUSTED_FS_BROKER_SHA256"] == sha(FS_BROKER.read_bytes())
 
 
-def test_the_agent_draft_pins_the_wrapper_bytes_it_runs(tmp_path):
-    """v16-r31 A2: agent-draft launched `python -I <repo path>/run-pi-busdriver-draft` — a repo
-    path, unpinned and unretained, for the process that holds the whole draft containment."""
+def test_the_agent_draft_blocks_without_a_wrapper_execution_edge():
     ns = runpy.run_path(str(AGENT_DRAFT))
     manifest = json.loads(MANIFEST.read_text())
+    source = AGENT_DRAFT.read_text()
 
-    assert ns["TRUSTED_PI_WRAPPER_SHA256"] == manifest["production_entrypoints"]["scripts/pi/run-pi-busdriver-draft"]
-    assert ns["TRUSTED_PI_WRAPPER_SHA256"] == sha(PI_WRAPPER.read_bytes())
+    assert ns["PI_PRODUCTION_BLOCKER"] == "agent_containment_and_credential_broker_unavailable"
+    assert "run-pi-busdriver-draft" not in source
+    assert manifest["adapter_runtime"]["scripts/pi/run-pi-busdriver-draft"] == sha(PI_WRAPPER.read_bytes())
 
 
-def test_a_retained_wrapper_creates_its_private_run_parent(tmp_path):
-    """Retention needs a private parent, and the helper may not assume its caller made one.
-
-    `allocate_run_dir` builds the 0700 run dir on the production path, so `materialize_trusted_
-    wrapper` raised FileNotFoundError for every other caller instead of retaining anything.
-    """
+def test_private_runtime_write_rejects_absolute_path_with_dir_fd(tmp_path: Path):
     ns = runpy.run_path(str(AGENT_DRAFT))
-    run_dir = tmp_path / "run"  # deliberately absent
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError, match="private_runtime_absolute_path_with_dir_fd"):
+            ns["write_private_runtime_file"](runtime / "tool", b"x", dir_fd=fd)
+    finally:
+        os.close(fd)
+    assert not (runtime / "tool").exists()
 
-    ns["ensure_private_run_dir"](run_dir)
 
-    st = run_dir.lstat()
-    assert stat.S_ISDIR(st.st_mode)
-    assert stat.S_IMODE(st.st_mode) == 0o700
-    assert st.st_uid == os.getuid()
-
-
-def test_a_group_or_other_readable_run_parent_is_refused(tmp_path):
-    """0755 leaks retained bytes to same-host readers; 0700 is privacy, not same-UID immutability."""
+def test_private_runtime_write_rejects_parent_traversal_with_dir_fd(tmp_path: Path):
     ns = runpy.run_path(str(AGENT_DRAFT))
-    run_dir = tmp_path / "loose"
-    run_dir.mkdir(mode=0o755)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError, match="private_runtime_relative_path_invalid"):
+            ns["write_private_runtime_file"]("../escaped", b"x", dir_fd=fd)
+    finally:
+        os.close(fd)
+    assert not (tmp_path / "escaped").exists()
 
-    with pytest.raises(SystemExit) as excinfo:
-        ns["ensure_private_run_dir"](run_dir)
 
-    assert json.loads(str(excinfo.value.code))["error"] == "private_run_dir_integrity_failed"
-
-
-def test_a_symlinked_run_parent_is_refused_rather_than_followed(tmp_path):
-    """mkdir(exist_ok=True) succeeds on a symlink-to-dir, so the check is lstat, not stat —
-    otherwise the retained runtime lands wherever the link points."""
+def test_private_runtime_closing_proof_rejects_a_new_hardlink(tmp_path: Path, monkeypatch):
     ns = runpy.run_path(str(AGENT_DRAFT))
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir(mode=0o700)
-    run_dir = tmp_path / "linked"
-    run_dir.symlink_to(elsewhere)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    target = runtime / "tool"
+    alias = tmp_path / "alias"
+    real_lstat = os.lstat
+    linked = False
 
-    with pytest.raises(SystemExit) as excinfo:
-        ns["ensure_private_run_dir"](run_dir)
+    def link_before_lstat(path, *, dir_fd=None):
+        nonlocal linked
+        if not linked:
+            os.link(target, alias)
+            linked = True
+        return real_lstat(path, dir_fd=dir_fd)
 
-    assert json.loads(str(excinfo.value.code))["error"] == "private_run_dir_integrity_failed"
+    monkeypatch.setattr(ns["write_private_runtime_file"].__globals__["os"], "lstat", link_before_lstat)
+
+    with pytest.raises(OSError, match="private_runtime_integrity_failed"):
+        ns["write_private_runtime_file"](target, b"x")
+
+    assert linked
+    assert not target.exists()
+    assert alias.read_bytes() == b"x"
 
 
-def test_a_non_directory_run_parent_is_refused(tmp_path):
-    ns = runpy.run_path(str(AGENT_DRAFT))
-    run_dir = tmp_path / "regular-file"
-    run_dir.write_text("not a directory")
-
-    with pytest.raises(SystemExit) as excinfo:
-        ns["ensure_private_run_dir"](run_dir)
-
-    assert json.loads(str(excinfo.value.code))["error"] == "private_run_dir_unavailable"
-
-
-def test_no_pinned_runtime_pins_itself(tmp_path):
+def test_no_pinned_runtime_pins_itself():
     """A file whose own bytes contain its own digest cannot exist: writing the pin changes the
     digest the pin must equal. The graph has to stay a DAG."""
     for path in (PI_WRAPPER, AGENT_DRAFT, FS_BROKER, PI_TOOLS):
@@ -290,7 +286,8 @@ def test_every_production_script_pins_the_trusted_interpreter():
     ]
 
     assert scripts, "no production python entrypoint was found at all"
-    offenders = [str(path.relative_to(ROOT)) for path in scripts if shebang(path) != trusted]
+    accepted = {trusted, trusted + b" -I"}
+    offenders = [str(path.relative_to(ROOT)) for path in scripts if shebang(path) not in accepted]
     assert offenders == [], f"these resolve their interpreter through PATH: {offenders}"
 
 

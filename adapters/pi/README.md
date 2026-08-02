@@ -42,14 +42,14 @@ pi \
   --mode json
 ```
 
-`bd_bash` is argv-only and allowlist-only. Git status/diff forms strip risky Git environment and require `core.fsmonitor=false`, `--no-ext-diff`, and `--no-textconv` where applicable. `bd_read` and `bd_write_draft` refuse trusted marker/state paths, common secret paths, gitignored paths, symlinks, and oversized reads. `bd_write_draft` only writes inside repo root and declared scope, records before/after hashes, and returns draft evidence only.
+`bd_bash` is argv-only and allowlist-only. Git status/diff forms strip risky Git environment and require `core.fsmonitor=false`, `--no-ext-diff`, and `--no-textconv` where applicable. `bd_read` and `bd_write_draft` refuse trusted marker/state paths, common secret paths, gitignored paths, symlinks, hardlinks, the opened credential-source inode, and oversized reads. `bd_write_draft` only writes inside repo root and declared scope, records a pre-write intent plus before/after hashes, and returns draft evidence only. The candidate lane reconciles those intents against audits and re-hashes final bytes through the broker; because that evidence is read from the worker's own writable `$HOME`, it is self-attested provenance and not production containment.
 
 ## Launcher
 
 Both commands below are negative production capability probes and are expected to return blocked:
 
 ```bash
-scripts/pi/run-pi-busdriver-draft \
+/usr/bin/python3 -I scripts/pi/run-pi-busdriver-draft \
   --repo /path/to/repo \
   --prompt-file /path/to/prompt.md \
   --run-dir /path/to/run \

@@ -109,7 +109,7 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         ("hermes-busdriver-deliver", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec", "gh", "jq", "bash", "python3")}),
         ("hermes-busdriver-delivery-status", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "git-real", "sandbox-exec", "gh", "jq", "python3")}),
         ("hermes-busdriver-pr-grind-check", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("gh", "git", "jq", "bash", "python3")}),
-        ("hermes-busdriver-agent-draft", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "gh", "pi", "bash", "python3")}),
+        ("hermes-busdriver-agent-draft", "TRUSTED_EXECUTABLE_DIGESTS", {k: executables[k] for k in ("git", "gh", "bash", "python3")}),
         # v16-r34c: the git-only consumers carry the same table shape as the git/gh/jq ones rather
         # than a lone TRUSTED_GIT_DIGEST/TRUSTED_GIT_SHA256 constant each, so one assertion covers
         # every copy and a new consumer cannot invent a third spelling.
@@ -137,9 +137,9 @@ def consumer_pins(manifest: dict) -> list[tuple[str, str, object]]:
         # straight onto node's `-e`. It defines every tool boundary in the run, so it is in the
         # closure like the broker beside it.
         ("run-pi-busdriver-draft", "TRUSTED_PI_TOOLS_SHA256", manifest["adapter_runtime"]["adapters/pi/busdriver-tools.ts"]),
-        # Agent-draft executes only the Pi child wrapper. OpenCode has no
-        # production wrapper edge or executable pin.
-        ("hermes-busdriver-agent-draft", "TRUSTED_PI_WRAPPER_SHA256", entrypoints["scripts/pi/run-pi-busdriver-draft"]),
+        # Artifact policy is read from authenticated bytes before the worker starts, so a scoped
+        # worker edit cannot weaken validation later in the same run.
+        ("run-pi-busdriver-draft", "TRUSTED_PI_RESULT_SCHEMA_SHA256", manifest["adapter_runtime"]["adapters/pi/pi-result.schema.json"]),
         # --- embedded plugin-script pins ---
         # `plugin_scripts` is the union across consumers, so each consumer binds the rows it runs
         # rather than the whole section: the checker runs these four, status runs the resolver.
@@ -229,13 +229,9 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
     ]:
         assert str(namespaces[script][constant]) == str(Path(manifest["executables"][name]["path"])), f"{script}:{constant}"
 
-    # The AGENT-lane anchors still resolve, and must: `pi` is an npm shim symlinking into
-    # node_modules, so the manifest names the anchor an operator would recognise while the constant
-    # holds what actually gets read. They are outside the root-owned contract by construction —
-    # it lives under $HOME, whose ancestry this UID can write — which is the same fact that keeps
-    # agent dispatch policy_blocked. Resolving here asserts the pin, not a safety property.
+    # Adapter-lane anchors resolve: npm shims name the operator-facing anchor while the wrapper reads
+    # the resolved source. They remain outside the root-owned contract by construction.
     for script, constant, name in [
-        ("hermes-busdriver-agent-draft", "TRUSTED_PI", "pi"),
         ("run-pi-busdriver-draft", "TRUSTED_NODE", "node"),
         # v16-r27 item 7: the Pi wrapper no longer PATH-resolves its anchor, so it has one to pin.
         ("run-pi-busdriver-draft", "TRUSTED_PI", "pi"),
@@ -294,7 +290,6 @@ def test_trusted_runtime_manifest_matches_embedded_runtime_pins(manifest, namesp
         "scripts/check-required-checks.sh",
         "scripts/hermes-busdriver-deliver",
         "scripts/hermes-busdriver-relay-brief",
-        "scripts/pi/run-pi-busdriver-draft",
     }
     assert set(manifest["production_entrypoints"]) == expected_production_entrypoints
     for relative, digest in manifest["production_entrypoints"].items():
