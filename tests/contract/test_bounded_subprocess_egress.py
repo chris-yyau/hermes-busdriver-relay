@@ -480,20 +480,22 @@ def test_lingering_pipe_cleanup_signals_before_the_leader_is_reaped(module_path:
 
 
 @pytest.mark.parametrize("module_path", BOUNDED_CAPTURE_MODULES)
-def test_run_bounded_refuses_to_return_with_a_live_stdin_feeder(module_path: str, monkeypatch):
+def test_run_bounded_feeds_stdin_without_a_background_thread(module_path: str, monkeypatch):
     ns = load(module_path)
     globals_ = ns["_bounded_communicate"].__globals__
-    state = {"joins": 0}
+    state = {"writes": bytearray(), "blocking": [], "closed": False}
 
     class DrainThread:
         def join(self, timeout=None): pass
         def is_alive(self): return False
 
-    class StdinThread:
-        def __init__(self, **_kwargs): pass
-        def start(self): pass
-        def join(self, timeout=None): state["joins"] += 1
-        def is_alive(self): return True
+    class ForbiddenFeederThread:
+        def __init__(self, **_kwargs):
+            raise AssertionError("stdin must be fed by the bounded main loop, not a background thread")
+
+    class Stdin:
+        def fileno(self): return 99
+        def close(self): state["closed"] = True
 
     class ExitWatch:
         def exited(self): return True
@@ -501,7 +503,7 @@ def test_run_bounded_refuses_to_return_with_a_live_stdin_feeder(module_path: str
 
     class Process:
         pid = 4242
-        stdin = object()
+        stdin = Stdin()
         stdout = object()
         stderr = object()
         returncode = None
@@ -513,16 +515,23 @@ def test_run_bounded_refuses_to_return_with_a_live_stdin_feeder(module_path: str
     def drains(_stdout, _stderr, _limit):
         return [DrainThread(), DrainThread()], bytearray(), bytearray(), [0], [0], ns["threading"].Event()
 
-    monkeypatch.setattr(globals_["threading"], "Thread", StdinThread)
+    def write(_fd, data):
+        state["writes"].extend(data)
+        return len(data)
+
+    monkeypatch.setattr(globals_["threading"], "Thread", ForbiddenFeederThread)
+    monkeypatch.setattr(globals_["os"], "set_blocking", lambda fd, value: state["blocking"].append((fd, value)))
+    monkeypatch.setattr(globals_["os"], "write", write)
     monkeypatch.setitem(globals_, "_start_bounded_drains", drains)
     monkeypatch.setitem(globals_, "_bounded_exit_watch", lambda _process: ExitWatch())
     monkeypatch.setitem(globals_, "_kill_bounded_group", lambda _process: None)
 
     result = ns["_bounded_communicate"](Process(), ["fixed-helper"], 30, b"input", 1024)
 
-    assert result.returncode == 125
-    assert result.stderr == "stdin_feeder_cleanup_failed"
-    assert state["joins"] == 1
+    assert result.returncode == 0
+    assert bytes(state["writes"]) == b"input"
+    assert state["blocking"] == [(99, False)]
+    assert state["closed"] is True
 
 
 @pytest.mark.parametrize("module_path", BOUNDED_CAPTURE_MODULES)

@@ -467,8 +467,8 @@ def test_every_production_os_write_lives_in_a_sanctioned_primitive():
     into a new function. A new function is exactly what this notices.
     """
     found = _call_sites("os", {"write"})
-    # feed_stdin writes to a subprocess PIPE, not a trusted artifact; it has no file to prove.
-    found = {(m, f) for m, f in found if f != "feed_stdin"}
+    # _bounded_communicate writes to a subprocess PIPE, not a trusted artifact; it has no file to prove.
+    found = {(m, f) for m, f in found if f != "_bounded_communicate"}
 
     unsanctioned = found - SANCTIONED_OS_WRITE_SITES
     assert unsanctioned == set(), (

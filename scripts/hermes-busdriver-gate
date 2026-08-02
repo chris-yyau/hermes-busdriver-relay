@@ -176,7 +176,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
     """Bound output, deadline, descendants, drain and reap for a new-session child."""
     exit_watch = None
     threads = []
-    stdin_thread = None
+    stdin_fd = None
+    stdin_view = memoryview(stdin_bytes) if stdin_bytes is not None else memoryview(b"")
+    stdin_offset = 0
     try:
         try:
             exit_watch = _bounded_exit_watch(process)
@@ -201,29 +203,47 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
             process.stdout, process.stderr, limit
         )
 
-        if process.stdin is not None:
-            def feed_stdin() -> None:
-                try:
-                    if stdin_bytes is not None:
-                        process.stdin.write(stdin_bytes)
-                        process.stdin.flush()
-                except (OSError, BrokenPipeError, ValueError):
-                    pass
-                finally:
-                    try:
-                        process.stdin.close()
-                    except (OSError, ValueError, AttributeError):
-                        pass
-            stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
-            stdin_thread.start()
-
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         timed_out = False
         killed = False
         observed_exit = False
         watch_error = None
+        if process.stdin is not None:
+            try:
+                stdin_fd = process.stdin.fileno()
+                os.set_blocking(stdin_fd, False)
+            except (OSError, ValueError, AttributeError) as exc:
+                watch_error = f"stdin_setup_failed:{type(exc).__name__}"
+                _kill_bounded_group(process)
+                killed = True
+            if stdin_fd is not None and not stdin_view:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
+                stdin_fd = None
         try:
-            while True:
+            while watch_error is None:
+                if stdin_fd is not None:
+                    try:
+                        written = os.write(stdin_fd, stdin_view[stdin_offset:])
+                        if written <= 0:
+                            watch_error = "stdin_write_failed"
+                            _kill_bounded_group(process)
+                            killed = True
+                            break
+                        stdin_offset += written
+                        if stdin_offset == len(stdin_view):
+                            process.stdin.close()
+                            stdin_fd = None
+                    except BlockingIOError:
+                        pass
+                    except (BrokenPipeError, OSError, ValueError):
+                        try:
+                            process.stdin.close()
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                        stdin_fd = None
                 if overflow.is_set():
                     _kill_bounded_group(process)
                     killed = True
@@ -245,6 +265,13 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
                 time.sleep(0.01)
         finally:
             exit_watch.close()
+
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError, AttributeError):
+                pass
+        stdin_fd = None
 
         # The exit watch reports without waitpid(), so the leader remains unreaped and its numeric PID
         # cannot be reused until every possible process-group signal below has finished.
@@ -271,8 +298,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         for thread in threads:
             thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
-        if stdin_thread is not None:
-            stdin_thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
         if any(thread.is_alive() for thread in threads):
             # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
             out_seen[0] = max(out_seen[0], limit + 1)
@@ -280,9 +305,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         if watch_error is not None:
             return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
-        if stdin_thread is not None and stdin_thread.is_alive():
-            error = "stdin_feeder_cleanup_failed"
-            return BoundedOutput(125, "" if text else b"", error if text else error.encode(), False, False)
         code = process.returncode if process.returncode is not None else 125
         if timed_out:
             code = 124
@@ -308,11 +330,6 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
         for thread in threads:
             try:
                 thread.join(timeout=0.1)
-            except BaseException:
-                pass
-        if stdin_thread is not None:
-            try:
-                stdin_thread.join(timeout=0.1)
             except BaseException:
                 pass
         raise

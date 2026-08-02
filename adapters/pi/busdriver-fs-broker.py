@@ -447,9 +447,10 @@ MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 @cache
 def denied_identities() -> frozenset[tuple[int, int]]:
     identities: set[tuple[int, int]] = set()
-    for value in os.environ.get(DENIED_IDENTITIES_ENV, "").split(","):
-        if not value:
-            continue
+    configured = os.environ.get(DENIED_IDENTITIES_ENV, "")
+    if not configured:
+        return frozenset()
+    for value in configured.split(","):
         if not re.fullmatch(r"[0-9]+:[0-9]+", value):
             raise fail("denied_identity_config_invalid")
         device, inode = value.split(":", 1)

@@ -303,11 +303,12 @@ def test_credential_source_identity_is_refused_for_read_and_write(repo: Path):
     assert target.read_text() == "hello\n"
 
 
-def test_malformed_denied_identity_fails_broker_startup_closed(repo: Path):
+@pytest.mark.parametrize("configured", ["malformed", ",", "1:2,", ",1:2", "1:2,,3:4"])
+def test_malformed_denied_identity_fails_broker_startup_closed(repo: Path, configured: str):
     assert call(
         {"op": "read", "root": "repo", "rel": "src/app.txt"},
         repo=repo,
-        env={"BD_BROKER_DENIED_IDENTITIES": "malformed"},
+        env={"BD_BROKER_DENIED_IDENTITIES": configured},
     ) == {"ok": False, "error": "denied_identity_config_invalid"}
 
 
