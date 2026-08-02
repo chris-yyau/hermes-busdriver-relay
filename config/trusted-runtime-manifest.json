@@ -1,9 +1,9 @@
 {
   "adapter_runtime": {
-    "adapters/pi/busdriver-fs-broker.py": "35716fd1ec501d0d0e3276b5078b3cf58c6d6d4453027c3254e2bd7e58525811",
+    "adapters/pi/busdriver-fs-broker.py": "85b5e0ab4cf3fa0cba6e63263fa0d181775c05d22d5185a8e29e316a0645ad20",
     "adapters/pi/busdriver-tools.ts": "0532812014bb01365636e1c94c5049e4e406541f2bb3dd6323381003986df17e",
     "adapters/pi/pi-result.schema.json": "630f4c6912bf9cc90d2af15f358e210c313dd6aea43aa64ee512780c07cdc9a1",
-    "scripts/pi/run-pi-busdriver-draft": "8fe6ef6a3e60f2854089d818cf61d75f34488fe0044ce1d00f4ded1266ca41f0"
+    "scripts/pi/run-pi-busdriver-draft": "2ca4300511c1348f84f306315cec077a04d40ab69d992b1889288355fb880752"
   },
   "busdriver": {
     "commit": "835dc1784a7ae5c34a5f8f58d6731a482f64df0a",
@@ -11,20 +11,20 @@
   },
   "delivery_status_runtime": {
     "scripts/hermes-busdriver-agent-balance-plan": "cb97a034066370a01b388f56c5b253c19c8ae545269986f63037d4a461e2109b",
-    "scripts/hermes-busdriver-agent-draft": "a092eee3fae88b8ea5d7f75de52d715d5a81b94ccfdd457ab5e6e0f30f682fd3",
+    "scripts/hermes-busdriver-agent-draft": "6a4eacbc4a00f7b05476ef1b943c696142d704f478929da62b1a5b554e39599b",
     "scripts/hermes-busdriver-agent-smoke": "63b49a1f668c37be4650f9328822263462bfae4784d39d4099ddbd47a9c50ac2",
-    "scripts/hermes-busdriver-delivery-status": "7129487c5c96ee33d751b994738d59ab6802708c52d9e2421c6f0ccc3f18093a",
+    "scripts/hermes-busdriver-delivery-status": "15f42281347e5c5f84f0a01690da4d0c8c0cfdf8e813603e82ca508852979be5",
     "scripts/hermes-busdriver-finalization-contract-status": "fca49c884f185fe0ad070fba545e3a4d50dce4cb977344f1300d14e7a48d41bc",
-    "scripts/hermes-busdriver-finalization-readiness": "9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a",
-    "scripts/hermes-busdriver-gate": "83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5",
-    "scripts/hermes-busdriver-litmus-status": "35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76",
-    "scripts/hermes-busdriver-lock": "16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9",
-    "scripts/hermes-busdriver-pr-grind-check": "e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212",
-    "scripts/hermes-busdriver-pr-grind-loop": "975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653",
-    "scripts/hermes-busdriver-relay-role": "32376d01a67cb51991df780c856bc8dd86a2a1d9ccec50f84fa8e2ecefe091ae",
+    "scripts/hermes-busdriver-finalization-readiness": "b9217ddbbe1fedb9245a702175d81bec2acab0809afc350aa77f74fae7ffefee",
+    "scripts/hermes-busdriver-gate": "6ab86fe731def57b26d94cd6c0dd6e86fbb8f59ac6759f620052a6f88b216396",
+    "scripts/hermes-busdriver-litmus-status": "2d2c8cd148fbbd82571d57bd03631c1b0bbf5aa2b074fa2c1ba95bb4c752f3ec",
+    "scripts/hermes-busdriver-lock": "005e5598f7cd1e9e38780d630ff6346f89ba792a38c3e01619e639a02aa8a4f8",
+    "scripts/hermes-busdriver-pr-grind-check": "88b9071a9de4e3c3885a84f8cfbe210209f22da51dcf316aaadaa57a5cfc8155",
+    "scripts/hermes-busdriver-pr-grind-loop": "c7710d5b4380b235a37d24b8cd27f3d0b41338bbbf535ba2f6356fd633b117b4",
+    "scripts/hermes-busdriver-relay-role": "03d2917ac3eb4d2d3ccc1bc9f1049e285c982284b42dfe215c9ca11b55095542",
     "scripts/hermes-busdriver-runtime-check": "bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae",
-    "scripts/hermes-busdriver-smoke": "8e9bd4a7849390de5e0c44cd220f2a68a37810f7f62112094bb8bcf5ba0fa7df",
-    "scripts/hermes-busdriver-status": "da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d"
+    "scripts/hermes-busdriver-smoke": "0479e128ce1b892020b9e65f41d5e7d206ca1df65041571df40db2be24300c4f",
+    "scripts/hermes-busdriver-status": "beb56c6bb6208567109b7cb721484139dd49e8c83d1ee00cc93c01938c1b27c6"
   },
   "executables": {
     "bash": {
@@ -81,29 +81,29 @@
   "production_entrypoints": {
     "scripts/check-required-checks.sh": "faeb1ffeebf99634c6e36f6d2e2fdf91180beb95c097e45ad0d0a0ef347040b3",
     "scripts/hermes-busdriver-agent-balance-plan": "cb97a034066370a01b388f56c5b253c19c8ae545269986f63037d4a461e2109b",
-    "scripts/hermes-busdriver-agent-draft": "a092eee3fae88b8ea5d7f75de52d715d5a81b94ccfdd457ab5e6e0f30f682fd3",
+    "scripts/hermes-busdriver-agent-draft": "6a4eacbc4a00f7b05476ef1b943c696142d704f478929da62b1a5b554e39599b",
     "scripts/hermes-busdriver-agent-smoke": "63b49a1f668c37be4650f9328822263462bfae4784d39d4099ddbd47a9c50ac2",
-    "scripts/hermes-busdriver-deliver": "f68ffbda524cec731a3d461d0084cf9b53d0574fe4bf9dff50b53dafd658ae2e",
-    "scripts/hermes-busdriver-delivery-status": "7129487c5c96ee33d751b994738d59ab6802708c52d9e2421c6f0ccc3f18093a",
+    "scripts/hermes-busdriver-deliver": "9240a5ca1cb4e019258a5239fdcd9c9edf93d11b108d3fe30d6868c2a518f877",
+    "scripts/hermes-busdriver-delivery-status": "15f42281347e5c5f84f0a01690da4d0c8c0cfdf8e813603e82ca508852979be5",
     "scripts/hermes-busdriver-finalization-contract-status": "fca49c884f185fe0ad070fba545e3a4d50dce4cb977344f1300d14e7a48d41bc",
-    "scripts/hermes-busdriver-finalization-readiness": "9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a",
-    "scripts/hermes-busdriver-gate": "83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5",
-    "scripts/hermes-busdriver-litmus-status": "35208a31a2098d7303b6139f08cd56881f2224bd2d4d382752f5a5713b7d0f76",
-    "scripts/hermes-busdriver-lock": "16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9",
-    "scripts/hermes-busdriver-pr-grind-check": "e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212",
-    "scripts/hermes-busdriver-pr-grind-loop": "975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653",
-    "scripts/hermes-busdriver-relay-brief": "782dae18742af329d7e0ed39c9adeeb9080fb65246e95740a4de6d7183c89204",
-    "scripts/hermes-busdriver-relay-role": "32376d01a67cb51991df780c856bc8dd86a2a1d9ccec50f84fa8e2ecefe091ae",
+    "scripts/hermes-busdriver-finalization-readiness": "b9217ddbbe1fedb9245a702175d81bec2acab0809afc350aa77f74fae7ffefee",
+    "scripts/hermes-busdriver-gate": "6ab86fe731def57b26d94cd6c0dd6e86fbb8f59ac6759f620052a6f88b216396",
+    "scripts/hermes-busdriver-litmus-status": "2d2c8cd148fbbd82571d57bd03631c1b0bbf5aa2b074fa2c1ba95bb4c752f3ec",
+    "scripts/hermes-busdriver-lock": "005e5598f7cd1e9e38780d630ff6346f89ba792a38c3e01619e639a02aa8a4f8",
+    "scripts/hermes-busdriver-pr-grind-check": "88b9071a9de4e3c3885a84f8cfbe210209f22da51dcf316aaadaa57a5cfc8155",
+    "scripts/hermes-busdriver-pr-grind-loop": "c7710d5b4380b235a37d24b8cd27f3d0b41338bbbf535ba2f6356fd633b117b4",
+    "scripts/hermes-busdriver-relay-brief": "215d5c13129c9e7c9d9fe8aca04817acb557d210287caaa7890ad70b58270db3",
+    "scripts/hermes-busdriver-relay-role": "03d2917ac3eb4d2d3ccc1bc9f1049e285c982284b42dfe215c9ca11b55095542",
     "scripts/hermes-busdriver-runtime-check": "bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae",
-    "scripts/hermes-busdriver-smoke": "8e9bd4a7849390de5e0c44cd220f2a68a37810f7f62112094bb8bcf5ba0fa7df",
-    "scripts/hermes-busdriver-status": "da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d"
+    "scripts/hermes-busdriver-smoke": "0479e128ce1b892020b9e65f41d5e7d206ca1df65041571df40db2be24300c4f",
+    "scripts/hermes-busdriver-status": "beb56c6bb6208567109b7cb721484139dd49e8c83d1ee00cc93c01938c1b27c6"
   },
   "refresh_contract": "Update authenticated runtime bytes, Busdriver commit/version identity, every embedded consumer pin, and every production_entrypoints digest in the same reviewed diff; then run tests/contract/test_trusted_runtime_manifest.py.",
   "schema": "hermes-busdriver-trusted-runtime/v1",
   "scripts": {
-    "hermes-busdriver-gate": "83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5",
-    "hermes-busdriver-lock": "16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9",
-    "hermes-busdriver-pr-grind-check": "e68251118772df8752c38fb958748cd5751a8a822d549b625fd756c86026c212",
-    "hermes-busdriver-pr-grind-loop": "975f2e2c94b7cb212adfd4d4c61b9c5d3cac32db3566f93da4ca04df6dcef653"
+    "hermes-busdriver-gate": "6ab86fe731def57b26d94cd6c0dd6e86fbb8f59ac6759f620052a6f88b216396",
+    "hermes-busdriver-lock": "005e5598f7cd1e9e38780d630ff6346f89ba792a38c3e01619e639a02aa8a4f8",
+    "hermes-busdriver-pr-grind-check": "88b9071a9de4e3c3885a84f8cfbe210209f22da51dcf316aaadaa57a5cfc8155",
+    "hermes-busdriver-pr-grind-loop": "c7710d5b4380b235a37d24b8cd27f3d0b41338bbbf535ba2f6356fd633b117b4"
   }
 }

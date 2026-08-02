@@ -204,6 +204,45 @@ def test_private_runtime_write_rejects_absolute_path_with_dir_fd(tmp_path: Path)
     assert not (runtime / "tool").exists()
 
 
+def test_private_runtime_write_rejects_parent_traversal_with_dir_fd(tmp_path: Path):
+    ns = runpy.run_path(str(AGENT_DRAFT))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError, match="private_runtime_relative_path_invalid"):
+            ns["write_private_runtime_file"]("../escaped", b"x", dir_fd=fd)
+    finally:
+        os.close(fd)
+    assert not (tmp_path / "escaped").exists()
+
+
+def test_private_runtime_closing_proof_rejects_a_new_hardlink(tmp_path: Path, monkeypatch):
+    ns = runpy.run_path(str(AGENT_DRAFT))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    target = runtime / "tool"
+    alias = tmp_path / "alias"
+    real_lstat = os.lstat
+    linked = False
+
+    def link_before_lstat(path, *, dir_fd=None):
+        nonlocal linked
+        if not linked:
+            os.link(target, alias)
+            linked = True
+        return real_lstat(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(ns["write_private_runtime_file"].__globals__["os"], "lstat", link_before_lstat)
+
+    with pytest.raises(OSError, match="private_runtime_integrity_failed"):
+        ns["write_private_runtime_file"](target, b"x")
+
+    assert linked
+    assert not target.exists()
+    assert alias.read_bytes() == b"x"
+
+
 def test_no_pinned_runtime_pins_itself():
     """A file whose own bytes contain its own digest cannot exist: writing the pin changes the
     digest the pin must equal. The graph has to stay a DAG."""

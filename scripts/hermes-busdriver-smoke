@@ -257,6 +257,8 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         for thread in threads:
             thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
         if any(thread.is_alive() for thread in threads):
             # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
             out_seen[0] = max(out_seen[0], limit + 1)
@@ -264,6 +266,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         if watch_error is not None:
             return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        if stdin_thread is not None and stdin_thread.is_alive():
+            error = "stdin_feeder_cleanup_failed"
+            return BoundedOutput(125, "" if text else b"", error if text else error.encode(), False, False)
         code = process.returncode if process.returncode is not None else 125
         if timed_out:
             code = 124
@@ -446,10 +451,10 @@ TRUSTED_HELPER_PATHS = {
     "finalization_readiness": FINALIZATION_READINESS,
     "gate": GATE,
 }
-TRUSTED_HELPER_DIGESTS = {'finalization_readiness': '9cdfcaf90f5745b7282fb2e27bcec1aaced6491ac4039966c266d280c79f6f5a',
- 'gate': '83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5',
+TRUSTED_HELPER_DIGESTS = {'finalization_readiness': 'b9217ddbbe1fedb9245a702175d81bec2acab0809afc350aa77f74fae7ffefee',
+ 'gate': '6ab86fe731def57b26d94cd6c0dd6e86fbb8f59ac6759f620052a6f88b216396',
  'runtime': 'bd914922bd2697c22eceaffb3babdb3d56238fb8b2250953015d4b5dfb4f25ae',
- 'status': 'da195d97b85e3334f900ee706fb98c866d58dd84df17b8b5ae503ef5fa2c224d'}
+ 'status': 'beb56c6bb6208567109b7cb721484139dd49e8c83d1ee00cc93c01938c1b27c6'}
 MAX_TRUSTED_HELPER_BYTES = 1024 * 1024
 TRUSTED_HELPER_STDIN_LOADER = (
     "import sys\n"

@@ -441,6 +441,7 @@ def fd_identity(st: os.stat_result) -> tuple:
 
 
 DENIED_IDENTITIES_ENV = "BD_BROKER_DENIED_IDENTITIES"
+MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 
 
 @cache
@@ -452,7 +453,15 @@ def denied_identities() -> frozenset[tuple[int, int]]:
         if not re.fullmatch(r"[0-9]+:[0-9]+", value):
             raise fail("denied_identity_config_invalid")
         device, inode = value.split(":", 1)
-        identities.add((int(device), int(inode)))
+        if len(device) > 20 or len(inode) > 20:
+            raise fail("denied_identity_config_invalid")
+        try:
+            identity = (int(device), int(inode))
+        except ValueError as exc:
+            raise fail("denied_identity_config_invalid") from exc
+        if any(component > MAX_IDENTITY_COMPONENT for component in identity):
+            raise fail("denied_identity_config_invalid")
+        identities.add(identity)
     return frozenset(identities)
 
 

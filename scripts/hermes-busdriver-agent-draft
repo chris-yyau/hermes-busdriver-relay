@@ -31,7 +31,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts" / "hermes-busdriver-gate"
-TRUSTED_GATE_SHA256 = '83e8e034a94006708fe8bcdd05a87b9f726b41c01bdd7545226254cea5c04af5'
+TRUSTED_GATE_SHA256 = '6ab86fe731def57b26d94cd6c0dd6e86fbb8f59ac6759f620052a6f88b216396'
 TRUSTED_EXECUTABLE_DIGESTS = {
     # git's digest is the CommandLineTools multi-call shim's, byte-identical to python3's (one
     # inode). A supply-chain pin, not an identity check — the path is the identity.
@@ -49,7 +49,7 @@ TRUSTED_EXECUTABLE_SOURCES = {
     "python3": Path("/usr/bin/python3"),
 }
 LOCK = ROOT / "scripts" / "hermes-busdriver-lock"
-TRUSTED_LOCK_SHA256 = '16fbb5c631ab79115f2c24d3ffbbb047a0a3e1885a9613b6bb5adef8c2a128a9'
+TRUSTED_LOCK_SHA256 = '005e5598f7cd1e9e38780d630ff6346f89ba792a38c3e01619e639a02aa8a4f8'
 PI_PRODUCTION_BLOCKER = "agent_containment_and_credential_broker_unavailable"
 PI_BLOCKED_BOOTSTRAP = (
     f"import sys; sys.stderr.write({(PI_PRODUCTION_BLOCKER + chr(10))!r}); raise SystemExit(2)"
@@ -326,6 +326,8 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         for thread in threads:
             thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=max(0.0, reap_deadline - time.monotonic()))
         if any(thread.is_alive() for thread in threads):
             # Cleanup itself is bounded. Refuse any partial bytes if a pipe still cannot be closed.
             out_seen[0] = max(out_seen[0], limit + 1)
@@ -333,6 +335,9 @@ def _bounded_communicate(process, cmd, timeout, stdin_bytes, limit, text=True) -
 
         if watch_error is not None:
             return BoundedOutput(125, "" if text else b"", watch_error if text else watch_error.encode(), False, False)
+        if stdin_thread is not None and stdin_thread.is_alive():
+            error = "stdin_feeder_cleanup_failed"
+            return BoundedOutput(125, "" if text else b"", error if text else error.encode(), False, False)
         code = process.returncode if process.returncode is not None else 125
         if timed_out:
             code = 124
@@ -992,8 +997,12 @@ def write_private_runtime_file(
     # O_RDWR, not O_WRONLY: the closing digest is read back through THIS descriptor, and a
     # write-only one cannot be read (EBADF). Reopening the name to read it instead would resolve
     # the name a second time, which is the very thing the descriptor is here to avoid.
-    if dir_fd is not None and os.path.isabs(path):
-        raise OSError("private_runtime_absolute_path_with_dir_fd")
+    if dir_fd is not None:
+        raw_path = os.fspath(path)
+        if os.path.isabs(raw_path):
+            raise OSError("private_runtime_absolute_path_with_dir_fd")
+        if raw_path in {"", ".", ".."} or os.path.basename(raw_path) != raw_path:
+            raise OSError("private_runtime_relative_path_invalid")
     fd = os.open(
         path,
         os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -1036,7 +1045,7 @@ def write_private_runtime_file(
         if digest.hexdigest() != hashlib.sha256(data).hexdigest():
             raise OSError("private_runtime_integrity_failed")
         landed = os.lstat(path, dir_fd=dir_fd)
-        if (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
+        if landed.st_nlink != 1 or (landed.st_dev, landed.st_ino) != (created.st_dev, created.st_ino):
             # The digest proved OUR inode is intact; this proves `path` still reaches it. A rename
             # over the name publishes someone else's bytes under the name the caller will execute.
             raise OSError("private_runtime_integrity_failed")

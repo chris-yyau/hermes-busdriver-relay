@@ -1187,8 +1187,17 @@ def test_cursor_candidate_canonicalizes_route_and_clears_ambient_overrides(
     ], env={**os.environ, "PI_BD_PROVIDER": "xai", "PI_BD_MODEL": "xai/grok", "PI_BIN": "/tmp/other.js"})
     data = json.loads(cp.stdout)
 
-    assert data["argv"].count("--provider") + sum(arg.startswith("--provider=") for arg in data["argv"]) == 1
-    assert data["argv"].count("--model") + sum(arg.startswith("--model=") for arg in data["argv"]) == 1
+    def option_values(flag: str) -> list[str]:
+        values = []
+        for index, arg in enumerate(data["argv"]):
+            if arg == flag:
+                values.append(data["argv"][index + 1])
+            elif arg.startswith(flag + "="):
+                values.append(arg.split("=", 1)[1])
+        return values
+
+    assert option_values("--provider") == ["cursor"]
+    assert option_values("--model") == ["auto"]
     assert data["provider_env"] is None
     assert data["model_env"] is None
     assert data["pi_bin_env"] is None

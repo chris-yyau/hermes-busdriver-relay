@@ -311,6 +311,14 @@ def test_malformed_denied_identity_fails_broker_startup_closed(repo: Path):
     ) == {"ok": False, "error": "denied_identity_config_invalid"}
 
 
+def test_oversized_denied_identity_fails_broker_startup_closed(repo: Path):
+    assert call(
+        {"op": "read", "root": "repo", "rel": "src/app.txt"},
+        repo=repo,
+        env={"BD_BROKER_DENIED_IDENTITIES": f"{'9' * 5000}:1"},
+    ) == {"ok": False, "error": "denied_identity_config_invalid"}
+
+
 def test_reads_and_writes_refuse_a_fifo(repo: Path):
     os.mkfifo(repo / "src" / "pipe", 0o600)
 
