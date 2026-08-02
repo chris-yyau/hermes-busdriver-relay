@@ -419,7 +419,7 @@ TRUSTED_EXECUTABLE_SOURCES = {
 # being the candidate's to choose.
 MAX_PACKAGE_ENTRY_BYTES = 256 * 1024 * 1024
 FS_BROKER = ROOT / "adapters" / "pi" / "busdriver-fs-broker.py"
-TRUSTED_FS_BROKER_SHA256 = '31ab9fab3b7a5913cac1f9e79d76f3f32a27b64ca6c4693f42a965cf0a110805'
+TRUSTED_FS_BROKER_SHA256 = '69dadefbc1169e46c6df4e71ccb147a55a77b4ec80540532f3a3c7471baf87f7'
 # The adapter's filesystem broker needs openat(2), which Node does not expose, so it runs under a
 # Python the adapter never chooses: this path is pinned here, not resolved from PATH or argv.
 TRUSTED_BROKER_PYTHON = Path("/usr/bin/python3")

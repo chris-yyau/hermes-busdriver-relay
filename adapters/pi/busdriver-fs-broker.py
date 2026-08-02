@@ -157,6 +157,7 @@ GIT_VERBS = {
     "diff_stat": (False, ("diff", "--no-ext-diff", "--no-textconv", "--stat")),
     "log": (False, ("log", "--oneline")),
 }
+GIT_CONTENT_VERBS = frozenset({"diff", "diff_stat"})
 
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
@@ -1354,6 +1355,12 @@ def op_git(request, root: Root):
     entry = GIT_VERBS.get(request["verb"])
     if entry is None:
         raise fail("git_verb_rejected")
+    # Git opens worktree files itself, outside the broker's descriptor-bound regular-file check.
+    # Pre-scanning paths cannot fix that under the same-UID threat model: a denied inode can be
+    # hardlinked into the tree after the scan and before Git opens it. Refuse observations that
+    # return file content (or content-derived statistics) whenever a denied identity exists.
+    if request["verb"] in GIT_CONTENT_VERBS and denied_identities():
+        raise fail("credential_source_refused")
     needs_rel, _template = entry
     rel = request["rel"]
     if needs_rel:

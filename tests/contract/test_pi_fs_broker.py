@@ -303,6 +303,29 @@ def test_credential_source_identity_is_refused_for_read_and_write(repo: Path):
     assert target.read_text() == "hello\n"
 
 
+@pytest.mark.parametrize("verb", ["diff", "diff_stat"])
+def test_credential_source_identity_is_refused_for_content_producing_git(
+    repo: Path, tmp_path: Path, verb: str
+):
+    git_repo(repo)
+    target = repo / "src" / "app.txt"
+    credential = tmp_path / "auth.json"
+    secret = '{"refresh":"never-cross-git"}\n'
+    credential.write_text(secret)
+    target.unlink()
+    os.link(credential, target)
+    st = credential.stat()
+
+    response = call(
+        {"op": "git", "root": "repo", "verb": verb, "rel": ""},
+        repo=repo,
+        env={"BD_BROKER_DENIED_IDENTITIES": f"{st.st_dev}:{st.st_ino}"},
+    )
+
+    assert response == {"ok": False, "error": "credential_source_refused"}
+    assert secret.strip() not in json.dumps(response)
+
+
 @pytest.mark.parametrize("configured", ["malformed", ",", "1:2,", ",1:2", "1:2,,3:4"])
 def test_malformed_denied_identity_fails_broker_startup_closed(repo: Path, configured: str):
     assert call(
